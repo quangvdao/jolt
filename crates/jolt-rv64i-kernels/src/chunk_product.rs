@@ -233,6 +233,7 @@ enum State {
     Round(usize),
     LastBind,
     Finished((F128, Vec<F128>)),
+    ZeroRound(F128),
     Failed,
 }
 
@@ -360,7 +361,7 @@ impl ChunkProductCore {
                 WeightState::Dense { table, .. } => table[0],
                 WeightState::Terms { .. } => ZERO,
             };
-            State::Finished((w, columns.final_values()))
+            State::ZeroRound(w)
         } else {
             State::Round(0)
         };
@@ -378,6 +379,7 @@ impl ChunkProductCore {
     pub fn final_values(&self) -> Result<(F128, Vec<F128>), ChunkProductError> {
         match &self.state {
             State::Finished(values) => Ok(values.clone()),
+            State::ZeroRound(weight) => Ok((*weight, self.columns.final_values())),
             _ => Err(ChunkProductError::Unfinished),
         }
     }

@@ -6,13 +6,16 @@
 )]
 
 use jolt_field::{Field, F128};
+use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::round::RoundError;
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, ValidatedTrace};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PresentGroup, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, BooleanHypercube, ClearProof, ClearSumcheckRecorder,
@@ -88,7 +91,7 @@ impl CycleSource for UniformColumns {
     }
 }
 
-fn columns(log_t: usize, d: usize, top_bits: usize, missing: bool) -> DigitColumns<UniformColumns> {
+fn columns(log_t: usize, d: usize, top_bits: usize, missing: bool) -> PresentGroup {
     let source = Arc::new(UniformColumns {
         trace: SyntheticTrace::new(SynthProfile::UniformDigits, log_t, 1, 0xc8_0011).unwrap(),
         columns: d,
@@ -96,11 +99,17 @@ fn columns(log_t: usize, d: usize, top_bits: usize, missing: bool) -> DigitColum
         missing,
         cycles_override: None,
     });
-    DigitColumns::from_validated(
-        Arc::new(ValidatedTrace::new(source).unwrap()),
-        (0..d).collect(),
+    ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![(0..d).collect()],
+            optional: vec![],
+        },
     )
     .unwrap()
+    .1
+    .present
+    .remove(0)
 }
 
 fn equality(point: &[F128], index: usize) -> F128 {
@@ -189,7 +198,7 @@ struct Fixture {
 
 impl Fixture {
     fn prove(
-        columns: DigitColumns<UniformColumns>,
+        columns: PresentGroup,
         points: Vec<Vec<F128>>,
         terms: &[ChunkWeightTerm],
         eq_terms: bool,
@@ -398,7 +407,7 @@ fn dense_chunk_rounds_final_values_and_proof_match_defining_sum() {
                 for count in [1, 2, 5] {
                     let source = columns(log_t, d, top_bits, false);
                     let points = (0..d)
-                        .map(|column| random_point(source.source().bits(column), &mut rng))
+                        .map(|column| random_point(source.widths()[column], &mut rng))
                         .collect();
                     let terms = terms(log_t, count, true, &mut rng);
                     let fixture = Fixture::prove(source, points, &terms, false, false).unwrap();
@@ -419,7 +428,7 @@ fn eq_terms_rounds_final_values_and_proof_match_defining_sum_including_one_colum
                 for count in [1, 2] {
                     let source = columns(log_t, d, top_bits, false);
                     let points = (0..d)
-                        .map(|column| random_point(source.source().bits(column), &mut rng))
+                        .map(|column| random_point(source.widths()[column], &mut rng))
                         .collect();
                     let terms = terms(log_t, count, false, &mut rng);
                     let fixture = Fixture::prove(source, points, &terms, true, false).unwrap();
@@ -445,7 +454,7 @@ fn general_eq_term_counts_match_defining_rounds_final_values_and_proof() {
     ] {
         let source = columns(log_t, d, 2, false);
         let points = (0..d)
-            .map(|column| random_point(source.source().bits(column), &mut rng))
+            .map(|column| random_point(source.widths()[column], &mut rng))
             .collect();
         let terms = terms(log_t, count, false, &mut rng);
         let fixture = Fixture::prove(source, points, &terms, true, false).unwrap();
@@ -459,7 +468,7 @@ fn general_eq_terms_cross_cache_tiles_and_cycle_chunks() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0006);
     let source = columns(17, 2, 2, false);
     let points = (0..2)
-        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .map(|column| random_point(source.widths()[column], &mut rng))
         .collect();
     let terms = terms(17, 3, false, &mut rng);
     let fixture = Fixture::prove(source, points, &terms, true, false).unwrap();
@@ -472,7 +481,7 @@ fn dense_chunk_product_crosses_cycle_chunks() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0007);
     let source = columns(14, 2, 1, false);
     let points = (0..2)
-        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .map(|column| random_point(source.widths()[column], &mut rng))
         .collect();
     let terms = terms(14, 2, true, &mut rng);
     let fixture = Fixture::prove(source, points, &terms, false, false).unwrap();
@@ -488,7 +497,7 @@ fn small_cycle_domains_and_zero_weights_match_defining_sum() {
             for (eq_terms, zero_coefficients) in [(false, 0), (true, 0), (false, 2), (true, 1)] {
                 let source = columns(log_t, d, 1, false);
                 let points = (0..d)
-                    .map(|column| random_point(source.source().bits(column), &mut rng))
+                    .map(|column| random_point(source.widths()[column], &mut rng))
                     .collect();
                 let mut terms = terms(log_t, 2, false, &mut rng);
                 for term in terms.iter_mut().take(zero_coefficients) {
@@ -510,7 +519,7 @@ fn later_zero_equality_prefix_matches_defining_sum() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0009);
     let source = columns(4, 2, 2, false);
     let points = (0..2)
-        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .map(|column| random_point(source.widths()[column], &mut rng))
         .collect::<Vec<_>>();
     let term_point = vec![F128::from_raw(2), ZERO, ONE, ZERO];
     let term = ChunkWeightTerm::Eq {
@@ -700,13 +709,22 @@ fn term_point_rejects_extra_coordinate_in_builder_and_core() {
 
 #[test]
 fn missing_digit_is_rejected_with_column_and_cycle() {
+    let source = Arc::new(UniformColumns {
+        trace: SyntheticTrace::new(SynthProfile::UniformDigits, 3, 1, 0xc8_0011).unwrap(),
+        columns: 1,
+        top_bits: 4,
+        missing: true,
+        cycles_override: None,
+    });
     assert!(matches!(
-        ChunkProductCore::new(
-            columns(3, 1, 4, true),
-            vec![vec![ONE; 4]],
-            ChunkWeight::Dense(vec![ONE; 8])
+        ValidatedTrace::prepare(
+            source,
+            PrepareRequest {
+                present: vec![vec![0]],
+                optional: vec![],
+            }
         ),
-        Err(ChunkProductError::MissingDigit {
+        Err(SourceError::MissingDigit {
             column: 0,
             cycle: 3
         })
@@ -724,7 +742,7 @@ fn log_size_rejects_an_unrepresentable_table() {
 }
 
 #[test]
-fn column_width_rejects_oversized_tables_on_one_cycle() {
+fn present_group_width_rejects_oversized_tables_on_one_cycle() {
     for bits in [9, 59] {
         let source = Arc::new(UniformColumns {
             trace: SyntheticTrace::new(SynthProfile::UniformDigits, 1, 1, 0xc8_0011).unwrap(),
@@ -733,16 +751,12 @@ fn column_width_rejects_oversized_tables_on_one_cycle() {
             missing: false,
             cycles_override: Some(1),
         });
-        let validated = Arc::new(ValidatedTrace::new(source).unwrap());
-        let selected = DigitColumns::from_validated(validated, vec![0]).unwrap();
-        assert_eq!(selected.index(0, 0), Some(0));
         assert!(matches!(
-            ChunkProductCore::new(
-                selected,
-                vec![vec![ZERO; bits]],
-                ChunkWeight::Dense(vec![ONE])
-            ),
-            Err(ChunkProductError::ColumnWidth { column: 0, bits: rejected }) if rejected == bits
+            ValidatedTrace::prepare(source, PrepareRequest {
+                present: vec![vec![0]],
+                optional: vec![],
+            }),
+            Err(SourceError::GroupWidth { column: 0, bits: rejected, max_bits: 8 }) if rejected == bits
         ));
     }
 }
@@ -756,8 +770,17 @@ fn round_wrapper_reports_empty_eq_point() {
         missing: false,
         cycles_override: Some(1),
     });
-    let validated = Arc::new(ValidatedTrace::new(source).unwrap());
-    let selected = DigitColumns::from_validated(validated, vec![0]).unwrap();
+    let selected = ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![vec![0]],
+            optional: vec![],
+        },
+    )
+    .unwrap()
+    .1
+    .present
+    .remove(0);
     assert!(matches!(
         ChunkProductCore::new(
             selected,

@@ -6,7 +6,7 @@
 
 use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_kernels::source::{
-    CycleSource, DigitColumns, LaneSource, SourceError, ValidatedTrace,
+    CycleSource, LaneSource, PrepareRequest, SourceError, ValidatedTrace,
 };
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rayon::ThreadPoolBuilder;
@@ -164,20 +164,6 @@ fn malformed_dimensions_columns_and_indices_are_total() {
         Err(SynthError::BytecodeRows { rows: 3 })
     ));
     let trace = Arc::new(SyntheticTrace::new(SynthProfile::Local, 4, 16, 0).unwrap());
-    assert!(matches!(
-        DigitColumns::new(Arc::clone(&trace), vec![21]),
-        Err(SourceError::Column { column: 21, .. })
-    ));
-    let checked = Arc::new(ValidatedTrace::new(Arc::clone(&trace)).unwrap());
-    let selected = DigitColumns::from_validated(checked, vec![0, 10, 12, 19]).unwrap();
-    assert_eq!(selected.columns(), &[0, 10, 12, 19]);
-    assert_eq!(selected.index_bound(0), Some(16));
-    assert_eq!(selected.index_bound(1), Some(8));
-    assert_eq!(selected.index_bound(2), Some(64));
-    assert_eq!(selected.index_bound(3), Some(1));
-    assert_eq!(selected.index_bound(4), None);
-    assert_eq!(selected.index(4, 0), None);
-    assert_eq!(selected.index(0, 16), None);
     assert_eq!(trace.trace_word(6, 0), 0);
     assert_eq!(trace.bytecode_word(4, 0), 0);
     assert_eq!(trace.row_digit(0, 16), None);
@@ -236,7 +222,11 @@ impl CycleSource for SourceFixture {
         0
     }
     fn bytecode_index(&self, cycle: usize) -> usize {
-        self.indices.get(cycle).copied().unwrap_or(0)
+        if cycle < self.cycles {
+            self.indices[cycle % self.indices.len()]
+        } else {
+            0
+        }
     }
     fn digit_columns(&self) -> usize {
         self.columns
@@ -251,8 +241,7 @@ impl CycleSource for SourceFixture {
         let _previous = self.digit_reads.fetch_add(1, Ordering::Relaxed);
         self.digits
             .get(column)
-            .and_then(|values| values.get(cycle))
-            .copied()
+            .and_then(|values| (cycle < self.cycles).then(|| values[cycle % values.len()]))
             .flatten()
     }
     fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
@@ -302,7 +291,7 @@ fn source_validation_rejects_each_malformed_source_contract() {
     let mut source = SourceFixture::new();
     source.digits[1][3] = Some(4);
     assert!(matches!(
-        DigitColumns::new(Arc::new(source), vec![0]),
+        ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::Digit {
             column: 1,
             cycle: 3,
@@ -333,32 +322,142 @@ fn source_validation_rejects_each_malformed_source_contract() {
             row: 0
         })
     ));
-
-    let validated = Arc::new(ValidatedTrace::new(Arc::new(SourceFixture::new())).unwrap());
-    assert!(matches!(
-        DigitColumns::from_validated(validated, vec![2]),
-        Err(SourceError::Column {
-            column: 2,
-            columns: 2
-        })
-    ));
 }
 
 #[test]
-fn validated_source_is_scanned_once_and_reused_by_column_selections() {
-    let source = Arc::new(SourceFixture::new());
-    let validated = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
-    assert!(Arc::ptr_eq(validated.source(), &source));
-    assert_eq!(source.digit_reads.load(Ordering::Relaxed), 8);
-    assert_eq!(source.row_reads.load(Ordering::Relaxed), 2);
-    let first = DigitColumns::from_validated(Arc::clone(&validated), vec![0, 1]).unwrap();
-    let second = DigitColumns::from_validated(validated, vec![1, 0, 1]).unwrap();
-    assert_eq!(source.digit_reads.load(Ordering::Relaxed), 8);
-    assert_eq!(source.row_reads.load(Ordering::Relaxed), 2);
-    assert_eq!(first.cycles(), 4);
-    assert_eq!(second.num_polys(), 3);
-    assert_eq!(first.index_bound(0), Some(4));
-    assert_eq!(second.index(0, 1), None);
+fn preparation_reads_each_digit_once_for_repeated_group_columns() {
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for cycles in [4, 1 << 14] {
+            pool.install(|| {
+                let mut fixture = SourceFixture::new();
+                fixture.cycles = cycles;
+                let source = Arc::new(fixture);
+                let (validated, groups) = ValidatedTrace::prepare(
+                    Arc::clone(&source),
+                    PrepareRequest {
+                        present: vec![vec![0], vec![0, 0]],
+                        optional: vec![vec![1, 0, 1]],
+                    },
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(validated.source(), &source));
+                assert_eq!(source.digit_reads.load(Ordering::Relaxed), 2 * cycles);
+                assert_eq!(source.row_reads.load(Ordering::Relaxed), 2);
+                assert_eq!(groups.present.len(), 2);
+                assert_eq!(groups.present[0].columns(), &[0]);
+                assert_eq!(groups.present[0].widths(), &[2]);
+                assert_eq!(groups.present[0].cycles(), cycles);
+                assert_eq!(groups.present[0].bytes(), [0, 1, 0, 1].repeat(cycles / 4));
+                assert_eq!(groups.present[1].columns(), &[0, 0]);
+                assert_eq!(groups.present[1].widths(), &[2, 2]);
+                assert_eq!(groups.present[1].cycles(), cycles);
+                assert_eq!(
+                    groups.present[1].bytes(),
+                    [0, 0, 1, 1, 0, 0, 1, 1].repeat(cycles / 4)
+                );
+                assert_eq!(groups.optional[0].columns(), &[1, 0, 1]);
+                assert_eq!(groups.optional[0].widths(), &[2, 2, 2]);
+                assert_eq!(groups.optional[0].cycles(), cycles);
+                assert_eq!(
+                    groups.optional[0].bytes(),
+                    [3, 1, 3, 0, 2, 0, 4, 1, 4, 2, 2, 2].repeat(cycles / 4)
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn preparation_rejects_request_columns_and_widths_before_digit_reads() {
+    for (request, expected) in [
+        (
+            PrepareRequest {
+                present: vec![vec![2]],
+                optional: vec![],
+            },
+            SourceError::Column {
+                column: 2,
+                columns: 2,
+            },
+        ),
+        (
+            PrepareRequest {
+                present: vec![],
+                optional: vec![vec![2]],
+            },
+            SourceError::Column {
+                column: 2,
+                columns: 2,
+            },
+        ),
+        (
+            PrepareRequest {
+                present: vec![vec![1]],
+                optional: vec![],
+            },
+            SourceError::GroupWidth {
+                column: 1,
+                bits: 9,
+                max_bits: 8,
+            },
+        ),
+        (
+            PrepareRequest {
+                present: vec![],
+                optional: vec![vec![1]],
+            },
+            SourceError::GroupWidth {
+                column: 1,
+                bits: 9,
+                max_bits: 7,
+            },
+        ),
+    ] {
+        let mut fixture = SourceFixture::new();
+        fixture.widths[1] = 9;
+        let source = Arc::new(fixture);
+        assert_eq!(
+            ValidatedTrace::prepare(Arc::clone(&source), request).err(),
+            Some(expected)
+        );
+        assert_eq!(source.digit_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(source.row_reads.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn preparation_encodes_full_width_present_and_optional_bytes() {
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut source = SourceFixture::new();
+            source.widths = [8, 7];
+            source.row_digits = [Some(255), Some(0)];
+            source.digits = [
+                [Some(255), Some(0), Some(255), Some(0)],
+                [Some(127), None, Some(0), Some(1)],
+            ];
+            let (_, groups) = ValidatedTrace::prepare(
+                Arc::new(source),
+                PrepareRequest {
+                    present: vec![vec![0]],
+                    optional: vec![vec![1]],
+                },
+            )
+            .unwrap();
+            assert_eq!(groups.present[0].bytes(), &[255, 0, 255, 0]);
+            assert_eq!(groups.present[0].widths(), &[8]);
+            assert_eq!(groups.optional[0].bytes(), &[128, 0, 1, 2]);
+            assert_eq!(groups.optional[0].widths(), &[7]);
+        });
+    }
 }
 
 #[test]
@@ -391,6 +490,8 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
 struct OrderedFaults {
     row_fault: bool,
     same_cycle_row_fault: bool,
+    same_column_range_fault: bool,
+    invalid_index: bool,
 }
 
 impl CycleSource for OrderedFaults {
@@ -413,7 +514,9 @@ impl CycleSource for OrderedFaults {
         0
     }
     fn bytecode_index(&self, cycle: usize) -> usize {
-        if cycle < self.cycles() {
+        if self.invalid_index && cycle == 8190 {
+            self.bytecode_rows()
+        } else if cycle < self.cycles() {
             cycle & ((1 << 13) - 1)
         } else {
             0
@@ -437,6 +540,7 @@ impl CycleSource for OrderedFaults {
             return None;
         }
         match (column, cycle) {
+            (0, 8190) if self.same_column_range_fault => Some(4),
             (0, 8190) if self.same_cycle_row_fault => Some(1),
             (0, 8192) => Some(1),
             (1, 8190) => Some(4),
@@ -471,6 +575,8 @@ fn parallel_validation_returns_the_earliest_row_or_cycle_fault_on_every_pool() {
             let source = Arc::new(OrderedFaults {
                 row_fault: false,
                 same_cycle_row_fault: false,
+                same_column_range_fault: false,
+                invalid_index: false,
             });
             assert_eq!(
                 ValidatedTrace::new(source).err(),
@@ -484,6 +590,8 @@ fn parallel_validation_returns_the_earliest_row_or_cycle_fault_on_every_pool() {
             let source = Arc::new(OrderedFaults {
                 row_fault: true,
                 same_cycle_row_fault: false,
+                same_column_range_fault: false,
+                invalid_index: false,
             });
             assert_eq!(
                 ValidatedTrace::new(source).err(),
@@ -497,6 +605,8 @@ fn parallel_validation_returns_the_earliest_row_or_cycle_fault_on_every_pool() {
             let source = Arc::new(OrderedFaults {
                 row_fault: false,
                 same_cycle_row_fault: true,
+                same_column_range_fault: false,
+                invalid_index: false,
             });
             assert_eq!(
                 ValidatedTrace::new(source).err(),
@@ -504,6 +614,152 @@ fn parallel_validation_returns_the_earliest_row_or_cycle_fault_on_every_pool() {
                     column: 0,
                     cycle: 8190,
                     row: 8190,
+                })
+            );
+            let source = Arc::new(OrderedFaults {
+                row_fault: false,
+                same_cycle_row_fault: false,
+                same_column_range_fault: true,
+                invalid_index: false,
+            });
+            assert_eq!(
+                ValidatedTrace::new(source).err(),
+                Some(SourceError::Digit {
+                    column: 0,
+                    cycle: 8190,
+                    digit: 4,
+                    bound: 4,
+                })
+            );
+            let source = Arc::new(OrderedFaults {
+                row_fault: false,
+                same_cycle_row_fault: true,
+                same_column_range_fault: false,
+                invalid_index: true,
+            });
+            assert_eq!(
+                ValidatedTrace::new(source).err(),
+                Some(SourceError::BytecodeIndex {
+                    cycle: 8190,
+                    row: 8192,
+                    rows: 8192,
+                })
+            );
+        });
+    }
+}
+
+struct MissingFaults {
+    range_cycle: usize,
+}
+
+impl CycleSource for MissingFaults {
+    fn cycles(&self) -> usize {
+        1 << 14
+    }
+    fn trace_words(&self) -> usize {
+        0
+    }
+    fn trace_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        1
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, _: usize) -> usize {
+        0
+    }
+    fn digit_columns(&self) -> usize {
+        2
+    }
+    fn bits(&self, _: usize) -> usize {
+        2
+    }
+    fn by_row(&self, _: usize) -> bool {
+        false
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        match (column, cycle) {
+            (0, cycle) if cycle == self.range_cycle => Some(4),
+            (1, 8190) => None,
+            (0 | 1, cycle) if cycle < self.cycles() => Some(0),
+            _ => None,
+        }
+    }
+    fn row_digit(&self, _: usize, _: usize) -> Option<usize> {
+        None
+    }
+}
+
+#[test]
+fn missing_digit_rank_preserves_cycle_column_and_chunk_order_on_every_pool() {
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for (range_cycle, expected) in [
+                (
+                    8189,
+                    SourceError::Digit {
+                        column: 0,
+                        cycle: 8189,
+                        digit: 4,
+                        bound: 4,
+                    },
+                ),
+                (
+                    8190,
+                    SourceError::Digit {
+                        column: 0,
+                        cycle: 8190,
+                        digit: 4,
+                        bound: 4,
+                    },
+                ),
+                (
+                    8192,
+                    SourceError::MissingDigit {
+                        column: 1,
+                        cycle: 8190,
+                    },
+                ),
+            ] {
+                let source = Arc::new(MissingFaults { range_cycle });
+                assert_eq!(
+                    ValidatedTrace::prepare(
+                        source,
+                        PrepareRequest {
+                            present: vec![vec![1]],
+                            optional: vec![],
+                        }
+                    )
+                    .err(),
+                    Some(expected)
+                );
+            }
+            let mut source = SourceFixture::new();
+            source.digits[0][2] = None;
+            assert_eq!(
+                ValidatedTrace::prepare(
+                    Arc::new(source),
+                    PrepareRequest {
+                        present: vec![vec![0]],
+                        optional: vec![],
+                    }
+                )
+                .err(),
+                Some(SourceError::RowDigit {
+                    column: 0,
+                    cycle: 2,
+                    row: 0
                 })
             );
         });

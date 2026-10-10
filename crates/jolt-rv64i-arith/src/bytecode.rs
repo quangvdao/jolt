@@ -356,6 +356,14 @@ impl Bytecode {
         &self.rows
     }
 
+    /// Valid rows with their original table indices, excluding invalid inputs
+    /// and padding. Iteration order is unspecified.
+    pub fn valid_rows(&self) -> impl Iterator<Item = (usize, &BytecodeRow)> + '_ {
+        self.pc_indices
+            .values()
+            .filter_map(|&index| self.rows.get(index).map(|row| (index, row)))
+    }
+
     /// Exponent from the supplied layout.
     #[inline]
     pub fn log_K(&self) -> usize {

@@ -23,7 +23,7 @@ pub struct RowEvaluations<F> {
 impl RowMatrices {
     pub fn new(layout: &Layout) -> Self {
         let rows = RowSystem::new(layout);
-        let f128_row_variables = Self::block_variables(&rows);
+        let f128_row_variables = Self::f128_row_variables_for(layout);
         let matrices = rows.to_matrices();
         Self {
             matrices,
@@ -33,13 +33,7 @@ impl RowMatrices {
 
     /// Returns the extension row dimension without materializing matrices.
     pub fn f128_row_variables_for(layout: &Layout) -> usize {
-        Self::block_variables(&RowSystem::new(layout))
-    }
-
-    fn block_variables(rows: &RowSystem) -> usize {
-        (rows.num_rows() - RowSystem::F2_ROWS)
-            .next_power_of_two()
-            .ilog2() as usize
+        RowSystem::f128_row_variables_for(layout)
     }
 
     pub fn matrices(&self) -> &ConstraintMatrices<F128> {

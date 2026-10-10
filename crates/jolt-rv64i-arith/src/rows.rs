@@ -306,6 +306,12 @@ impl RowSystem {
     /// Rows 0–129 have coefficients and evaluations in `F_2`.
     pub const F2_ROWS: usize = 130;
 
+    /// Dimension of the padded extension-field row block, without constructing
+    /// the six fixed extension equations or one equation per layout chunk.
+    pub fn f128_row_variables_for(layout: &Layout) -> usize {
+        (6 + layout.chunks().count()).next_power_of_two().ilog2() as usize
+    }
+
     /// Constructs `136 + ceil(log_K_bytecode/4) + ceil(log_K_ram/4) + 2`
     /// equations; stored digits k use coefficients `1 + x^(m·k)`, m=1,2,3.
     pub fn new(layout: &Layout) -> Self {

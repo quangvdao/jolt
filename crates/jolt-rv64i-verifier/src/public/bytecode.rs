@@ -234,12 +234,7 @@ impl<F: JoltField> BytecodeWeights<F> {
         let (low_table, high_table) = points::split_eq_tables(a_bc)?;
         let mask = (1_usize << split) - 1;
         let mut sums = [F::zero(); 4];
-        for (index, row) in bytecode
-            .rows()
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.variant.is_some())
-        {
+        for (index, row) in bytecode.valid_rows() {
             let weight = Self::selector(&low_table, index & mask)?
                 * Self::selector(&high_table, index >> split)?;
             for (sum, value) in sums.iter_mut().zip(self.row_values(row)?) {

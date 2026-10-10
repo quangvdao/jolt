@@ -8,7 +8,8 @@ RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-prover \
   --log-t 20,22 --threads 1,12 --samples 5 inventory
 ```
 
-The existing runner parses size, pool, samples and inventory options. The case
+The existing runner owns configuration, sampling, phase timing, allocation
+intervals and summaries, and parses size, pool, samples and inventory options. The case
 filter is `witness_pipeline/pipeline/<log_t>/<threads>`. The existing counting
 allocator records requested bytes, including Arc headers, rather than resident
 pages. Each phase's peak excludes storage already resident at its start;
@@ -85,6 +86,8 @@ No recorder overflow occurred.
 | Absent operands and RAM allocation failure | `absent_operands_and_nonaccess_ram_facts_do_not_replace_replayed_reads`; `constructors_return_a_typed_error_for_unallocatable_ram` |
 | Decoded rows and counts against committed ground truth | `decoded_rows_match_committed_rows_in_both_constructors` |
 | Validated digits, byte groups, shared ownership | `source_matches_committed_columns_words_and_weighted_sum`; `shared_source_enforces_group_ownership_and_shared_lifetimes` |
+| Session rejection and decoded dimensions | `prepare_rejects_taken_members_and_missing_selectors`; `both_registries_reject_mismatched_decoded_length` |
+| Protocol bytes and statement-failure behavior stay intact | `mixed_registry_proofs_match_reference`; `optimized_corpus_proofs_match_reference`; `optimized_rejects_the_same_public_statement_failures`; `counting_loop_proof_has_the_frozen_encoding_and_rejects_malformed_envelopes` |
 | Scatter against direct algebraic sums | `scatter_equals_cycle_order_summation_in_small_and_large_domains`; `scatter_fused_chunk_emission_equals_cycle_summation` |
 | Whole-phase performance retention | Alternating saved release executables, same fixture and native flags; results below |
 
@@ -141,7 +144,7 @@ these results establish loaded-machine improvement, not a quiet-machine gate.
 | 22 | 1 | 15.169 | 63.623 | 13.982 | 58.643 | 7.83% |
 | 22 | 12 | 4.850 | 20.344 | 3.567 | 14.960 | 26.46% |
 
-Final phase medians, shown as ns/cycle / ms, from the three candidate blocks:
+Retained candidate phase medians, shown as ns/cycle / ms, from those three blocks:
 
 | Phase | 20 / 1 thread | 20 / 12 threads | 22 / 1 thread | 22 / 12 threads |
 |---|---|---|---|---|
@@ -211,4 +214,32 @@ replace the following stale statements:
 6. The 918 ms budget paragraph conflicts with the task's 673 ms target:
    “The end-to-end target is 673 ms at 2^22 cycles on 12 threads; allocate costs
    using whole-phase measurements and do not double-count constructor work.”
-   The corresponding kernels-spec budget paragraph also still states 918 ms.
+The corresponding kernels-spec budget paragraph also still states 918 ms.
+
+## Final runner integration probe
+
+The timing loop was moved into the existing support runner without changing
+phase boundaries or ordering. A five-sample inventory run of that final entry
+on both sizes and pools started at load 26.08/26.72/21.87 and ended at
+25.19/26.52/21.83. Its medians, ns/cycle / ms, were:
+
+| Phase | 20 / 1 thread | 20 / 12 threads | 22 / 1 thread | 22 / 12 threads |
+|---|---|---|---|---|
+| adapt | 4.217 / 4.422 | 2.090 / 2.191 | 6.764 / 28.370 | 1.332 / 5.585 |
+| construct | 37.629 / 39.457 | 25.227 / 26.452 | 37.348 / 156.648 | 22.728 / 95.330 |
+| validate (diagnostic) | 8.823 / 9.252 | 3.648 / 3.825 | 8.399 / 35.229 | 2.227 / 9.341 |
+| prepare | 13.350 / 13.998 | 5.267 / 5.523 | 12.605 / 52.869 | 3.472 / 14.562 |
+| scatter | 3.597 / 3.772 | 1.195 / 1.253 | 3.377 / 14.164 | 0.996 / 4.176 |
+| preparation + scatter | 17.540 / 18.393 | 6.409 / 6.720 | 16.893 / 70.854 | 4.643 / 19.472 |
+| production total | 59.003 / 61.870 | 33.177 / 34.789 | 61.005 / 255.872 | 28.909 / 121.251 |
+
+The run recorded 220 large-allocation entries without overflow. Scatter's
+maximum peak at log T 20 was 5,177,344 bytes (twelve simultaneous 16 KiB
+caches); log T 22's scatter maximum remained 20,119,552 bytes. The cache size
+per Rayon job is bounded by chunk length, not T.
+
+An `adapters/source` inventory smoke on all four configurations followed,
+ending at load 24.14/26.28/21.77. All four inventories had zero unmatched
+allocations and zero overflow. Its existing source thresholds were exceeded
+on this loaded machine; the smoke checks compatibility and allocation laws,
+and does not establish a quiet-machine performance gate.

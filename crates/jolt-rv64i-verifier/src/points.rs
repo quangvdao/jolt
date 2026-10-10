@@ -7,7 +7,7 @@
 //! calling the polynomial layer's infallible evaluators.
 
 use jolt_field::JoltField;
-use jolt_poly::{EqPlusOnePolynomial, EqPolynomial, LtPolynomial};
+use jolt_poly::{EqPlusOnePolynomial, EqPolynomial};
 use jolt_rv64i_arith::Chunk;
 use thiserror::Error;
 
@@ -32,7 +32,7 @@ pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    Ok(EqPolynomial::mle(x, y))
+    Ok(x.iter().zip(y).map(|(x, y)| F::one() + *x + *y).product())
 }
 
 pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsError> {
@@ -69,9 +69,15 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    let x_high: Vec<F> = x.iter().rev().copied().collect();
-    let y_high: Vec<F> = y.iter().rev().copied().collect();
-    Ok(LtPolynomial::evaluate(&x_high, &y_high))
+    Ok(x.iter().zip(y).fold(F::zero(), |less, (x, y)| {
+        if y.is_zero() {
+            (F::one() + *x) * less
+        } else if *y == F::one() {
+            F::one() + *x + *x * less
+        } else {
+            (F::one() + *x) * *y + (F::one() + *x + *y) * less
+        }
+    }))
 }
 
 pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
@@ -84,16 +90,43 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
-pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
-    if point.len() != 6 {
-        return Err(PointsError::Dimension {
-            expected: 6,
-            actual: point.len(),
-        });
+/// A word lift against one reusable 64-entry bit equality table.
+/// Evaluating a word sums the weights of its set bits without multiplying.
+#[derive(Clone)]
+pub struct WordLift<F: JoltField> {
+    weights: [F; 64],
+}
+
+impl<F: JoltField> WordLift<F> {
+    pub fn new(point: &[F]) -> Result<Self, PointsError> {
+        if point.len() != 6 {
+            return Err(PointsError::Dimension {
+                expected: 6,
+                actual: point.len(),
+            });
+        }
+        let weights =
+            eq_table(point)?
+                .try_into()
+                .map_err(|values: Vec<F>| PointsError::Dimension {
+                    expected: 64,
+                    actual: values.len(),
+                })?;
+        Ok(Self { weights })
     }
-    (0..64)
-        .filter(|bit| word & (1_u64 << bit) != 0)
-        .try_fold(F::zero(), |sum, bit| Ok(sum + eq_index(point, bit)?))
+
+    pub fn evaluate(&self, word: u64) -> F {
+        self.weights
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| word & (1_u64 << bit) != 0)
+            .map(|(_, weight)| *weight)
+            .sum()
+    }
+}
+
+pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
+    Ok(WordLift::new(point)?.evaluate(word))
 }
 
 pub fn chunk<F: JoltField>(
@@ -247,10 +280,9 @@ mod tests {
         let point = seeded(&mut seed, 6);
         let word = 0xf023_51a5_4802_7feb;
         let table = (0..64).map(|i| F128::from_u64((word >> i) & 1)).collect();
-        assert_eq!(
-            lift(word, &point).unwrap(),
-            Polynomial::new(table).evaluate(&to_high_to_low(&point))
-        );
+        let expected = Polynomial::new(table).evaluate(&to_high_to_low(&point));
+        assert_eq!(lift(word, &point).unwrap(), expected);
+        assert_eq!(WordLift::new(&point).unwrap().evaluate(word), expected);
     }
 
     #[test]

@@ -9,13 +9,13 @@
 
 ## Summary
 
-The front end of the binary-field RV64I experiment (`specs/rv64i-binary-protocol.md`) commits to one table of bits, `Bits`, with 256 columns and `T = 2^t` rows, and at the end asks for one multilinear evaluation of it at a point with coordinates in `F128`. Until now the only implementation of that contract is `TransparentBits`, a test stand-in that sends the table. This spec fixes the production scheme behind the same two traits, `BitsCommitmentScheme` and `BitsCommitmentProver`, with no change to either.
+The front end of the binary-field RV64I experiment (`specs/rv64i-binary-protocol.md`) commits to one table of bits, `Bits`, with 256 columns and `T = 2^t` rows, and at the end asks for one multilinear evaluation of it at a point with coordinates in `F128`. The only other implementation of that contract is `TransparentBits`, a test stand-in that sends the table. This spec fixes the production scheme behind the same two traits, `BitsCommitmentScheme` and `BitsCommitmentProver`, with no change to either.
 
-The scheme is hash-based. The bits are packed 64 to a symbol of `F64`, the `2^(t+2)` symbols are encoded with an interleaved Reed-Solomon code on an additive domain of `F64` and committed with a Merkle tree, and the commitment carries one out-of-domain evaluation of every lane of the code so that after the commit phase one table is bound and not a list of tables. The opening is a WHIR recursion over the cubic extension `F192` of `F64`, analysed in the list-decoding regime up to the Johnson bound with proven proximity gaps and no conjecture. The evaluation claim lives in `F128`, which is not a subfield of `F192`; a tensor reduction (ring switching) of shape 64 by 128 turns the 64 partial evaluations that the front end already publishes into one inner-product claim over `F192`. No element of `F128` is ever multiplied inside `F192`, so the missing embedding costs nothing.
+The scheme is hash-based. The opening field is `F192`, the cubic extension `F64[y]/(y^3 + y + 1)` of `F64`. The bits are packed 128 to a symbol: two consecutive 64-bit words of a row are the two coefficients of an element of the subspace `V = F64 + y·F64` of `F192`. The `2^(t+1)` symbols are encoded with an interleaved Reed-Solomon code on an additive domain of `F64`, which acts on `V` coefficient by coefficient, so that the level-0 codeword consists of words of `F64` and a symbol is 16 bytes. The codeword is committed with a Merkle tree, and the commitment carries one out-of-domain evaluation of every lane of the code, so that after the commit phase at most one table is selected and not a list of tables. The opening is a WHIR recursion over `F192`, analysed in the list-decoding regime up to the Johnson bound. The evaluation claim lives in `F128`, which is not a subfield of `F192`; a tensor reduction (ring switching) of shape 128 by 128 turns the 128 partial evaluations that the front end already publishes into one inner-product claim over `F192`. No element of `F128` is ever multiplied inside `F192`, so the missing embedding costs nothing.
 
-At the reference size `t = 22` the table has `2^30` bits and `2^24` symbols. The parameter set is rate 1/2, fold schedule 6, 4, 4, 4, 4, query counts 260, 65, 37, 26, 20 and no grinding. Every error term of the scheme is at most `2^-128`; the weakest is the query term of the first level at `2^-128.00`, followed by its proximity-gap term at `2^-129.33`. The opening proof is 326,252 bytes in expectation and 430,024 at most, and the commitment is 1,568 bytes. The existing public implementation of the same recursion, at this geometry and for a claim in `F192`, measures 311 ms to commit and 730 ms to open on one thread and 67.8 ms and 142.6 ms on twelve, on a loaded host. The model of this spec for the scheme with the `F128` bridge and the commit-time sample is 198 ns per cycle on one thread, which gives thresholds of 94 ns for commit and 154 ns for open, together 248 ns per cycle and 11.8% of the prover's 2,100.
+At the reference size `t = 22` the table has `2^30` bits and `2^23` symbols. The parameter set is rate 1/2, fold schedule 5, 4, 4, 4, 4, query counts 259, 65, 37, 26, 20 and no grinding. Every error term of the scheme is at most `2^-128`; the weakest is the query term of the first level at `2^-128.003`, followed by its proximity-gap term at `2^-128.27`. The opening proof is 325,532 bytes in expectation and 336,792 at most, and the commitment is 800 bytes (counted). The public leanVM implementation of the same recursion, at the same level-0 oracle and for a claim in `F192`, measures 311 ms to commit and 730 ms to open on one thread and 67.8 ms and 142.6 ms on twelve, on a loaded host. The model of this spec for the scheme with the `F128` bridge and the commit-time sample is 157.2 ns per cycle on one thread (estimated), which gives single-thread thresholds of 94 ns for commit and 103 ns for open, together 197 ns per cycle and 9.4% of the prover's 2,100.
 
-The spec compares two opening fields side by side, `F192` with the bridge and a field that contains `F128`, and recommends `F192`. That recommendation is for the owner to confirm.
+The packing of 128 bits into `V` is taken on operation counts against a packing of 64 bits into `F64` and against an opening field of `2^256` elements that contains `F128` (§7). It is confirmed or reversed by the first measurement of the bridge phase, and §7 states the result that reverses it.
 
 ## Intent
 
@@ -23,14 +23,14 @@ The spec compares two opening fields side by side, `F192` with the bridge and a 
 
 Fix, completely enough to implement and to audit, the commitment scheme of the bit table: the committed object and the claim, every message of the commit phase and of the opening, every challenge and the bytes it is drawn from, the wire format, the parameter set and its soundness ledger, the prover's operation counts and memory, and the items of work.
 
-Notation used throughout. `K = F64`, `H = F128` and `E = F192` are the types of `jolt_field::binary`; `K ⊂ E` and `H` is unrelated to `E`. `t = log_T`, and `μ = t + 2` is the number of variables of the packed table. Points are low-variable-first and sumchecks bind the lowest variable first, as in the front end. `eq_F(r, z)` is the equality polynomial over the field `F`, with bit `l` of the index `z` paired with `r[l]`. `β_i = x^i`, `i < 64`, is the basis of `K` over `F_2` in which `F64::from_raw` reads a word. `bit_b(e)` is bit `b` of the raw representation of an element of `K` or `H`. "Level" means one committed oracle of the recursion; level 0 is the commitment itself.
+Notation used throughout. `K = F64`, `H = F128` and `E = F192` are the types of `jolt_field::binary`. `E` is `K[y]/(y^3 + y + 1)` and `F192` stores its three coefficients in `K` in ascending degree, so `K ⊂ E` is the first coefficient, `mul_base` multiplies each coefficient by an element of `K`, and the canonical 24 bytes are the three coefficients in order; `H` is unrelated to `E`. `V = K + y·K ⊂ E` is the set of elements whose third coefficient is zero. It is a subspace over `K` of dimension 2, closed under addition and under multiplication by `K`, and not closed under multiplication. `pack(a, b) = F192::from_base_fn` of `(F64::from_raw(a), F64::from_raw(b), 0)` is the element `a + y·b` of `V` for two words `a`, `b`. `t = log_T`, and `μ = t + 1` is the number of variables of the packed table. Points are low-variable-first and sumchecks bind the lowest variable first, as in the front end. `eq_F(r, z)` is the equality polynomial over the field `F`, with bit `l` of the index `z` paired with `r[l]`. `β_i = x^i`, `i < 64`, is the basis of `K` over `F_2` in which `F64::from_raw` reads a word, and `ν_b = β_(b mod 64)·y^⌊b/64⌋`, `b < 128`, is the basis of `V` over `F_2`. `bit_h(e)` is bit `h` of the raw representation of an element of `H`; for `v = pack(a, b)`, `bit_b(v)` is bit `b` of `a` for `b < 64` and bit `b − 64` of `b` after it, the coordinate of `v` on `ν_b`. "Level" means one committed oracle of the recursion; level 0 is the commitment itself.
 
 ### Invariants
 
-1. **The committed object.** The commitment binds one function `p : {0,1}^μ → K`. For an honest prover `p[h + 4·j] = F64::from_raw(row_j[h])` for `h < 4`, `j < T`, where `row_j : [u64; 4]` is row `j` of the table, so that `bit_i(p[h + 4·j]) = Bits[i + 64·h, j]`. Index and bit order are those of §3 of the protocol spec and are frozen here.
+1. **The committed object.** The commitment binds one function `p : {0,1}^μ → V`. For an honest prover `p[g + 2·j] = pack(row_j[2g], row_j[2g + 1])` for `g < 2`, `j < T`, where `row_j : [u64; 4]` is row `j` of the table, so that `bit_b(p[g + 2·j]) = Bits[b + 128·g, j]` for `b < 128`. Index and bit order are those of §3 of the protocol spec and are frozen here.
 2. **Unique binding at commit time.** After `verify_commit` returns, and except with the probability of the ledger rows "commit sample" and "Merkle", there is at most one table of bits for which any later opening can be accepted. The mechanism is the out-of-domain evaluation carried in the commitment and checked in the opening (§2, §4 of Architecture).
-3. **The claim proved.** `verify_opening` accepts only if, for the bound table, `Σ_{z} eq_H(r, z)·bit_i(p[z]) = s_i` for all `i < 64`, where `r = (rho[6], rho[7], r_6)` and `s_i = Σ_{h<4} eq_H((rho[6], rho[7]), h)·C[i + 64·h]`, except with the probability of the ledger. This implies `Bits~(rho, r_6) = BitsOpening::value()`, which is the contract, and is strictly stronger. `rho[0..6)` is not used by the scheme.
-4. **Fields.** Code symbols of level 0 are in `K`. Every challenge of the scheme, every later symbol and every sumcheck message is in `E`. No value of `H` is converted to `E` other than through the map `Φ_α` of §3, which reads its bits.
+3. **The claim proved.** `verify_opening` accepts only if, for the bound table, `Σ_{z} eq_H(r, z)·bit_b(p[z]) = s_b` for all `b < 128`, where `r = (rho[7], r_6)` and `s_b = (1 + rho[7])·C[b] + rho[7]·C[b + 128]`, except with the probability of the ledger. This implies `Bits~(rho, r_6) = BitsOpening::value()`, which is the contract, and is strictly stronger. `rho[0..7)` is not used by the scheme.
+4. **Fields.** Code symbols of level 0 are in `V`, and each is stored, hashed and sent as its two coefficients in `K`. Every challenge of the scheme, every later symbol and every sumcheck message is in `E`. No value of `H` is converted to `E` other than through the map `Φ_α` of §3, which reads its bits.
 5. **Challenges.** Every challenge in `E` is 24 bytes from `squeeze_bytes`, that is two consecutive 16-byte draws of which the first 24 bytes are kept, read by `F192::from_bytes_le_checked`. It is uniform in `E`. No challenge of the scheme is sampled from a subset of `E`, and none is derived from another challenge except the powers of a batching challenge.
 6. **Transcript.** Every message of the scheme is absorbed before the challenge that depends on it is drawn, in the order of §6. The scheme uses six labels, none of which is one of the nine of the front end.
 7. **Canonical wire.** `BitsWire::read` accepts exactly the strings that `write` produces for the geometry. Lengths are checked against bounds computed from the geometry before any allocation. A commitment or an opening has one encoding.
@@ -54,29 +54,31 @@ Section numbers refer to Architecture.
 
 **Parameters.**
 
-- [ ] For every `1 ≤ t ≤ 32` the schedule function returns the `k_i`, `c_i`, `d_i`, `R` and `res` of §5; the rows for `t = 1`, `6`, `10` and `22` are literals in the test: `(1; 2; 3)`, `(6; 2; 3)`, `(6, 4; 6, 2; 7, 6)` and the table of §5.
+- [ ] For every `1 ≤ t ≤ 32` the schedule function returns the `k_i`, `c_i`, `d_i`, `R` and `res` of §5; the rows for `t = 1`, `6`, `10` and `22` are literals in the test: `(0; 2; 3)`, `(5; 2; 3)`, `(5, 4; 6, 2; 7, 6)` and the table of §5.
 - [ ] The exact-arithmetic test of item 1 confirms every query count and asserts every ledger row at most `2^-128` for every `t`.
 
 **Field.**
 
 - [ ] `F192Accumulator::fmadd_base(a, b)` followed by `reduce` equals `a.mul_base(b)` summed, on operands supported on single coefficients for every pair of positions, and on 1,024 random pairs.
+- [ ] For `e ∈ E` and `v = pack(a, b)`, `fmadd_base(e, a)` followed by `fmadd_base(y·e, b)` and `reduce` equals the product `e·v` in `E`, on 1,024 random pairs; `y·(c_0, c_1, c_2) = (c_2, c_0 + c_2, c_1)` on the coefficients.
 
 **Code.**
 
 - [ ] The encoder by definition gives, for `c = 1`, `d = 2` and `f = (f_0, f_1)`: `f_0`, `f_0 + f_1`, `f_0 + β_1·f_1`, `f_0 + (β_1 + 1)·f_1` at positions 0 to 3. For `c = 2`, `d = 3`, where `s_1(β_1) = x^2 + x` and `Ŵ_1` takes the values 0, 0, 1, 1, `x^2 + x` at positions 0 to 4: position 2 gives `f_0 + x·f_1 + f_2 + x·f_3` and position 4 gives `f_0 + x^2·f_1 + (x^2 + x)·f_2 + (x^4 + x^3)·f_3`. These are written in the test as raw words: no product in them reaches degree 64.
-- [ ] The transform equals the encoder by definition for every `1 ≤ c < d ≤ 8`, for 1, 2, 16 and 64 lanes, over `F64` and over `F192`; the transposed transform satisfies `⟨Enc(f), g⟩ = ⟨f, Enc^T(g)⟩` on random `f`, `g`.
+- [ ] The transform equals the encoder by definition for every `1 ≤ c < d ≤ 8`, for 1, 2, 16 and 64 lanes, over `F64` and over `F192`, and the level-0 transform on 2, 32 and 64 words per position equals the encoder by definition applied to the lanes of `V` that pairs of words form; the transposed transform satisfies `⟨Enc(f), g⟩ = ⟨f, Enc^T(g)⟩` on random `f`, `g`.
 - [ ] `W~_x(q)` equals `Σ_w eq_E(q, w)·X_w(x)` computed from the definition, for every `x` at `d ≤ 6`.
 
 **Merkle.**
 
-- [ ] The root of a tree of 4 leaves equals `H(H(H(l_0) ‖ H(l_1)) ‖ H(H(l_2) ‖ H(l_3)))` computed with `blake2::Blake2s256` in the test; the batched tree builder equals the tree built by that definition for every depth up to 10 and leaf sizes 8, 64, 384 and 512 bytes.
+- [ ] The root of a tree of 4 leaves equals `H(H(H(l_0) ‖ H(l_1)) ‖ H(H(l_2) ‖ H(l_3)))` computed with `blake2::Blake2s256` in the test; the batched tree builder equals the tree built by that definition for every depth up to 10 and leaf sizes 16, 64, 384 and 512 bytes.
 - [ ] For every nonempty subset of positions at depth 4, the multiproof written verifies, its digest count equals the count that the verifier derives, and it is rejected with any digest altered, with one digest removed, and with one digest appended.
 
 **Bridge.**
 
-- [ ] For a table with one nonzero symbol `p[z_0] = β_i`: with `r = 0` and `z_0 = 0`, `τ = β_i`; with `r = (x, 0, …)` and `z_0 = 1`, `τ = β_i·α`. Both are literals for a fixed `α`.
-- [ ] For `μ = 1`, `r = (x)`: `w~((q_0)) = 1 + q_0 + α`, checked for a fixed `q_0` and `α`.
-- [ ] For `μ ≤ 10`, random `p`, `r`, `α`: `s_i` computed bit by bit from the table and `eq_table`, then `τ = Σ_z p[z]·Φ_α(eq_H(r, z))`; the recurrence equals `Σ_z eq_E(q, z)·Φ_α(eq_H(r, z))` computed directly; the prover's weight equals `Φ_α(eq_H(r, z))` computed bit by bit.
+- [ ] For a table with one nonzero symbol `p[z_0] = ν_b`, for `b = 3` and `b = 67`: with `r = 0` and `z_0 = 0`, `τ = ν_b`; with `r = (x, 0, …)` and `z_0 = 1`, `τ = ν_b·α`. Both are literals for a fixed `α`.
+- [ ] For one variable and `r = (x)`: `w~((q_0)) = 1 + q_0 + α`, checked for a fixed `q_0` and `α`.
+- [ ] For `μ ≤ 10`, random `p`, `r`, `α`: `s_b` computed bit by bit from the table and `eq_table`, then `τ = Σ_z p[z]·Φ_α(eq_H(r, z))`; the recurrence equals `Σ_z eq_E(q, z)·Φ_α(eq_H(r, z))` computed directly; the prover's stored vectors `W0`, `D` of §9 equal `Φ_α(eq_H(r, 2k))` and `Φ_α(eq_H(r, 2k)) + Φ_α(eq_H(r, 2k + 1))` computed bit by bit.
+- [ ] With one `s_b` changed and everything else fixed, the bridge identity holds for at most 127 values of `α`; the test checks rejection for a fixed `α` whose acceptance it has excluded by computing the discrepancy polynomial, and does not assert rejection for every `α`.
 
 **Wire.**
 
@@ -97,8 +99,8 @@ Section numbers refer to Architecture.
 
 - [ ] one byte changed in each of: `root_0`, an element of `y_0`, each round coefficient, each later root, each `y_i`, each element of `f_R`, a leaf, a sibling digest, `n_i`, `g_i`;
 - [ ] an opening produced for a table that differs from the committed one in one bit;
-- [ ] `C` changed in two entries so that `value()` is unchanged and some `s_i` is not (this is the stronger claim of invariant 3);
-- [ ] `C` changed in one entry; one coordinate of `rho[6..8)` or of `r_6` changed; the geometry changed;
+- [ ] `C` changed in two entries so that `value()` is unchanged and some `s_b` is not (this is the stronger claim of invariant 3);
+- [ ] `C` changed in one entry; `rho[7]` or one coordinate of `r_6` changed; the geometry changed;
 - [ ] an opening verified against a transcript that differs before the commit phase.
 
 **Determinism.**
@@ -201,16 +203,16 @@ On twelve threads at `log_t = 22` the house rule divides the threshold by 9.6: 9
 
 #### 1. The committed object and the claim
 
-The table has `256·T` bits. Row `j` is a `BitsRow = [u64; 4]`, and bit `y` of row `j`, at flat index `y + 256·j`, is bit `y mod 64` of word `⌊y/64⌋`. The packed table is `p[z] = F64::from_raw(row_j[h])` at `z = h + 4·j`. It has `2^μ` symbols, `μ = t + 2`, and it is the row buffer read as `u64` words in memory order, so the honest prover never builds it. The six low column variables are inside a symbol; the two high column variables and the `t` cycle variables are the variables of `p`, in that order.
+The table has `256·T` bits. Row `j` is a `BitsRow = [u64; 4]`, and the bit of column `col` of row `j`, at flat index `col + 256·j`, is bit `col mod 64` of word `⌊col/64⌋`. The packed table takes two consecutive words to one symbol: `p[z] = pack(row_j[2g], row_j[2g + 1])` at `z = g + 2·j`, `g < 2`. It has `2^μ` symbols, `μ = t + 1`. The 16 canonical bytes of a symbol are its two coefficients in order, each little-endian, so the symbols in index order are the row buffer read as `u64` words in memory order, and the honest prover never builds the packed table. The seven low column variables are inside a symbol: variables 0 to 5 are the bit within a word and variable 6 selects the coefficient. The high column variable and the `t` cycle variables are the variables of `p`, in that order.
 
 The front end calls the opening with the column point `rho ∈ H^8`, the cycle point `r_6 ∈ H^t` and the 256 column values `C`, after it has absorbed `C` and drawn `rho` (§11 of the protocol spec). The scheme derives
 
 ```text
-r    = (rho[6], rho[7], r_6[0], …, r_6[t−1])                    ∈ H^μ
-s_i  = Σ_{h<4} eq_H((rho[6], rho[7]), h) · C[i + 64·h]            i < 64, in H
+r    = (rho[7], r_6[0], …, r_6[t−1])                             ∈ H^μ
+s_b  = (1 + rho[7])·C[b] + rho[7]·C[b + 128]                      b < 128, in H
 ```
 
-and proves `s_i = Σ_z eq_H(r, z)·bit_i(p[z])` for every `i`. For any `C`, `value() = Σ_{i<64} eq_H(rho[0..6), i)·s_i`, so the 64 equalities give `value() = Bits~(rho, r_6)`. The scheme does not need the bound `8/2^128` of the front end for `rho`: it proves the 64 partial evaluations and not one random combination of them.
+and proves `s_b = Σ_z eq_H(r, z)·bit_b(p[z])` for every `b`. For any `C`, `value() = Σ_{b<128} eq_H(rho[0..7), b)·s_b`, so the 128 equalities give `value() = Bits~(rho, r_6)`. The scheme does not need the bound `8/2^128` of the front end for `rho`: it proves the 128 partial evaluations and not one random combination of them. If some `C[b + 128·g]` differs from the column evaluation of the bound table, `s_b` differs from the partial evaluation unless `rho[7]` is the root of a nonzero polynomial of degree 1, which has probability at most `1/2^128` (derived; `C` is absorbed before `rho` is drawn).
 
 #### 2. The code and the commit phase
 
@@ -220,7 +222,7 @@ and proves `s_i = Σ_z eq_H(r, z)·bit_i(p[z])` for every `i`. For any `C`, `val
 Enc_{c,d}(f)[x] = Σ_{w<2^c} f[w] · X_w(F64::from_raw(x)),        x < 2^d,
 ```
 
-for `f` with values in `K` or in `E`. It is the Reed-Solomon code of the polynomials of degree below `2^c` on `S_d`, of rate `2^(c−d)`. For a fixed position `x` the map `f ↦ Enc(f)[x]` is the inner product with the vector `W_x[w] = X_w(x)`, whose multilinear extension is a product of `c` factors:
+for `f` with values in `K`, in `V` or in `E`. It is the Reed-Solomon code of the polynomials of degree below `2^c` on `S_d`, of rate `2^(c−d)`. Every `X_w(x)` is in `K`, so the encoder acts on each coefficient in `K` separately: it maps `V`-valued messages to `V`-valued codewords, and `Enc(pack(a, b)) = pack(Enc(a), Enc(b))`. For a fixed position `x` the map `f ↦ Enc(f)[x]` is the inner product with the vector `W_x[w] = X_w(x)`, whose multilinear extension is a product of `c` factors:
 
 ```text
 W~_x(q) = Π_{l<c} (1 + q_l + q_l·Ŵ_l(F64::from_raw(x))).
@@ -232,7 +234,7 @@ W~_x(q) = Π_{l<c} (1 + q_l + q_l·Ŵ_l(F64::from_raw(x))).
 O_i[x][u] = Enc_{c_i, d_i}(f_i(u, ·))[x],        f_i(u, ·)[w] = f_i[u + 2^(k_i)·w],
 ```
 
-with `2^(d_i)` positions `x` and `2^(k_i)` lanes `u`. Leaf `x` of its Merkle tree is the concatenation of `O_i[x][u]` for ascending `u`, each symbol in its canonical little-endian bytes: 8 bytes at level 0, where `f_0 = p`, and 24 bytes at every later level. A leaf digest is BLAKE2s-256 of the leaf bytes, a node is BLAKE2s-256 of its two children's 64 bytes, and the tree has depth `d_i`. The lane index is the low part of the symbol index. At level 0 the message matrix `p[u + 2^(k_0)·w]`, read position by position, is therefore the row buffer itself, and the encoder reads it without a transposition.
+with `2^(d_i)` positions `x` and `2^(k_i)` lanes `u`. Leaf `x` of its Merkle tree is the concatenation of `O_i[x][u]` for ascending `u`, each symbol in its canonical little-endian bytes: 16 bytes at level 0, where `f_0 = p` and a symbol of `V` is its two coefficients with the coefficient of 1 first, and 24 bytes at every later level. A string of 16 bytes is the encoding of exactly one element of `V`, so a level-0 leaf cannot carry a symbol outside `V`. A leaf digest is BLAKE2s-256 of the leaf bytes, a node is BLAKE2s-256 of its two children's 64 bytes, and the tree has depth `d_i`. The lane index is the low part of the symbol index. At level 0 the message matrix `p[u + 2^(k_0)·w]`, read position by position, is therefore the row buffer itself: position `w` is words `2^(k_0 + 1)·w` to `2^(k_0 + 1)·(w + 1) − 1` of the buffer (16 rows at `k_0 = 5`), lane `u` is words `2u` and `2u + 1` of them, and the encoder reads the buffer without a transposition. The level-0 oracle, as bytes, is the encoding of `2^(k_0 + 1)` lanes of words of `K`, and the transform of level 0 is a transform over `K`.
 
 **Commit phase.** These are the messages of `commit` and `verify_commit`, step 6 of the preamble.
 
@@ -242,42 +244,42 @@ with `2^(d_i)` positions `x` and `2^(k_i)` lanes `u`. Leaf `x` of its Merkle tre
 3  P → V   y_0[u] = Σ_w eq_E(z_0, w)·p[u + 2^(k_0)·w]  ∈ E,  u < 2^(k_0)    absorbed
 ```
 
-The commitment is `root_0` and the `2^(k_0)` values `y_0`: `32 + 24·64 = 1,568` bytes at `t = 22`. The sample is one evaluation of every lane's message at a common point, and not one evaluation of `p` at a point of `E^μ`, for a reason of cost: a claim about `p` would join the sumcheck at level 0 with a weight of `2^μ` elements of `E`, while the lane values combine, after the lane variables are folded, into one claim about `f_1`, whose weight has `2^(c_0)` elements (§4, §9). `verify_commit` checks nothing: it absorbs, draws, and keeps `(t, root_0, z_0, y_0)` as its state. What the sample buys is invariant 2. The word in the leaves is within the decoding radius of at most `L_0` codewords of the interleaved code (§8). Two different members differ in some lane, and two different lane messages agree at a uniform point of `E^(c_0)`, drawn after the root, with probability at most `c_0/|E|`, so after step 3 at most one member of the list is consistent with `(z_0, y_0)`, except with probability `C(L_0, 2)·c_0/|E|`. A commitment that is a root alone binds the list, and every error term of the front end would then be paid once per member of the list; at the reference size that is a loss of `log2 187 = 7.55` bits on terms that have no margin (§8).
+The commitment is `root_0` and the `2^(k_0)` values `y_0`: `32 + 24·32 = 800` bytes at `t = 22`. The sample is one evaluation of every lane's message at a common point, and not one evaluation of `p` at a point of `E^μ`, for a reason of cost: a claim about `p` would join the sumcheck at level 0 with a weight of `2^μ` elements of `E`, while the lane values combine, after the lane variables are folded, into one claim about `f_1`, whose weight has `2^(c_0)` elements (§4, §9). `verify_commit` checks nothing: it absorbs, draws, and keeps `(t, root_0, z_0, y_0)` as its state. What the sample buys is invariant 2. The word in the leaves is within the decoding radius of at most `L_0` codewords of the interleaved code (§8). Two different members differ in some lane, and two different lane messages agree at a uniform point of `E^(c_0)`, drawn after the root, with probability at most `c_0/|E|`, so after step 3 at most one member of the list is consistent with `(z_0, y_0)`, except with probability `C(L_0, 2)·c_0/|E|`. A commitment that is a root alone binds the list, and every error term of the front end would then be paid once per member of the list; at the reference size that is a loss of `log2 249 = 7.96` bits on terms that have no margin (§8).
 
 #### 3. The bridge
 
-The claims `s_i` are in `H`, the symbols in `K`, and the recursion runs in `E ⊃ K`. The bridge replaces the 64 claims by one inner-product claim over `E`, using only that `K ⊂ E` and that elements of `H` are vectors of 128 bits.
+The claims `s_b` are in `H`, the symbols in `V`, and the recursion runs in `E ⊃ V`. The bridge replaces the 128 claims by one inner-product claim over `E`, using only that the `ν_b` are independent over `F_2` and that elements of `H` are vectors of 128 bits.
 
-*Transposition.* Put `t_b = Σ_{i<64} β_i·bit_b(s_i) ∈ K` for `b < 128`: the 64 by 128 matrix of the bits of the `s_i`, read by columns. If the `s_i` are the partial evaluations of `p`, then, because `bit_b` is `F_2`-linear and `bit_i(p[z]) ∈ F_2`,
-
-```text
-t_b = Σ_i β_i · bit_b( Σ_z eq_H(r, z)·bit_i(p[z]) ) = Σ_z bit_b(eq_H(r, z)) · p[z].
-```
-
-*Batching.* The verifier draws `α ∈ E` and both sides are combined with the powers of `α`. Let `Φ_α : H → E` be the `F_2`-linear map `Φ_α(e) = Σ_{b<128} bit_b(e)·α^b`. Then
+*Transposition.* Put `t_h = Σ_{b<128} ν_b·bit_h(s_b) ∈ V` for `h < 128`: the 128 by 128 matrix of the bits of the `s_b`, read by columns. In words, `t_h = pack(lo, hi)` where bit `b` of `lo` is `bit_h(s_b)` and bit `b` of `hi` is `bit_h(s_(64 + b))`. If the `s_b` are the partial evaluations of `p`, then, because `bit_h` is `F_2`-linear and `bit_b(p[z]) ∈ F_2`,
 
 ```text
-τ = Σ_{b<128} t_b·α^b,        w[z] = Φ_α(eq_H(r, z)),        τ = Σ_z p[z]·w[z].        (bridge)
+t_h = Σ_b ν_b · bit_h( Σ_z eq_H(r, z)·bit_b(p[z]) ) = Σ_z bit_h(eq_H(r, z)) · p[z].
 ```
 
-The verifier computes `τ` from `C`, `rho[6]`, `rho[7]` and `α`. The prover sends nothing for the bridge. The identity `(bridge)` is the first claim of level 0.
+*Batching.* The verifier draws `α ∈ E` and both sides are combined with the powers of `α`. Let `Φ_α : H → E` be the `F_2`-linear map `Φ_α(e) = Σ_{h<128} bit_h(e)·α^h`. Then
 
-*Soundness, in outline.* Fix the function `p` bound by the commitment, with values in `E` in general (§8 explains why the argument is run for `E`-valued `p`), and write `p = p^(0) + p^(1)·y + p^(2)·y^2` with `p^(k)` valued in `K`. For claimed values `s_i` let `c_b = t_b + Σ_z bit_b(eq_H(r, z))·p[z] ∈ E`. The two sides of `(bridge)` differ by `Σ_b c_b·α^b`, a polynomial of degree at most 127 in `α`, and `p`, `C`, `rho`, `r_6` are all fixed before `α` is drawn. If some `c_b ≠ 0` the identity holds with probability at most `127/|E|`. If every `c_b = 0`, the component of `c_b` in `K` gives `t_b = Σ_z bit_b(eq_H(r,z))·p^(0)[z]` for all `b`, and since the `β_i` are independent over `F_2` this is `s_i = Σ_z eq_H(r,z)·bit_i(p^(0)[z])` for all `i`: the claims are the partial evaluations of the table of bits of `p^(0)`, which is fixed at commit time. The bound uses no relation between `H` and `E`.
+```text
+τ = Σ_{h<128} t_h·α^h,        w[z] = Φ_α(eq_H(r, z)),        τ = Σ_z p[z]·w[z].        (bridge)
+```
 
-*The weight's extension.* The final check of the recursion needs `w~(q) = Σ_z eq_E(q, z)·w[z]` at a point `q ∈ E^μ`. Work in the ring `E ⊗_{F_2} H`, whose elements are written `Σ_b V[b] ⊗ x^b` with `V ∈ E^128`. Since `(1+q_l)⊗(1+r_l) + q_l⊗r_l = (1+q_l)⊗1 + 1⊗r_l`,
+The products `t_h·α^h` and `p[z]·w[z]` are products in `E` of an element of `V` by an element of `E`. The verifier computes `τ` from `C`, `rho[7]` and `α`: 128 products in `H` for the `s_b`, and Horner's rule on `t_127, …, t_0`, 127 products in `E`. The prover sends nothing for the bridge. The identity `(bridge)` is the first claim of level 0.
+
+*Soundness, in outline.* Fix the function `p` selected by the commitment. It is `V`-valued (Lemma 1 of §8). For claimed values `s_b` let `δ_h = t_h + Σ_z bit_h(eq_H(r, z))·p[z] ∈ V`. The two sides of `(bridge)` differ by `Σ_h δ_h·α^h`, a polynomial of degree at most 127 in `α` with coefficients in `E`, and `p`, `C`, `rho`, `r_6` are all fixed before `α` is drawn. If some `δ_h ≠ 0` the identity holds with probability at most `127/|E|`. If every `δ_h = 0`, the coordinate of `δ_h` on `ν_b` gives `bit_h(s_b) = Σ_z bit_h(eq_H(r, z))·bit_b(p[z])` for all `b` and `h`, which is `s_b = Σ_z eq_H(r, z)·bit_b(p[z])` for all `b`. The argument uses that the `ν_b` are independent over `F_2`. It uses no relation between `H` and `E`, and it does not need `V` to be closed under multiplication.
+
+*The weight's extension.* The final check of the recursion needs `w~(q) = Σ_z eq_E(q, z)·w[z]` at a point `q ∈ E^μ`. Work in the ring `E ⊗_{F_2} H`, whose elements are written `Σ_h G[h] ⊗ x^h` with `G ∈ E^128`. The ring is not a field and `Φ_α` does not preserve products; the product is taken in the ring first and the `E`-linear map `G ↦ Σ_h G[h]·α^h` is applied after. Since `(1+q_l)⊗(1+r_l) + q_l⊗r_l = (1+q_l)⊗1 + 1⊗r_l`,
 
 ```text
 Σ_z eq_E(q, z) ⊗ eq_H(r, z) = Π_{l<μ} ( (1 + q_l)⊗1 + 1⊗r_l ),
 ```
 
-and `w~(q)` is the image of this product under `V ↦ Σ_b V[b]·α^b`. The verifier evaluates it by a recurrence on `V`, starting from `V = (1, 0, …, 0)`:
+and `w~(q)` is the image of this product under that map. The verifier evaluates it by a recurrence on `G`, starting from `G = (1, 0, …, 0)`:
 
 ```text
-for l in 0..μ:    V ← (1 + q_l)·V + M_{r_l}·V,        (M_r·V)[b] = Σ_{b'} bit_b(r·x^(b')) · V[b'];
-w~(q) = Σ_b V[b]·α^b.
+for l in 0..μ:    G ← (1 + q_l)·G + M_{r_l}·G,        (M_r·G)[h] = Σ_{h'} bit_h(r·x^(h')) · G[h'];
+w~(q) = Σ_h G[h]·α^h.
 ```
 
-`M_r` is the 128 by 128 matrix over `F_2` of multiplication by `r` in `H`; its column `b'` is `r·x^(b')`, obtained from the previous column by `mul_x`. One step is 128 multiplications in `E` and at most `128·128` additions in `E`, half of that for a uniform `r`. At `μ = 24` the recurrence is 3,072 multiplications and at most 393,216 additions, and the final combination 127 multiplications by Horner's rule.
+`M_r` is the 128 by 128 matrix over `F_2` of multiplication by `r` in `H`; its column `h'` is `r·x^(h')`, obtained from the previous column by `mul_x`. One step is 128 multiplications in `E` and at most `128·128` additions in `E`, half of that for a uniform `r`. At `μ = 23` the recurrence is 2,944 multiplications and at most 376,832 additions, and the final combination 127 multiplications by Horner's rule (counted).
 
 The prover evaluates `Φ_α` with 16 tables of 256 entries of `E`, one per byte of the argument: `16·256·24 = 98,304` bytes, built from the powers of `α` with 16·255 additions each of one entry to another.
 
@@ -286,7 +288,7 @@ The prover evaluates `Φ_α` with 16 tables of 256 entries of `E`, one per byte 
 Let `R` be the number of levels, `o_i = k_0 + … + k_{i−1}` the number of variables bound before level `i`, and `res = c_{R−1}` the number of variables of the final message; `m_i = μ − o_i` and `m_{i+1} = c_i`. The opening is one sumcheck of `μ` rounds for a claim `σ = Σ_z f(z)·ω(z)` whose weight `ω` grows by new terms at the start of each level. The round polynomial has degree 2.
 
 ```text
-0   V       s_i, t_b from C and rho; α ∈ E; τ                       1 challenge
+0   V       s_b, t_h from C and rho[7]; α ∈ E; τ                    1 challenge
 for i = 0 .. R−1:
 a   V       λ_i ∈ E, for i ≥ 1                                      1 challenge
             σ ← σ + Σ_{j≥1} λ_i^j·v_j over the new claims (v_j, ω_j) of level i, in order
@@ -332,19 +334,19 @@ The opened leaves are not absorbed. They are fixed by a root that is absorbed be
 
 #### 5. Parameters
 
-The schedule is a function of `μ = t + 2`, for every `t` that the front end admits, `1 ≤ t ≤ 32`:
+The schedule is a function of `μ = t + 1`, for every `t` that the front end admits, `1 ≤ t ≤ 32`:
 
 ```text
-k_0 = min(6, μ − 2),   c_0 = μ − k_0,   d_0 = c_0 + 1;
+k_0 = min(5, μ − 2),   c_0 = μ − k_0,   d_0 = c_0 + 1;
 while c_i ≥ 6:   k_{i+1} = 4,   c_{i+1} = c_i − 4,   d_{i+1} = d_i − 1;
 R = number of levels,   res = c_{R−1} ∈ {2, 3, 4, 5}.
 ```
 
-Level 0 has rate 1/2 and each later level has a rate 8 times lower, since the message shrinks by 16 and the domain by 2. At `t = 22`: `μ = 24`, `R = 5`, `res = 2`.
+Level 0 has rate 1/2 and each later level has a rate 8 times lower, since the message shrinks by 16 and the domain by 2. At `t = 1`, `k_0 = 0`: level 0 has one lane and no fold round, and its only message after the commitment is the final one. At `t = 22`: `μ = 23`, `R = 5`, `res = 2`.
 
 | Level | `k_i` | `c_i` | `d_i` | Rate | Symbol | Leaf bytes | `Q_i` |
 |---|---:|---:|---:|---|---|---:|---:|
-| 0 | 6 | 18 | 19 | 1/2 | `K` | 512 | 260 |
+| 0 | 5 | 18 | 19 | 1/2 | `V` | 512 | 259 |
 | 1 | 4 | 14 | 18 | 1/16 | `E` | 384 | 65 |
 | 2 | 4 | 10 | 17 | 1/128 | `E` | 384 | 37 |
 | 3 | 4 | 6 | 16 | 1/1,024 | `E` | 384 | 26 |
@@ -355,19 +357,19 @@ There is no grinding at any level. The query counts are constants of the verifie
 | `t` | `Q_0, Q_1, …` | | `t` | `Q_0, Q_1, …` |
 |---:|---|---|---:|---|
 | 1 to 9 | all | | 21 | 259, 65, 37, 26 |
-| 10 | all, 59 | | 22 | 260, 65, 37, 26, 20 |
+| 10 | all, 59 | | 22 | 259, 65, 37, 26, 20 |
 | 11 | 254, 62 | | 23 | 260, 65, 37, 26, 20 |
-| 12 | 256, 63 | | 24 | 261, 65, 37, 26, 20 |
-| 13 | 257, 64 | | 25 | 262, 65, 37, 26, 20 |
+| 12 | 256, 63 | | 24 | 260, 65, 37, 26, 20 |
+| 13 | 257, 64 | | 25 | 261, 65, 37, 26, 20 |
 | 14 | 257, 64, 35 | | 26 | 262, 65, 37, 26, 20, 16 |
-| 15 | 258, 64, 36 | | 27 | 263, 65, 37, 26, 20, 17 |
-| 16 | 258, 65, 37 | | 28 | 264, 65, 37, 26, 20, 17 |
-| 17 | 258, 65, 37 | | 29 | 266, 65, 37, 26, 20, 17 |
-| 18 | 258, 65, 37, 25 | | 30 | 267, 65, 37, 26, 21, 17, 14 |
-| 19 | 259, 65, 37, 26 | | 31 | 268, 65, 38, 26, 21, 17, 14 |
-| 20 | 259, 65, 37, 26 | | 32 | 271, 66, 38, 27, 21, 17, 15 |
+| 15 | 257, 64, 36 | | 27 | 262, 65, 37, 26, 20, 17 |
+| 16 | 258, 65, 37 | | 28 | 263, 65, 37, 26, 20, 17 |
+| 17 | 258, 65, 37 | | 29 | 264, 65, 37, 26, 20, 17 |
+| 18 | 258, 65, 37, 25 | | 30 | 266, 65, 37, 26, 21, 17, 14 |
+| 19 | 258, 65, 37, 26 | | 31 | 267, 65, 38, 26, 21, 17, 14 |
+| 20 | 259, 65, 37, 26 | | 32 | 268, 66, 38, 27, 21, 17, 15 |
 
-The table is derived by the rule of §8: for each level, among the admissible slacks `η = √ϱ/m`, `m ≥ 3` an integer, that keep every algebraic term of the level at most `2^-128`, the one with the fewest queries `Q = ⌈128 / log2(1/(√ϱ + η))⌉`, and "all" where that count reaches the number of positions. The derivation ran outside the repository, in double precision; item 1 of Execution re-derives every entry with exact rational bounds and freezes the integers. The verifier contains the integers and not the rule (invariant 8).
+The table is derived by the rule of §8: for each level in order, with `η = √ϱ/m` and `m` running over the integers from 3 up to the last one whose fold term is at most `2^-128`, among the `m` that keep the sample and batching terms of the level at most `2^-128`, the smallest `m` that attains the fewest queries `Q = ⌈128 / log2(1/(√ϱ + η))⌉`, and "all" where that count reaches the number of positions. The batching term of a level uses the query count already chosen for the level before it. The derivation ran outside the repository in decimal arithmetic at 80 digits (computed); item 1 of Execution re-derives every entry with exact rational bounds and freezes the integers. The query condition needs no logarithm: with `η = √ϱ/m` it is `ϱ^Q·((m + 1)/m)^(2Q) ≤ 2^-256`, an inequality of integers after cross-multiplication. The verifier contains the integers and not the rule (invariant 8).
 
 #### 6. Transcript, challenges and wire format
 
@@ -396,7 +398,7 @@ for each level i:
     i < R−1:  root_{i+1} ‖ y_{i+1}                                56 bytes
     i = R−1:  f_R                                                 24·2^res bytes
     n_i   as u32 little-endian, the number of distinct positions
-    n_i leaves, in ascending position order                       2^(k_i)·8 or 2^(k_i)·24 bytes each
+    n_i leaves, in ascending position order                       2^(k_0)·16 at level 0, 2^(k_i)·24 after
     g_i   as u32 little-endian, the number of sibling digests
     g_i digests                                                   32 bytes each
 res closing rounds, each u_0 ‖ u_2                                48 bytes per round
@@ -498,15 +500,23 @@ The bridge is at 185.01 bits, the lane combination of the commit sample at 181.8
 
 #### 9. The prover
 
-**`commit`.** (1) Allocate the level-0 codeword, `2^(d_0)` positions of `2^(k_0)` symbols, `2^25` symbols and 256 MiB at `t = 22`. For each position `w < 2^(c_0)` copy the `2^(k_0)` words of the rows into position `w` of each of the two cosets of the message (the rate is 1/2), and run the additive transform position-major, each butterfly acting on a whole row of lanes with one twiddle in `K`: `2^(k_0)·c_0·2^(d_0−1) = 64·18·2^18 = 301,989,888` butterflies, each one multiplication in `K` and two additions. (2) Hash `2^(d_0)` leaves and the tree: `2^19` leaves of 512 bytes are 8 compressions each and the `2^19 − 1` nodes one each, 4,718,591 compressions over 301,989,824 bytes. (3) Absorb the root, draw `z_0`, build the table `eq_E(z_0, ·)` of `2^(c_0)` elements of `E` (6 MiB, `2^18` products in `E`), and compute the `2^(k_0)` values `y_0` in one pass over the rows: position `w` adds `eq_E(z_0, w)·p[u + 2^(k_0)·w]` to accumulator `u`, one product of an element of `E` by an element of `K` into an accumulator per symbol, `3·2^24` carry-less multiplications.
+Counts are in carry-less multiplications of 64-bit words on aarch64, read from `jolt_field::binary`: a product in `K` is 3 (one product, a reduction of two); an element of `E` times an element of `K` is 9 (three products, three reductions), or 3 into an accumulator; a product in `E` is 12 (six products, three reductions), or 6 into an accumulator; a product in `H` is 6 (four products, a reduction of two). An element `e` of `E` times `pack(a, b)` is `e·a + (y·e)·b`, two products of `E` by `K` and a multiplication by `y` that is a permutation and one addition of coefficients: 6 into an accumulator and 12 reduced. Every count below is counted from these.
 
-**State between `commit` and `open`.** `ProverState` holds the `Arc` of the rows, the level-0 codeword, the level-0 tree, `z_0`, `y_0` and `t`. At `t = 22`: `2^25·8 = 268,435,456` bytes of codeword, `(2^20 − 1)·32 = 33,554,400` bytes of tree and `18·24 + 64·24 + 8 = 1,976` bytes of scalars, 301,991,832 bytes, plus the shared reference to the 128 MiB of rows, which the scheme does not own. `open` consumes the state.
+**`commit`.** (1) Allocate the level-0 codeword, `2^(d_0)` positions of `2^(k_0)` symbols, `2^24` symbols, `2^25` words and 256 MiB at `t = 22`. For each position `w < 2^(c_0)` copy the `2^(k_0 + 1)` words of the row buffer into position `w` of each of the two cosets of the message (the rate is 1/2), and run the additive transform position-major, each butterfly acting on a whole row of words with one twiddle in `K`: `2^(k_0 + 1)·c_0·2^(d_0−1) = 64·18·2^18 = 301,989,888` butterflies, each one multiplication in `K` and two additions. (2) Hash `2^(d_0)` leaves and the tree: `2^19` leaves of 512 bytes are 8 compressions each and the `2^19 − 1` nodes one each, 4,718,591 compressions over 301,989,824 bytes. (3) Absorb the root, draw `z_0`, build the table `eq_E(z_0, ·)` of `2^(c_0)` elements of `E` (6 MiB, `2^18` products in `E`, `12·2^18 = 3,145,728` multiplications), and compute the `2^(k_0)` values `y_0` in one pass over the rows with one accumulator per word of a position: position `w` adds `eq_E(z_0, w)` times word `e` to accumulator `e`, one product of an element of `E` by an element of `K` into an accumulator per word, `3·2^24 = 50,331,648` multiplications, and `y_0[u]` is accumulator `2u` reduced plus `y` times accumulator `2u + 1` reduced.
 
-**`open`, level 0.** The weight is built once and kept. With `e'[k] = eq_H(r[1..μ), k)` taken as the product of two entries of split tables of `2^11` and `2^(μ−12)` elements of `H`, the pair of symbols `2k`, `2k+1` has `eq_H` values `e_1 = r[0]·e'[k]` and `e_0 = e'[k] + e_1`: two products in `H` per pair. `w[2k+1] = Φ_α(e_1)` and `w[2k] = Φ_α(e'[k]) + w[2k+1]`: two evaluations of `Φ_α`, 16 lookups each. The first round message is `u_0 = Σ_k p[2k]·w[2k]` and `u_2 = Σ_k (p[2k] + p[2k+1])·(w[2k] + w[2k+1])`, two products of `E` by `K` into accumulators per pair. After the challenge `a`, the message folds to `p[2k] + a·(p[2k] + p[2k+1])`, one product of `E` by `K`, and the weight to `w[2k] + a·(w[2k] + w[2k+1])`, one product in `E`, in place. Per pair: `12 + 6 + 9 + 12 = 39` carry-less multiplications and 32 lookups, over `2^23` pairs. Level 0 has no other weight: the commit sample enters at level 1, where its equality table has `2^18` elements.
+**State between `commit` and `open`.** `ProverState` holds the `Arc` of the rows, the level-0 codeword, the level-0 tree, `z_0`, `y_0` and `t`. At `t = 22`: `2^25·8 = 268,435,456` bytes of codeword, `(2^20 − 1)·32 = 33,554,400` bytes of tree and `18·24 + 32·24 + 8 = 1,208` bytes of scalars, 301,991,064 bytes, plus the shared reference to the 128 MiB of rows, which the scheme does not own. `open` consumes the state.
 
-**`open`, later rounds.** Round `j ≥ 2` has `2^(μ−j)` pairs of elements of `E`: two products into accumulators for the message (12) and two products for the folds (24), 36 per pair and `36·(2^23 − 1)` in all. At the start of level `i ≥ 1` the weights of the new claims are added: the equality table of the level's sample (and of the commit sample at level 1), and for the queries the vector `Σ_j λ_i^j·W_{x_j}`, which is the transpose of the encoder applied to the sparse vector with `λ_i^j` at position `x_j`. It is computed with one transposed transform on the domain of level `i−1`, `c_{i−1}·2^(d_{i−1}−1)` butterflies of `E` by `K`: 4,718,592, 1,835,008, 655,360 and 196,608 for the four later levels, 7,405,568 in all.
+**`open`, round 1.** Round 1 pairs the symbols `2k` and `2k + 1`, which are 32 adjacent bytes of the row buffer, for `k < 2^(μ−1)`. Let `e'[k] = eq_H(r[1..μ), k)`, the product of two entries of split tables of `2^11` and `2^(μ−12)` elements of `H`: one product in `H` per pair. The two `eq_H` values of the pair are `r[0]·e'[k]` at `2k + 1` and `e'[k] + r[0]·e'[k]` at `2k`. The map `e ↦ Φ_α(r[0]·e)` is `F_2`-linear in `e` like `Φ_α`, so both are read from one set of 16 tables of 256 entries, one table per byte of `e'[k]`, whose entry for a byte value is the pair of the two maps on that byte: `16·256·48 = 196,608` bytes. With `D[k] = Φ_α(e'[k])` and `W1 = Φ_α(r[0]·e'[k])` the sums of the 16 entries, the prover stores
 
-**`open`, later commitments.** After the `k_i` rounds of level `i < R−1` the folded message is `f_{i+1}`, already in memory. It is encoded with 16 lanes on the domain of dimension `d_{i+1}`: `16·c_{i+1}·2^(d_{i+1}−1)` butterflies of `E` by `K`, 29,360,128, 10,485,760, 3,145,728 and 524,288, in all 43,515,904. Its tree has `2^(d_{i+1})` leaves of 384 bytes, 6 compressions each: 3,440,636 compressions for the four later trees. The sample `y_{i+1}` is an inner product of `2^(c_i)` elements of `E`.
+```text
+D[k] = w[2k] + w[2k+1],        W0[k] = w[2k] = D[k] + W1,
+```
+
+two vectors of `2^(μ−1)` elements of `E`, and no product by `r[0]` is computed per pair. The first round message is `u_0 = Σ_k p[2k]·W0[k]` and `u_2 = Σ_k (p[2k] + p[2k+1])·D[k]`, two products of an element of `V` by an element of `E` into accumulators per pair. After the challenge `a`, the message folds to `p[2k] + a·(p[2k] + p[2k+1])`, one reduced product of `E` by `V`, written to a new vector, and the weight to `W0[k] + a·D[k]`, one product in `E`, in place in `W0`. Per pair: `6 + 6 + 6 + 12 + 12 = 42` multiplications and 16 table entries of 48 bytes, priced as 32 lookups of 24 bytes, over `2^22` pairs: 176,160,768 multiplications and 134,217,728 lookups. The tables are set up once per opening from the 128 powers of `α` (127 products in `E`), the 128 values `r[0]·x^h` (127 calls of `mul_x`), their images under `Φ_α` (at most `128·128` additions in `E`) and `2·16·255` additions of one entry to another: under 25,000 operations in `E`, charged as zero time against `2^22` pairs. Level 0 has no other weight: the commit sample enters at level 1, where its equality table has `2^18` elements.
+
+**`open`, later rounds.** Round `j ≥ 2` has `2^(μ−j)` pairs of elements of `E`: two products into accumulators for the message (12) and two products for the folds (24), 36 per pair and `36·(2^22 − 1) = 150,994,908` in all. The rounds pair adjacent elements from the first fold on, since the lanes are the low variables; the port takes the source's adjacent-pair rounds and not its dispatch on high-variable lanes or its rotation of the final point. At the start of level `i ≥ 1` the weights of the new claims are added: the equality table of the level's sample (and of the commit sample at level 1), and for the queries the vector `Σ_j λ_i^j·W_{x_j}`, which is the transpose of the encoder applied to the sparse vector with `λ_i^j` at position `x_j`. It is computed with one transposed transform on the domain of level `i−1`, `c_{i−1}·2^(d_{i−1}−1)` butterflies of `E` by `K`: 4,718,592, 1,835,008, 655,360 and 196,608 for the four later levels, 7,405,568 in all. That is the count of a dense transform and an upper bound: the input has at most `Q_{i−1}` nonzero entries, and the port keeps the source's choice, by query support, between the dense pass and a pass over the windows that contain a queried position. The equality tables are `2^18` products in `E` each for `z_1` and `z_0` and `2^14`, `2^10`, `2^6` for the later samples, 541,760 products and 6,501,120 multiplications, with `λ_i` folded into the first entry; merging a new weight into `ω` is additions only.
+
+**`open`, later commitments.** After the `k_i` rounds of level `i < R−1` the folded message is `f_{i+1}`, already in memory. It is encoded with 16 lanes on the domain of dimension `d_{i+1}`: `16·c_{i+1}·2^(d_{i+1}−1)` butterflies of `E` by `K`, 29,360,128, 10,485,760, 3,145,728 and 524,288, in all 43,515,904. Its tree has `2^(d_{i+1})` leaves of 384 bytes, 6 compressions each: 3,440,636 compressions for the four later trees. The sample `y_{i+1}` is an inner product of `2^(c_i)` elements of `E` with the equality table of `z_{i+1}`, products into an accumulator: `6·(2^18 + 2^14 + 2^10 + 2^6) = 1,677,696` multiplications for the four samples. The subspace-polynomial constants and the twiddles of a domain depend on `d` alone; they are computed once per level and geometry and their cost is inside the measured unit `nb1`.
 
 **Memory at `t = 22`.**
 

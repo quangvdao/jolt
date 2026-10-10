@@ -455,6 +455,138 @@ fn general_eq_term_counts_match_defining_rounds_final_values_and_proof() {
 }
 
 #[test]
+fn general_eq_terms_cross_cache_tiles_and_cycle_chunks() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0006);
+    let source = columns(17, 2, 2, false);
+    let points = (0..2)
+        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .collect();
+    let terms = terms(17, 3, false, &mut rng);
+    let fixture = Fixture::prove(source, points, &terms, true, false).unwrap();
+    fixture.assert_definition();
+    fixture.assert_changed_coefficient_rejected();
+}
+
+#[test]
+fn dense_chunk_product_crosses_cycle_chunks() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0007);
+    let source = columns(14, 2, 1, false);
+    let points = (0..2)
+        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .collect();
+    let terms = terms(14, 2, true, &mut rng);
+    let fixture = Fixture::prove(source, points, &terms, false, false).unwrap();
+    fixture.assert_definition();
+    fixture.assert_changed_coefficient_rejected();
+}
+
+#[test]
+fn small_cycle_domains_and_zero_weights_match_defining_sum() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0008);
+    for log_t in [1, 2] {
+        for d in [1, 2] {
+            for (eq_terms, zero_coefficients) in [(false, 0), (true, 0), (false, 2), (true, 1)] {
+                let source = columns(log_t, d, 1, false);
+                let points = (0..d)
+                    .map(|column| random_point(source.source().bits(column), &mut rng))
+                    .collect();
+                let mut terms = terms(log_t, 2, false, &mut rng);
+                for term in terms.iter_mut().take(zero_coefficients) {
+                    let ChunkWeightTerm::Eq { coefficient, .. } = term else {
+                        unreachable!()
+                    };
+                    *coefficient = ZERO;
+                }
+                let fixture = Fixture::prove(source, points, &terms, eq_terms, false).unwrap();
+                fixture.assert_definition();
+                fixture.assert_changed_coefficient_rejected();
+            }
+        }
+    }
+}
+
+#[test]
+fn later_zero_equality_prefix_matches_defining_sum() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0009);
+    let source = columns(4, 2, 2, false);
+    let points = (0..2)
+        .map(|column| random_point(source.source().bits(column), &mut rng))
+        .collect::<Vec<_>>();
+    let term_point = vec![F128::from_raw(2), ZERO, ONE, ZERO];
+    let term = ChunkWeightTerm::Eq {
+        coefficient: ONE,
+        point: term_point.clone(),
+    };
+    let mut terms = terms(4, 3, false, &mut rng);
+    terms[0] = term;
+    let leaves = std::iter::once(defining_weight(4, &terms))
+        .chain(points.iter().enumerate().map(|(column, point)| {
+            (0..source.cycles())
+                .map(|cycle| equality(point, source.index(column, cycle).unwrap()))
+                .collect()
+        }))
+        .collect::<Vec<_>>();
+    let input_terms = terms
+        .iter()
+        .map(|term| {
+            let ChunkWeightTerm::Eq { coefficient, point } = term else {
+                unreachable!()
+            };
+            let claim = (0..source.cycles())
+                .map(|cycle| {
+                    *coefficient
+                        * equality(point, cycle)
+                        * leaves[1..].iter().map(|leaf| leaf[cycle]).product::<F128>()
+                })
+                .sum();
+            EqTerm {
+                coefficient: *coefficient,
+                point: point.clone(),
+                claim,
+            }
+        })
+        .collect();
+    let mut core =
+        ChunkProductCore::new(source, points, ChunkWeight::EqTerms(input_terms)).unwrap();
+    let challenges = [
+        F128::from_raw(4),
+        F128::from_raw(8),
+        ONE + term_point[2],
+        F128::from_raw(14),
+    ];
+    let prefix_before = term_point[..2]
+        .iter()
+        .zip(&challenges[..2])
+        .map(|(&coordinate, &challenge)| ONE + coordinate + challenge)
+        .product::<F128>();
+    assert_ne!(prefix_before, ZERO);
+    assert_eq!(prefix_before * (ONE + term_point[2] + challenges[2]), ZERO);
+    let mut claim = (0..leaves[0].len())
+        .map(|cycle| leaves.iter().map(|leaf| leaf[cycle]).product::<F128>())
+        .sum();
+    let oracle_leaves = leaves.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    for (round, &challenge) in challenges.iter().enumerate() {
+        let expected = round_polynomial(&oracle_leaves, &challenges[..round], 3, |values| {
+            values.iter().copied().product::<F128>()
+        })
+        .unwrap();
+        let bind = round.checked_sub(1).map(|previous| challenges[previous]);
+        let message = core.prove_round(bind, round, claim).unwrap();
+        assert_eq!(message, expected);
+        claim = expected.evaluate(challenge);
+    }
+    core.finish_rounds(challenges[3]).unwrap();
+    let expected = leaves
+        .iter()
+        .map(|leaf| mle_at(leaf, &challenges).unwrap())
+        .collect::<Vec<_>>();
+    let final_values = core.final_values().unwrap();
+    assert_eq!(final_values.0, expected[0]);
+    assert_eq!(final_values.1, expected[1..]);
+    assert_eq!(claim, expected.iter().copied().product::<F128>());
+}
+
+#[test]
 fn changed_eq_term_claim_is_rejected_for_every_column_count() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0004);
     for d in 1..=7 {

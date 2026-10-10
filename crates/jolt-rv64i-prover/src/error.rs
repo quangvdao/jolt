@@ -86,4 +86,19 @@ pub enum Rv64iProverError {
     RamDimension { log_K_ram: usize },
     #[error("witness initial RAM differs from the checked initial RAM")]
     InitialRamMismatch,
+    #[error("batch {batch} failed: {source}")]
+    Batch {
+        batch: &'static str,
+        #[source]
+        source: Box<Rv64iProverError>,
+    },
+}
+
+impl Rv64iProverError {
+    pub(crate) fn in_batch(self, batch: &'static str) -> Self {
+        Self::Batch {
+            batch,
+            source: Box::new(self),
+        }
+    }
 }

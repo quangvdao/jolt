@@ -13,7 +13,7 @@ use jolt_rv64i_verifier::{
     preprocessing::VerifierPreprocessing,
     proof::Rv64iProof,
     statement::{CheckedInputs, Statement},
-    transcript::preamble,
+    transcript::{preamble, Rv64iTranscript},
 };
 use jolt_transcript::Transcript;
 
@@ -23,9 +23,21 @@ pub struct ProverPreprocessing<S: BitsCommitmentProver> {
     pub scheme: S::ProverSetup,
 }
 
+/// Proves the statement using the reference protocol transcript and the supplied kernel registries.
+/// Returns the first witness, batch or commitment error; output agreement is checked by the protocol.
+pub fn prove<S: BitsCommitmentProver>(
+    preprocessing: &ProverPreprocessing<S>,
+    statement: &Statement,
+    witness: &Rv64iWitness,
+    backend: &Rv64iBackend<F128>,
+) -> Result<Rv64iProof<S>, Rv64iProverError> {
+    prove_with_transcript::<S, Rv64iTranscript>(preprocessing, backend, statement, witness)
+        .map(|(proof, _)| proof)
+}
+
 /// Proves the checked statement using the witness's RAM exponent and final PC.
 /// Checks row count, layout and initial RAM before commitment; public outputs remain protocol obligations.
-pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
+pub fn prove_with_transcript<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
     preprocessing: &ProverPreprocessing<S>,
     backend: &Rv64iBackend,
     statement: &Statement,
@@ -49,7 +61,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
     }
     if witness.layout.log_K_bytecode() != checked.log_K_bytecode()
         || witness.layout.log_K_ram() != checked.log_K_ram()
-        || witness.layout.lowest_address() != checked.layout().lowest_address() {
+        || witness.layout.lowest_address() != checked.layout().lowest_address()
+    {
         return Err(Rv64iProverError::OutputLayoutMismatch);
     }
     if witness.initial_ram != checked.initial_ram() {
@@ -73,7 +86,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &backend.stage1,
         &mut session,
         &mut transcript,
-    )?;
+    )
+    .map_err(|error| error.in_batch("1"))?;
     let (stage2, s2) = stage2::prove(
         &checked,
         witness,
@@ -81,7 +95,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &mut session,
         &mut transcript,
         &s1,
-    )?;
+    )
+    .map_err(|error| error.in_batch("2"))?;
     let (stage3a, s3a) = stage3a::prove(
         &checked,
         witness,
@@ -89,7 +104,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &mut session,
         &mut transcript,
         &s2,
-    )?;
+    )
+    .map_err(|error| error.in_batch("3a"))?;
     let (stage3b, s3b) = stage3b::prove(
         &checked,
         witness,
@@ -98,7 +114,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &mut transcript,
         &s1,
         &s3a,
-    )?;
+    )
+    .map_err(|error| error.in_batch("3b"))?;
     let (stage4, s4) = stage4::prove(
         &checked,
         witness,
@@ -107,7 +124,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &mut transcript,
         &s3a,
         &s3b,
-    )?;
+    )
+    .map_err(|error| error.in_batch("4"))?;
     let (stage5, s5) = stage5::prove(
         &checked,
         witness,
@@ -116,7 +134,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &mut transcript,
         &s3a,
         &s4,
-    )?;
+    )
+    .map_err(|error| error.in_batch("5"))?;
     let (stage6a, s6a) = stage6a::prove(
         &checked,
         witness,
@@ -127,7 +146,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &s3b,
         &s4,
         &s5,
-    )?;
+    )
+    .map_err(|error| error.in_batch("6a"))?;
     let (stage6b, s6b) = stage6b::prove(
         &checked,
         witness,
@@ -141,7 +161,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         &s4,
         &s5,
         &s6a,
-    )?;
+    )
+    .map_err(|error| error.in_batch("6b"))?;
     let rho = transcript.challenge_vector(8);
     let opening = S::open(
         &preprocessing.scheme,

@@ -4,6 +4,7 @@
 //! emits rows and weights in cycle order into disjoint portions of one buffer,
 //! then applies each range's pairs to its own output slice. Counts and offsets
 //! do not depend on the Rayon pool; all combinations are field XORs.
+//! Each chunk owns one contiguous pair segment, grouped by destination range.
 
 use std::mem::size_of;
 use std::sync::Arc;
@@ -22,8 +23,13 @@ const RANGES: usize = 256;
 pub enum ScatterError {
     #[error("bytecode row count {rows} requires an index above {limit}")]
     RowCount { rows: usize, limit: usize },
-    #[error("cycle count {cycles} exceeds the count limit {limit}")]
-    CycleCount { cycles: usize, limit: usize },
+    #[error("chunk {chunk} range {range} count {count} exceeds {limit}")]
+    Count {
+        chunk: usize,
+        range: usize,
+        count: u64,
+        limit: usize,
+    },
     #[error("scatter {buffer} with {len} elements of {element_size} bytes cannot be represented")]
     StorageSize {
         buffer: &'static str,
@@ -55,33 +61,31 @@ fn check_storage<T>(len: usize, buffer: &'static str) -> Result<(), ScatterError
     Ok(())
 }
 
-#[derive(Default)]
-struct Segment<'a> {
-    rows: &'a mut [u32],
-    weights: &'a mut [F128],
-}
-
 /// Counts and offsets for summing cycle weights at their bytecode row indices.
 ///
 /// The source's immutable dimensions and indices must already be checked by
-/// [`ValidatedTrace`]. Prefix counts use four bytes per chunk and row range;
-/// scatter scratch consists of one packed row and one field weight per cycle.
+/// [`ValidatedTrace`]. Counts and offsets each use four bytes per chunk and row
+/// range. Pair scratch holds one packed row and one field weight per cycle; a
+/// flat cursor buffer holds one four-byte cursor per chunk and row range.
 pub struct ScatterPlan<S: CycleSource> {
     trace: Arc<ValidatedTrace<S>>,
-    prefix: Vec<[u32; RANGES]>,
-    offsets: [usize; RANGES + 1],
+    counts: Vec<[u32; RANGES]>,
+    offsets: Vec<[u32; RANGES]>,
+    active: Vec<u8>,
+    active_offsets: Vec<usize>,
     cycles: usize,
     rows: usize,
     chunk_len: usize,
+    cursor_len: usize,
     range_shift: u32,
 }
 
 impl<S: CycleSource> ScatterPlan<S> {
     /// Count destinations in chunks chosen by [`CycleChunks`] at round zero.
     ///
-    /// Counts must fit `u32`, packed row indices must fit `u32`, and all scratch
-    /// and output capacities must fit a Rust slice. One row and fewer than 256
-    /// rows are supported; unused destination ranges are empty.
+    /// Per-chunk counts and offsets must fit `u32`, packed row indices must fit
+    /// `u32`, and all scratch and output capacities must fit a Rust slice. One
+    /// row and fewer than 256 rows are supported; unused ranges are empty.
     pub fn new(trace: Arc<ValidatedTrace<S>>) -> Result<Self, ScatterError> {
         let source = trace.source();
         let cycles = source.cycles();
@@ -92,38 +96,61 @@ impl<S: CycleSource> ScatterPlan<S> {
                 limit: u32::MAX as usize,
             });
         }
-        if cycles > u32::MAX as usize {
-            return Err(ScatterError::CycleCount {
-                cycles,
-                limit: u32::MAX as usize,
-            });
-        }
         let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)?;
         let chunk_len = geometry.chunk_len();
         let chunks = cycles / chunk_len;
-        check_storage::<[u32; RANGES]>(chunks + 1, "counts")?;
+        check_storage::<[u32; RANGES]>(chunks, "counts")?;
+        check_storage::<[u32; RANGES]>(chunks, "offsets")?;
+        check_storage::<usize>(chunks + 1, "active offsets")?;
+        let cursor_len = chunks * RANGES;
+        check_storage::<u32>(cursor_len, "cursors")?;
+        check_storage::<u8>(cursor_len.min(cycles), "active ranges")?;
         check_storage::<u32>(cycles, "pair rows")?;
         check_storage::<F128>(cycles, "pair weights")?;
         check_storage::<F128>(rows, "output")?;
         let range_shift = rows.ilog2().saturating_sub(8);
-        let mut prefix = vec![[0_u32; RANGES]; chunks + 1];
-        for chunk in 0..chunks {
-            prefix[chunk + 1] = prefix[chunk];
+        let mut counts = vec![[0_u32; RANGES]; chunks];
+        for (chunk, counts) in counts.iter_mut().enumerate() {
             for cycle in chunk * chunk_len..(chunk + 1) * chunk_len {
-                prefix[chunk + 1][source.bytecode_index(cycle) >> range_shift] += 1;
+                let range = source.bytecode_index(cycle) >> range_shift;
+                counts[range] = counts[range].checked_add(1).ok_or(ScatterError::Count {
+                    chunk,
+                    range,
+                    count: u64::from(counts[range]) + 1,
+                    limit: u32::MAX as usize,
+                })?;
             }
         }
-        let mut offsets = [0; RANGES + 1];
-        for range in 0..RANGES {
-            offsets[range + 1] = offsets[range] + prefix[chunks][range] as usize;
+        let mut offsets = vec![[0_u32; RANGES]; chunks];
+        let mut active = Vec::with_capacity(cursor_len.min(cycles));
+        let mut active_offsets = Vec::with_capacity(chunks + 1);
+        active_offsets.push(0);
+        for (chunk, (counts, offsets)) in counts.iter().zip(&mut offsets).enumerate() {
+            let mut next = 0_u32;
+            for (range, (&count, offset)) in counts.iter().zip(offsets).enumerate() {
+                *offset = next;
+                next = next.checked_add(count).ok_or(ScatterError::Count {
+                    chunk,
+                    range,
+                    count: u64::from(next) + u64::from(count),
+                    limit: u32::MAX as usize,
+                })?;
+                if count != 0 {
+                    active.push(range as u8);
+                }
+            }
+            active_offsets.push(active.len());
         }
         Ok(Self {
             trace,
-            prefix,
+            counts,
             offsets,
+            active,
+            active_offsets,
             cycles,
             rows,
             chunk_len,
+            cursor_len,
             range_shift,
         })
     }
@@ -138,11 +165,18 @@ impl<S: CycleSource> ScatterPlan<S> {
         self.rows
     }
 
+    /// Required length of the reusable cursor buffer passed to a scatter.
+    /// Only destination ranges occurring in a chunk are initialized or read.
+    pub fn cursor_len(&self) -> usize {
+        self.cursor_len
+    }
+
     /// Return `out[k] = Σ_{j: bytecode_index(j) = k} weight(j)`.
     ///
     /// Allocates one row buffer and one weight buffer of the cycle count and a
-    /// zeroed output of the bytecode row count; it allocates nothing per chunk,
-    /// cycle or pair. The weight function is called once per cycle and must be
+    /// zeroed output of the bytecode row count and one flat cursor buffer;
+    /// it allocates nothing per chunk, cycle or pair. The weight function is
+    /// called once per cycle and must be
     /// a deterministic function of its argument for a deterministic result.
     pub fn scatter(
         &self,
@@ -151,14 +185,16 @@ impl<S: CycleSource> ScatterPlan<S> {
         let mut rows = vec![0; self.cycles];
         let mut weights = vec![F128::from_raw(0); self.cycles];
         let mut output = vec![F128::from_raw(0); self.rows];
-        self.scatter_into(weight, &mut rows, &mut weights, &mut output)?;
+        let mut cursors = vec![0; self.cursor_len];
+        self.scatter_into(weight, &mut rows, &mut weights, &mut output, &mut cursors)?;
         Ok(output)
     }
 
     /// XOR the scatter into caller-provided output using caller-provided pairs.
     ///
     /// Both pair buffers must have exactly [`Self::cycles`] elements and the
-    /// output exactly [`Self::bytecode_rows`] elements. The pair buffers are
+    /// output exactly [`Self::bytecode_rows`] elements, and cursors exactly
+    /// [`Self::cursor_len`] elements. The pair buffers are
     /// overwritten; output's initial contribution is retained. A caller wanting
     /// the scatter alone supplies zeroed output. Lengths are checked before any
     /// mutation and no allocation or zero-fill occurs in this pass.
@@ -168,11 +204,13 @@ impl<S: CycleSource> ScatterPlan<S> {
         rows: &mut [u32],
         weights: &mut [F128],
         output: &mut [F128],
+        cursors: &mut [u32],
     ) -> Result<(), ScatterError> {
         for (buffer, expected, actual) in [
             ("pair rows", self.cycles, rows.len()),
             ("pair weights", self.cycles, weights.len()),
             ("output", self.rows, output.len()),
+            ("cursors", self.cursor_len, cursors.len()),
         ] {
             if actual != expected {
                 return Err(ScatterError::BufferLength {
@@ -182,74 +220,46 @@ impl<S: CycleSource> ScatterPlan<S> {
                 });
             }
         }
-        let mut remaining_rows = &mut *rows;
-        let mut remaining_weights = &mut *weights;
-        let segments = std::array::from_fn(|range| {
-            let len = self.offsets[range + 1] - self.offsets[range];
-            let (range_rows, next_rows) = std::mem::take(&mut remaining_rows).split_at_mut(len);
-            let (range_weights, next_weights) =
-                std::mem::take(&mut remaining_weights).split_at_mut(len);
-            remaining_rows = next_rows;
-            remaining_weights = next_weights;
-            Segment {
-                rows: range_rows,
-                weights: range_weights,
-            }
-        });
-        self.emit(&weight, segments, 0, self.prefix.len() - 1);
+        let source = self.trace.source();
+        rows.par_chunks_mut(self.chunk_len)
+            .zip(weights.par_chunks_mut(self.chunk_len))
+            .zip(cursors.par_chunks_mut(RANGES))
+            .enumerate()
+            .for_each(|(chunk, ((rows, weights), cursors))| {
+                let offsets = &self.offsets[chunk];
+                for &range in
+                    &self.active[self.active_offsets[chunk]..self.active_offsets[chunk + 1]]
+                {
+                    cursors[range as usize] = offsets[range as usize];
+                }
+                let start = chunk * self.chunk_len;
+                for cycle in start..start + self.chunk_len {
+                    let row = source.bytecode_index(cycle);
+                    let cursor = &mut cursors[row >> self.range_shift];
+                    let offset = *cursor as usize;
+                    rows[offset] = row as u32;
+                    weights[offset] = weight(cycle);
+                    *cursor += 1;
+                }
+            });
         let range_len = 1 << self.range_shift;
         output
             .par_chunks_mut(range_len)
             .enumerate()
             .for_each(|(range, output)| {
-                let start = self.offsets[range];
-                let end = self.offsets[range + 1];
                 let range_start = range << self.range_shift;
-                for (&row, &value) in rows[start..end].iter().zip(&weights[start..end]) {
-                    output[row as usize - range_start] += value;
+                for (chunk, (counts, offsets)) in self.counts.iter().zip(&self.offsets).enumerate()
+                {
+                    let count = counts[range] as usize;
+                    if count != 0 {
+                        let start = chunk * self.chunk_len + offsets[range] as usize;
+                        let end = start + count;
+                        for (&row, &value) in rows[start..end].iter().zip(&weights[start..end]) {
+                            output[row as usize - range_start] += value;
+                        }
+                    }
                 }
             });
         Ok(())
-    }
-
-    fn emit(
-        &self,
-        weight: &(impl Fn(usize) -> F128 + Sync),
-        mut segments: [Segment<'_>; RANGES],
-        start: usize,
-        end: usize,
-    ) {
-        if end - start == 1 {
-            let source = self.trace.source();
-            let mut cursors = [0; RANGES];
-            for cycle in start * self.chunk_len..end * self.chunk_len {
-                let row = source.bytecode_index(cycle);
-                let range = row >> self.range_shift;
-                let cursor = cursors[range];
-                segments[range].rows[cursor] = row as u32;
-                segments[range].weights[cursor] = weight(cycle);
-                cursors[range] += 1;
-            }
-            return;
-        }
-        let middle = start + (end - start) / 2;
-        let left = std::array::from_fn(|range| {
-            let segment = std::mem::take(&mut segments[range]);
-            let split = (self.prefix[middle][range] - self.prefix[start][range]) as usize;
-            let (left_rows, right_rows) = segment.rows.split_at_mut(split);
-            let (left_weights, right_weights) = segment.weights.split_at_mut(split);
-            segments[range] = Segment {
-                rows: right_rows,
-                weights: right_weights,
-            };
-            Segment {
-                rows: left_rows,
-                weights: left_weights,
-            }
-        });
-        let _ = rayon::join(
-            || self.emit(weight, left, start, middle),
-            || self.emit(weight, segments, middle, end),
-        );
     }
 }

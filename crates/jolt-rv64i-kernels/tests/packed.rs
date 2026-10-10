@@ -274,12 +274,17 @@ mod tests {
             (1, 1, 1),
             (1 << 20, 1 << 20, 1 << 20),
         ] {
-            let source = Arc::new(Rows {
-                rows,
-                indices: (0..cycles)
-                    .map(|cycle| (cycle * 17) & (visited - 1))
-                    .collect(),
-            });
+            let mut indices: Vec<_> = (0..cycles)
+                .map(|cycle| (cycle * 17) & (visited - 1))
+                .collect();
+            if rows == 1 << 20 {
+                let mut rng = ChaCha20Rng::seed_from_u64(76);
+                for end in (1..indices.len()).rev() {
+                    let index = rng.next_u32() as usize % (end + 1);
+                    indices.swap(end, index);
+                }
+            }
+            let source = Arc::new(Rows { indices, rows });
             let weights: Vec<_> = (0..cycles)
                 .map(|cycle| F128::from_raw((cycle as u128) * 31 + 1))
                 .collect();
@@ -398,8 +403,15 @@ mod tests {
         let mut rows = [77];
         let mut weights = [F128::from_raw(13)];
         let mut output = [];
+        let mut cursors = vec![0; plan.cursor_len()];
         assert_eq!(
-            plan.scatter_into(|_| F128::from_raw(1), &mut rows, &mut weights, &mut output),
+            plan.scatter_into(
+                |_| F128::from_raw(1),
+                &mut rows,
+                &mut weights,
+                &mut output,
+                &mut cursors
+            ),
             Err(ScatterError::BufferLength {
                 buffer: "output",
                 expected: 1,

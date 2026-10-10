@@ -468,7 +468,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                         *a += r * (*a + a1);
                         *b += r * (*b + b1);
                         *c += r * (*c + c1);
-                        let [ta, tb, _] = tails[usize::from(tail)];
+                        let [ta, tb, _] = tails[usize::from(tail & 63)];
                         inner[0].fmadd(weight, *a * *b + *c);
                         inner[1].fmadd(weight, (*a + ta) * (*b + tb));
                     }
@@ -482,7 +482,7 @@ impl<S: LaneSource> OuterF2Core<S> {
             .map(Accumulator::reduce)
     }
 
-    fn cycle_first(&mut self, r: F128, at_one: bool) -> Sums {
+    fn cycle_first(&mut self, r: F128) -> Sums {
         let eq = self.cycle_eq.as_ref();
         let Some(eq) = eq else {
             return [ZERO; 2];
@@ -516,16 +516,12 @@ impl<S: LaneSource> OuterF2Core<S> {
                         .zip(tail.chunks_exact(2))
                         .zip(lo)
                     {
-                        if !at_one {
-                            for (lane, table) in [&mut *a, &mut *b, &mut *c].into_iter().enumerate()
-                            {
-                                for (value, &byte) in table.iter_mut().zip(tail) {
-                                    *value += r * (*value + tails[usize::from(byte)][lane]);
-                                }
+                        for (lane, table) in [&mut *a, &mut *b, &mut *c].into_iter().enumerate() {
+                            for (value, &byte) in table.iter_mut().zip(tail) {
+                                *value += r * (*value + tails[usize::from(byte & 63)][lane]);
                             }
                         }
-                        let endpoint = usize::from(at_one);
-                        inner[0].fmadd(weight, a[endpoint] * b[endpoint] + c[endpoint]);
+                        inner[0].fmadd(weight, a[0] * b[0] + c[0]);
                         inner[1].fmadd(weight, (a[0] + a[1]) * (b[0] + b[1]));
                     }
                     for (total, value) in total.iter_mut().zip(inner) {
@@ -538,7 +534,7 @@ impl<S: LaneSource> OuterF2Core<S> {
             .map(Accumulator::reduce)
     }
 
-    fn cycle_next(&mut self, round: usize, r: F128, at_one: bool) -> Sums {
+    fn cycle_next(&mut self, round: usize, r: F128) -> Sums {
         let Some(eq) = &self.cycle_eq else {
             return [ZERO; 2];
         };
@@ -588,8 +584,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                                 *out = pair[0] + r * (pair[0] + pair[1]);
                             }
                         }
-                        let endpoint = usize::from(at_one);
-                        inner[0].fmadd(weight, oa[endpoint] * ob[endpoint] + oc[endpoint]);
+                        inner[0].fmadd(weight, oa[0] * ob[0] + oc[0]);
                         inner[1].fmadd(weight, (oa[0] + oa[1]) * (ob[0] + ob[1]));
                     }
                     for (total, value) in total.iter_mut().zip(inner) {
@@ -690,22 +685,34 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
                 }
             })?,
             6 => self.materialise(),
-            7 => self.group_bind(bind.unwrap_or(ZERO)),
-            8 => {
-                self.cycle_eq = Some(split_eq(&self.tau[8..], Some(self.sigma)).map_err(|_| {
-                    SumcheckError::MissingEvaluationSource {
-                        kind: "outer cycle equality",
+            7.. => {
+                let Some(r) = bind else {
+                    return Err(SumcheckError::MissingEvaluationSource {
+                        kind: "outer previous challenge",
+                    });
+                };
+                match round {
+                    7 => self.group_bind(r),
+                    8 => {
+                        self.cycle_eq =
+                            Some(split_eq(&self.tau[8..], Some(self.sigma)).map_err(|_| {
+                                SumcheckError::MissingEvaluationSource {
+                                    kind: "outer cycle equality",
+                                }
+                            })?);
+                        self.cycle_first(r)
                     }
-                })?);
-                self.cycle_first(bind.unwrap_or(ZERO), false)
+                    _ => self.cycle_next(round - 8, r),
+                }
             }
-            _ => self.cycle_next(round - 8, bind.unwrap_or(ZERO), false),
         };
-        let poly = if round < 8 {
-            let linear = (
+        let row_linear = (round < 8).then(|| {
+            (
                 self.sigma * (ONE + self.tau[round]),
                 self.sigma * self.tau[round],
-            );
+            )
+        });
+        let one = if let Some(linear) = row_linear {
             let endpoint = if linear.1 == ZERO {
                 if round < 6 {
                     self.position::<true>(round).map_err(|_| {
@@ -719,19 +726,27 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
             } else {
                 ZERO
             };
-            let one =
-                gruen_recover_endpoint(linear.0 * sums[0], linear.1, previous_claim, || endpoint)
-                    .map_err(|actual| SumcheckError::RoundCheckFailed {
-                    round,
-                    expected: previous_claim,
-                    actual,
-                })?;
-            let coefficients =
-                coefficients_from_nodes(2, sums[0], sums[1], one, &[]).map_err(|_| {
-                    SumcheckError::MissingEvaluationSource {
-                        kind: "outer quadratic",
-                    }
-                })?;
+            gruen_recover_endpoint(linear.0 * sums[0], linear.1, previous_claim, || endpoint)
+        } else {
+            let Some(eq) = &self.cycle_eq else {
+                return Err(SumcheckError::MissingEvaluationSource {
+                    kind: "outer cycle equality",
+                });
+            };
+            eq.recover_q_one(sums[0], previous_claim, || self.cycle_one(round - 8))
+        }
+        .map_err(|actual| SumcheckError::RoundCheckFailed {
+            round,
+            expected: previous_claim,
+            actual,
+        })?;
+        let coefficients =
+            coefficients_from_nodes(2, sums[0], sums[1], one, &[]).map_err(|_| {
+                SumcheckError::MissingEvaluationSource {
+                    kind: "outer quadratic",
+                }
+            })?;
+        let poly = if let Some(linear) = row_linear {
             gruen_mul_linear(linear, &coefficients)
         } else {
             let Some(eq) = &self.cycle_eq else {
@@ -739,19 +754,6 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
                     kind: "outer cycle equality",
                 });
             };
-            let one = eq
-                .recover_q_one(sums[0], previous_claim, || self.cycle_one(round - 8))
-                .map_err(|actual| SumcheckError::RoundCheckFailed {
-                    round,
-                    expected: previous_claim,
-                    actual,
-                })?;
-            let coefficients =
-                coefficients_from_nodes(2, sums[0], sums[1], one, &[]).map_err(|_| {
-                    SumcheckError::MissingEvaluationSource {
-                        kind: "outer quadratic",
-                    }
-                })?;
             eq.round_poly_from_q_coeffs(&coefficients)
         };
         self.state = if round + 1 == self.num_rounds() {

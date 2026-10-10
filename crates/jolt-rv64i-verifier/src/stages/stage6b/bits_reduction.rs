@@ -1,6 +1,6 @@
 //! Concrete reduction of the six committed functionals to one cycle point.
 
-use jolt_claims::SymbolicSumcheck;
+use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
 use jolt_rv64i_arith::{Layout, BITS_COLUMNS};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
@@ -213,41 +213,38 @@ impl<F: JoltField> BitsReduction<F> {
         if column >= BITS_COLUMNS {
             return Err(PointsError::MissingColumn { column });
         }
-        let cycle_weights = [
-            points::eq(&self.r_1, point)?,
-            points::eq(&self.r_3, point)?,
-            points::eq(&self.r_5, point)?,
-        ];
+        self.column_weights(point, challenges)?
+            .get(column)
+            .copied()
+            .ok_or(PointsError::MissingColumn { column })
+    }
+
+    /// Computes the three cycle equalities once and folds the six sparse supports.
+    pub fn column_weights(
+        &self,
+        point: &[F],
+        challenges: &BitsReductionChallenges<F>,
+    ) -> Result<[F; BITS_COLUMNS], PointsError> {
+        let cycle_1 = points::eq(&self.r_1, point)?;
+        let cycle_3 = points::eq(&self.r_3, point)?;
+        let cycle_5 = points::eq(&self.r_5, point)?;
         let coefficients = [
-            challenges.direct_columns,
-            challenges.variant_bits,
-            challenges.pos_ra_0,
-            challenges.pos_ra_1,
-            challenges.should_branch,
-            challenges.inc,
+            cycle_1 * challenges.direct_columns,
+            cycle_3 * challenges.variant_bits,
+            cycle_3 * challenges.pos_ra_0,
+            cycle_3 * challenges.pos_ra_1,
+            cycle_3 * challenges.should_branch,
+            cycle_5 * challenges.inc,
         ];
-        self.weights.iter().zip(coefficients).enumerate().try_fold(
-            F::zero(),
-            |sum, (index, (weights, coefficient))| {
-                let cycle_index = if index == 0 {
-                    0
-                } else if index == 5 {
-                    2
-                } else {
-                    1
-                };
-                let cycle = cycle_weights
-                    .get(cycle_index)
-                    .copied()
-                    .ok_or(PointsError::MissingColumn { column })?;
-                let weight: F = weights
-                    .iter()
-                    .filter(|(y, _)| *y == column)
-                    .map(|(_, weight)| *weight)
-                    .sum();
-                Ok(sum + cycle * coefficient * weight)
-            },
-        )
+        let mut columns = [F::zero(); BITS_COLUMNS];
+        for (weights, coefficient) in self.weights.iter().zip(coefficients) {
+            for &(column, weight) in weights {
+                *columns
+                    .get_mut(column)
+                    .ok_or(PointsError::MissingColumn { column })? += coefficient * weight;
+            }
+        }
+        Ok(columns)
     }
 
     fn term_error(error: PointsError) -> VerifierError {
@@ -262,6 +259,46 @@ impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
     type Symbolic = BitsReductionSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
+    }
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign derived ids fail closed as missing claims"
+    )]
+    fn expected_output(
+        &self,
+        _inputs: &BitsReductionInputClaims<Vec<F>>,
+        values: &BitsReductionOutputClaims<F>,
+        outputs: &BitsReductionOutputClaims<Vec<F>>,
+        challenges: &BitsReductionChallenges<F>,
+    ) -> Result<F, VerifierError> {
+        let point = outputs.columns.first().ok_or_else(|| {
+            Self::term_error(PointsError::Dimension {
+                expected: BITS_COLUMNS,
+                actual: outputs.columns.len(),
+            })
+        })?;
+        let weights = self
+            .column_weights(point, challenges)
+            .map_err(Self::term_error)?;
+        self.symbolic.output_expression::<F>().try_evaluate(
+            |id| {
+                values
+                    .resolve_output(id)
+                    .ok_or(VerifierError::MissingOpeningClaim { id: (*id).into() })
+            },
+            |id| {
+                challenges
+                    .resolve_challenge(id)
+                    .ok_or(VerifierError::MissingStageClaimChallenge { id: (*id).into() })
+            },
+            |id| match id {
+                DerivedId::BitsReduction(BitsReductionDerived::ColumnWeight(column)) => weights
+                    .get(*column)
+                    .copied()
+                    .ok_or(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
+                _ => Err(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
+            },
+        )
     }
     fn derive_opening_points(
         &self,

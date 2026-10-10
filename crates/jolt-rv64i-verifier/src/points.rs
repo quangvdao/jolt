@@ -142,13 +142,21 @@ pub fn chunk<F: JoltField>(
             actual: point.len(),
         });
     }
-    let zero = eq_index(point, 0)?;
+    let weights = eq_table(point)?;
+    let zero = weights.first().copied().ok_or(PointsError::Index {
+        index: 0,
+        variables: expected,
+    })?;
     (1..=descriptor.indicators()).try_fold(zero, |sum, digit| {
         let column = usize::from(descriptor.start()) + digit - 1;
         let value = columns
             .get(column)
             .ok_or(PointsError::MissingColumn { column })?;
-        Ok(sum + (eq_index(point, digit)? + zero) * *value)
+        let weight = weights.get(digit).copied().ok_or(PointsError::Index {
+            index: digit,
+            variables: expected,
+        })?;
+        Ok(sum + (weight + zero) * *value)
     })
 }
 

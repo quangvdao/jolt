@@ -1,9 +1,6 @@
 //! Dense bytecode address and cycle kernels for batch-local protocol tests.
 use crate::plane::{Rv64iPlane, Rv64iWitness};
-use crate::reference::{
-    ra_product::{binary_point, binary_table},
-    views,
-};
+use crate::reference::views;
 use jolt_field::JoltField;
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{
@@ -13,7 +10,7 @@ use jolt_poly::{BindingOrder, Polynomial, UnivariatePoly};
 use jolt_rv64i_verifier::ids::{
     BytecodeCycleDerived, CycleWeight, DerivedId, OpeningId, RelationId, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points;
+use jolt_rv64i_verifier::points::{self, PointsError};
 use jolt_rv64i_verifier::public::bytecode::BytecodeWeights;
 use jolt_rv64i_verifier::stages::stage6a::{
     BytecodeReadAddress, BytecodeReadAddressInputClaims, BytecodeReadAddressOutputClaims,
@@ -148,17 +145,20 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadAddress<F>, Rv64iPlane>
         }
         let mut r: [Vec<F>; 5] = std::array::from_fn(|_| vec![F::zero(); count]);
         let p = relation.public_points();
+        let next = points::next_table(&p.r_3).map_err(|error| KernelError::InvalidGeometry {
+            reason: error.to_string(),
+        })?;
         for (j, row) in witness.bits.iter().enumerate() {
             let index = witness.layout.bytecode_index(row) as usize;
-            let vertex: Vec<F> = (0..p.r_3.len())
-                .map(|i| F::from_u64(((j >> i) & 1) as u64))
-                .collect();
             let values = [
                 points::eq_index(&p.r_3, j),
                 points::eq_index(&p.r_4, j),
                 points::eq_index(&p.r_5, j),
                 Ok(F::from_u64(u64::from(j == 0))),
-                points::next(&p.r_3, &vertex),
+                next.get(j).copied().ok_or(PointsError::Index {
+                    index: j,
+                    variables: p.r_3.len(),
+                }),
             ];
             for (table, value) in r.iter_mut().zip(values) {
                 *table
@@ -195,7 +195,7 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadCycle<F>, Rv64iPlane> for Byteco
     ) -> Result<Box<dyn SumcheckKernel<F, Relation = BytecodeReadCycle<F>>>, KernelError<F>> {
         let mut openings = BTreeMap::new();
         for (c, (chunk, p)) in inputs.relation.chunks().iter().enumerate() {
-            let table = views::chunk(witness, *chunk, &binary_point(p)?).map_err(|e| {
+            let table = views::chunk_in_field(witness, *chunk, p).map_err(|e| {
                 KernelError::InvalidGeometry {
                     reason: e.to_string(),
                 }
@@ -205,7 +205,7 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadCycle<F>, Rv64iPlane> for Byteco
                     VirtualPolynomial::BytecodeRaChunk(c),
                     RelationId::BytecodeReadCycle,
                 ),
-                binary_table(table)?,
+                table,
             );
         }
         let mut derived = BTreeMap::new();
@@ -223,18 +223,22 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadCycle<F>, Rv64iPlane> for Byteco
                 DerivedId::BytecodeReadCycle(BytecodeCycleDerived::BytecodeFold(weight)),
                 Polynomial::new(vec![h; witness.bits.len()]),
             );
-            let table = (0..witness.bits.len())
-                .map(|j| {
-                    let vertex: Vec<F> = (0..inputs.relation.r_3().len())
-                        .map(|i| F::from_u64(((j >> i) & 1) as u64))
-                        .collect();
-                    inputs.relation.weight(weight, &vertex).map_err(|e| {
-                        KernelError::InvalidGeometry {
-                            reason: e.to_string(),
-                        }
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let table = match weight {
+                CycleWeight::Router => points::equality_table(inputs.relation.r_3()),
+                CycleWeight::Read => points::equality_table(inputs.relation.r_4()),
+                CycleWeight::Val => points::equality_table(inputs.relation.r_5()),
+                CycleWeight::Entry => {
+                    let mut values = vec![F::zero(); witness.bits.len()];
+                    if let Some(first) = values.first_mut() {
+                        *first = F::one();
+                    }
+                    Ok(values)
+                }
+                CycleWeight::Next => points::next_table(inputs.relation.r_3()),
+            }
+            .map_err(|error| KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            })?;
             let _ = derived.insert(
                 DerivedId::BytecodeReadCycle(BytecodeCycleDerived::Weight(weight)),
                 Polynomial::new(table),

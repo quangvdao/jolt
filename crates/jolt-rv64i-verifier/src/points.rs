@@ -149,6 +149,17 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
+/// Evaluates `next(point, index)` over the Boolean cube in low-variable-first
+/// order. Shifting the equality table omits the all-ones source and forbids wrap.
+pub fn next_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
+    let mut weights = equality_table(point)?;
+    weights.rotate_right(1);
+    if let Some(first) = weights.first_mut() {
+        *first = F::zero();
+    }
+    Ok(weights)
+}
+
 /// A word lift against one reusable 64-entry equality table of a six-coordinate
 /// low-variable-first bit point. Evaluating a word sums the weights of its set bits
 /// without multiplying.

@@ -4,7 +4,11 @@
     reason = "exhaustive contract tests fail on invalid setup or an unexpected oracle result"
 )]
 
-use super::common::{asm, harness, interp, replay};
+use super::common::{
+    asm, harness,
+    interp::Error as InterpreterError,
+    replay::{self, State},
+};
 use jolt_rv64i_arith::{
     BaseWords, BitsBuilder, BitsRow, BytecodeRow, CycleFacts, Layout, RowSystem, WitnessError,
     WitnessRow,
@@ -65,7 +69,7 @@ fn witness(
     layout: &Layout,
     row: &BytecodeRow,
     bits: &BitsRow,
-    initial: &replay::State,
+    initial: &State,
     next_pc: u64,
 ) -> WitnessRow {
     let base = replay::base_words(layout, row, bits, &initial.registers, &initial.ram, next_pc);
@@ -106,7 +110,7 @@ fn all_59_legal_memory_pairs_reject_committed_and_supplied_mutations() {
             let variant = row.variant.unwrap();
             for offset in (0u8..8).step_by(usize::from(width)) {
                 count += 1;
-                let mut initial = replay::State {
+                let mut initial = State {
                     pc: index as u64 * 4,
                     registers: [0; 32],
                     ram: BTreeMap::from([(1, 0x81a2_c3e4_f596_b7d8)]),
@@ -257,7 +261,7 @@ fn small_ram_exhausts_addresses_indices_and_positions() {
                 let builder = BitsBuilder::new(&layout, &bytecode).unwrap();
                 for displacement in -24i64..(bytes as i64 + 24) {
                     let address = low.wrapping_add(displacement as u64);
-                    let mut initial = replay::State {
+                    let mut initial = State {
                         pc: 0,
                         registers: [0; 32],
                         ram: (0..words)
@@ -283,12 +287,12 @@ fn small_ram_exhausts_addresses_indices_and_positions() {
                     let generated = builder.bits_row(&facts);
                     match &outcome {
                         Ok(_) => assert!(generated.is_ok()),
-                        Err(interp::Error::OutsideRam { .. }) => assert!(matches!(
+                        Err(InterpreterError::OutsideRam { .. }) => assert!(matches!(
                             generated,
                             Err(WitnessError::AddressOutsideRam { .. }
                                 | WitnessError::UnalignedAccess { .. })
                         )),
-                        Err(interp::Error::UnalignedAccess { .. }) => assert!(
+                        Err(InterpreterError::UnalignedAccess { .. }) => assert!(
                             matches!(generated, Err(WitnessError::UnalignedAccess { width: found, .. }) if found == width)
                         ),
                         Err(error) => panic!("unexpected oracle error {error:?}"),

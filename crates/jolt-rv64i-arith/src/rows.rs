@@ -2,7 +2,12 @@
 //! the same lane and polynomial forms.
 
 use crate::layout::Layout;
-use crate::words::{column, Lane, WitnessRow, WITNESS_COLUMNS};
+use crate::words::column::{
+    BITS as COLUMN_BITS, CONTROL_RESIDUAL as COLUMN_CONTROL_RESIDUAL,
+    LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, LESS_THAN as COLUMN_LESS_THAN, ONE as COLUMN_ONE,
+    RIGHT_KEY_BIT as COLUMN_RIGHT_KEY_BIT,
+};
+use crate::words::{Lane, WitnessRow, WITNESS_COLUMNS};
 use jolt_field::F128;
 use jolt_r1cs::{ConstraintMatrices, SparseRow};
 use thiserror::Error;
@@ -185,7 +190,7 @@ impl PackedForm {
     /// Constants read `z[ONE]` even on a noncanonical witness.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> F128 {
-        let constant = self.one && z.bit(column::ONE).unwrap_or(false);
+        let constant = self.one && z.bit(COLUMN_ONE).unwrap_or(false);
         let raw = self
             .terms
             .iter()
@@ -196,7 +201,7 @@ impl PackedForm {
     fn coefficients(&self) -> SparseRow<F128> {
         let mut out = Vec::new();
         if self.one {
-            out.push((column::ONE, F128::from_raw(1)));
+            out.push((COLUMN_ONE, F128::from_raw(1)));
         }
         for &term in &self.terms {
             term.append_coefficients(&mut out);
@@ -328,12 +333,12 @@ impl RowSystem {
             terms: vec![],
         };
         let empty = PackedForm::default();
-        let keys_differ = bit(column::BITS + layout.keys_differ());
+        let keys_differ = bit(COLUMN_BITS + layout.keys_differ());
         let mut not_keys_differ = keys_differ.clone();
         not_keys_differ.one = true;
         let mut key_bits = keys_differ.clone();
         key_bits.terms.push(PackedTerm::table(
-            column::LEFT_KEY_BIT as u16,
+            COLUMN_LEFT_KEY_BIT as u16,
             2,
             0,
             0,
@@ -342,8 +347,8 @@ impl RowSystem {
         let mut packed = vec![
             PackedRow {
                 a: keys_differ.clone(),
-                b: bit(column::RIGHT_KEY_BIT),
-                c: bit(column::LESS_THAN),
+                b: bit(COLUMN_RIGHT_KEY_BIT),
+                c: bit(COLUMN_LESS_THAN),
                 group: RowGroup::LessThan,
             },
             PackedRow {
@@ -381,7 +386,7 @@ impl RowSystem {
             a: PackedForm {
                 one: false,
                 terms: vec![PackedTerm::table(
-                    column::CONTROL_RESIDUAL as u16,
+                    COLUMN_CONTROL_RESIDUAL as u16,
                     11,
                     1,
                     0,
@@ -396,7 +401,7 @@ impl RowSystem {
             let form = |m| PackedForm {
                 one: true,
                 terms: vec![PackedTerm::table(
-                    column::BITS as u16 + chunk.start(),
+                    COLUMN_BITS as u16 + chunk.start(),
                     chunk.indicators() as u8,
                     m,
                     m,
@@ -534,7 +539,8 @@ mod tests {
     use super::{PackedForm, PackedTerm, PackedTermError, RowGroup, RowSystem};
     use crate::layout::Layout;
     use crate::layout::MAX_LOG_K_BYTECODE;
-    use crate::words::{column, WitnessRow, WITNESS_COLUMNS};
+    use crate::words::column::ONE as COLUMN_ONE;
+    use crate::words::{WitnessRow, WITNESS_COLUMNS};
     use jolt_field::F128;
     use jolt_r1cs::{ConstraintMatrices, SparseRow};
     use rand::{Rng, SeedableRng};
@@ -741,7 +747,7 @@ mod tests {
             }
             let mut z = WitnessRow(rng.gen());
             z.0[0] &= !1;
-            assert!(!z.bit(column::ONE).unwrap());
+            assert!(!z.bit(COLUMN_ONE).unwrap());
             assert_matrix_values(&system, &matrices, &z, &mut dense);
         }
     }

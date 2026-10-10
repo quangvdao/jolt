@@ -15,16 +15,6 @@ pub(super) const SHIFT_SQUARE128: bool = false;
 
 impl Word {
     #[inline]
-    pub(super) fn products<const N: usize>(a: [Self; N], b: [Self; N]) -> [Self; N] {
-        std::array::from_fn(|i| a[i].mul_ll(b[i]))
-    }
-
-    #[inline]
-    pub(super) fn reduce3(products: [Self; 3]) -> [u64; 3] {
-        products.map(Self::reduce64)
-    }
-
-    #[inline]
     pub(super) fn reduce64(self) -> u64 {
         let k = Self::from_u64(0x1b);
         let first = self.mul_hl(k);

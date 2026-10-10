@@ -131,15 +131,14 @@ pub(super) fn multiply192(a: [u64; 3], b: [u64; 3]) -> [u64; 3] {
 
 #[inline]
 pub(super) fn product192(a: [u64; 3], b: [u64; 3]) -> Unreduced192 {
-    let a = a.map(Word::from_u64);
-    let b = b.map(Word::from_u64);
-    let [a0, a1, a2] = a;
-    let [b0, b1, b2] = b;
-    let [d0, d1, d2] = Word::products(a, b);
-    let [c01, c02, c12] = Word::products([a0 ^ a1, a0 ^ a2, a1 ^ a2], [b0 ^ b1, b0 ^ b2, b1 ^ b2]);
-    let c01 = c01 ^ d0 ^ d1;
-    let c02 = c02 ^ d0 ^ d2;
-    let c12 = c12 ^ d1 ^ d2;
+    let [a0, a1, a2] = a.map(Word::from_u64);
+    let [b0, b1, b2] = b.map(Word::from_u64);
+    let d0 = a0.mul_ll(b0);
+    let d1 = a1.mul_ll(b1);
+    let d2 = a2.mul_ll(b2);
+    let c01 = (a0 ^ a1).mul_ll(b0 ^ b1) ^ d0 ^ d1;
+    let c02 = (a0 ^ a2).mul_ll(b0 ^ b2) ^ d0 ^ d2;
+    let c12 = (a1 ^ a2).mul_ll(b1 ^ b2) ^ d1 ^ d2;
     // Reduce y^3 = y + 1 and y^4 = y^2 + y before the three base-field reductions.
     [d0 ^ c12, c01 ^ c12 ^ d2, d1 ^ c02 ^ d2]
 }
@@ -151,22 +150,25 @@ pub(super) fn multiply192_base_pair(a: [u64; 3], b: [u64; 2]) -> [u64; 3] {
 
 #[inline]
 pub(super) fn product192_base(a: [u64; 3], b: u64) -> Unreduced192 {
-    Word::products(a.map(Word::from_u64), [Word::from_u64(b); 3])
+    let b = Word::from_u64(b);
+    a.map(|a| Word::from_u64(a).mul_ll(b))
 }
 
 #[inline]
 pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
     let [a0, a1, a2] = a.map(Word::from_u64);
     let [b0, b1] = b.map(Word::from_u64);
-    let [d0, d1, c02] = Word::products([a0, a1, a2], [b0, b1, b0]);
-    let [c01, c12] = Word::products([a0 ^ a1, a2], [b0 ^ b1, b1]);
-    let c01 = c01 ^ d0 ^ d1;
+    let d0 = a0.mul_ll(b0);
+    let d1 = a1.mul_ll(b1);
+    let c01 = (a0 ^ a1).mul_ll(b0 ^ b1) ^ d0 ^ d1;
+    let c02 = a2.mul_ll(b0);
+    let c12 = a2.mul_ll(b1);
     [d0 ^ c12, c01 ^ c12, d1 ^ c02]
 }
 
 #[inline]
 pub(super) fn reduce192(product: Unreduced192) -> [u64; 3] {
-    Word::reduce3(product)
+    product.map(reduce_word64)
 }
 
 #[inline]

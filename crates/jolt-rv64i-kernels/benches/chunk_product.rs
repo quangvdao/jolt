@@ -535,6 +535,20 @@ fn median(mut samples: Vec<f64>) -> f64 {
 
 #[expect(clippy::print_stdout, reason = "phase splits are benchmark output")]
 fn report(records: &[Record]) -> Result<(), RunnerError> {
+    let mut pools = Vec::new();
+    for record in records.iter().filter(|record| record.variant == "dense") {
+        if pools.iter().any(|(threads, _)| *threads == record.threads) {
+            continue;
+        }
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(record.threads)
+            .build()
+            .map_err(|error| RunnerError::ThreadPool {
+                message: error.to_string(),
+            })?;
+        let _ = pool.broadcast(|_| black_box(()));
+        pools.push((record.threads, pool));
+    }
     for (index, record) in records.iter().enumerate() {
         if records[..index].iter().any(|prior| {
             prior.variant == record.variant
@@ -592,13 +606,12 @@ fn report(records: &[Record]) -> Result<(), RunnerError> {
         if record.variant != "dense" {
             continue;
         }
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(record.threads)
-            .build()
-            .map_err(|error| RunnerError::ThreadPool {
-                message: error.to_string(),
+        let (_, pool) = pools
+            .iter()
+            .find(|(threads, _)| *threads == record.threads)
+            .ok_or_else(|| RunnerError::Core {
+                message: "gather measurement pool is missing".to_owned(),
             })?;
-        let _ = pool.broadcast(|_| black_box(()));
         let gathers = pool
             .install(|| -> Result<_, BenchError> {
                 let source = Arc::new(SyntheticTrace::new(

@@ -9,7 +9,7 @@
 mod allocator;
 
 use allocator::{AllocationMeasurement, CountingAllocator, RAYON_WORKER_ALLOWANCE};
-use jolt_field::{Field, F128};
+use jolt_field::{CanonicalBytes, Field, F128};
 use jolt_poly::UnivariatePoly;
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkWeight, ChunkWeightTerm,
@@ -22,8 +22,9 @@ use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, BooleanHypercube, ClearProof, ClearSumcheckRecorder,
-    ProveRounds, ProvedBatch, SequentialRounds, SumcheckClaim, SumcheckError, SumcheckProof,
-    SumcheckRecorder, SumcheckVerifier, SUMCHECK_ROUND_TRANSCRIPT_LABEL,
+    MemberFinish, MemberRound, ProveRounds, ProvedBatch, RoundScheduler, SequentialRounds,
+    SumcheckClaim, SumcheckError, SumcheckProof, SumcheckRecorder, SumcheckVerifier,
+    SUMCHECK_ROUND_TRANSCRIPT_LABEL,
 };
 use jolt_transcript::{Blake2bTranscript, Transcript};
 use rand_chacha::rand_core::SeedableRng;
@@ -387,20 +388,54 @@ impl ProveRounds<F128> for OracleCore<'_> {
     }
 }
 
+struct ReverseRounds;
+
+impl RoundScheduler<F128> for ReverseRounds {
+    fn batch_prove_round(
+        &mut self,
+        work: &mut [MemberRound<'_, F128>],
+    ) -> Result<(), SumcheckError<F128>> {
+        for item in work.iter_mut().rev() {
+            item.run()?;
+        }
+        Ok(())
+    }
+
+    fn batch_finish_rounds(
+        &mut self,
+        finishes: &mut [MemberFinish<'_, F128>],
+    ) -> Result<(), SumcheckError<F128>> {
+        for item in finishes.iter_mut().rev() {
+            item.run()?;
+        }
+        Ok(())
+    }
+}
+
+fn compressed_round_bytes(proof: &SumcheckProof<F128, ()>) -> Vec<Vec<u8>> {
+    let SumcheckProof::Clear(ClearProof::Compressed(proof)) = proof else {
+        panic!("clear compressed proof expected")
+    };
+    proof
+        .round_polynomials
+        .iter()
+        .map(|poly| {
+            poly.coeffs_except_linear_term()
+                .iter()
+                .flat_map(CanonicalBytes::to_bytes_le_vec)
+                .collect()
+        })
+        .collect()
+}
+
 fn prove(
     members: &mut [&mut dyn ProveRounds<F128>],
     prelude: &BatchPrelude<F128>,
+    scheduler: &mut dyn RoundScheduler<F128>,
 ) -> (ProvedBatch<F128>, SumcheckProof<F128, ()>) {
     let mut transcript = Blake2bTranscript::new(LABEL);
     let mut recorder = ClearSumcheckRecorder::new();
-    let proved = prove_batch(
-        prelude,
-        members,
-        &mut SequentialRounds,
-        &mut recorder,
-        &mut transcript,
-    )
-    .unwrap();
+    let proved = prove_batch(prelude, members, scheduler, &mut recorder, &mut transcript).unwrap();
     let proof = recorder
         .finish(&proved.member_claims, &mut transcript)
         .unwrap()
@@ -429,7 +464,7 @@ fn verify(
     assert_eq!(reduced.value, proved.final_claim);
 }
 
-fn acceptance(log_t: usize, threads: &[usize], dense_bits: bool) {
+fn acceptance(log_t: usize, threads: &[usize], dense_bits: bool, reverse_orders: &[bool]) {
     let fixture = Fixture::new(log_t);
     let prelude = fixture.prelude();
     let mut oracle: Vec<_> = (0..3)
@@ -446,7 +481,7 @@ fn acceptance(log_t: usize, threads: &[usize], dense_bits: bool) {
         .iter_mut()
         .map(|core| core as &mut dyn ProveRounds<F128>)
         .collect();
-    let (expected, expected_proof) = prove(&mut members, &prelude);
+    let (expected, expected_proof) = prove(&mut members, &prelude, &mut SequentialRounds);
     let expected_columns: [F128; 256] = std::array::from_fn(|y| {
         fixture
             .trace
@@ -463,81 +498,101 @@ fn acceptance(log_t: usize, threads: &[usize], dense_bits: bool) {
             .num_threads(threads)
             .build()
             .unwrap();
-        pool.install(|| {
-            let (a, b, g) = fixture.cores();
-            let mut a = Recorded {
-                inner: a,
-                messages: Vec::new(),
-            };
-            let mut b = Recorded {
-                inner: b,
-                messages: Vec::new(),
-            };
-            let mut g = Recorded {
-                inner: g,
-                messages: Vec::new(),
-            };
-            let (proved, proof) = prove(&mut [&mut a, &mut b, &mut g], &prelude);
-            assert_eq!(a.messages, oracle[0].messages);
-            assert_eq!(b.messages, oracle[1].messages);
-            assert_eq!(g.messages, oracle[2].messages);
-            assert_eq!(proved, expected);
-            assert_eq!(proof, expected_proof);
-            let columns = column_pass(fixture.trace.source().rows(), &proved.challenges).unwrap();
-            assert_eq!(columns, expected_columns);
-            let chunks = [
-                a.inner.final_values().unwrap(),
-                b.inner.final_values().unwrap(),
-            ];
-            fixture.assert_columns(
-                &proved.challenges,
-                &columns,
-                &chunks,
-                g.inner.final_values().unwrap(),
-                &proved,
-            );
-            verify(&prelude, &proved, &proof);
-            if dense_bits {
-                let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_b175);
-                let rho = point(8, &mut rng);
-                let dense: Vec<_> = fixture
-                    .trace
-                    .source()
-                    .rows()
-                    .iter()
-                    .flat_map(|row| {
-                        (0..256)
-                            .map(move |y| F128::from_raw(u128::from((row[y / 64] >> (y % 64)) & 1)))
-                    })
-                    .collect();
-                let opening: Vec<_> = rho.iter().chain(&proved.challenges).copied().collect();
+        for &reverse_order in reverse_orders {
+            pool.install(|| {
+                let (a, b, g) = fixture.cores();
+                let mut a = Recorded {
+                    inner: a,
+                    messages: Vec::new(),
+                };
+                let mut b = Recorded {
+                    inner: b,
+                    messages: Vec::new(),
+                };
+                let mut g = Recorded {
+                    inner: g,
+                    messages: Vec::new(),
+                };
+                let mut sequential = SequentialRounds;
+                let mut reverse = ReverseRounds;
+                let scheduler: &mut dyn RoundScheduler<F128> = if reverse_order {
+                    &mut reverse
+                } else {
+                    &mut sequential
+                };
+                let (proved, proof) = prove(&mut [&mut a, &mut b, &mut g], &prelude, scheduler);
+                assert_eq!(a.messages, oracle[0].messages);
+                assert_eq!(b.messages, oracle[1].messages);
+                assert_eq!(g.messages, oracle[2].messages);
+                assert_eq!(proved, expected);
+                assert_eq!(proof, expected_proof);
                 assert_eq!(
-                    columns
-                        .iter()
-                        .enumerate()
-                        .map(|(y, &c)| eq(&rho, y) * c)
-                        .sum::<F128>(),
-                    mle_at(&dense, &opening).unwrap()
+                    compressed_round_bytes(&proof),
+                    compressed_round_bytes(&expected_proof)
                 );
-            }
-        });
+                let columns =
+                    column_pass(fixture.trace.source().rows(), &proved.challenges).unwrap();
+                assert_eq!(columns, expected_columns);
+                let chunks = [
+                    a.inner.final_values().unwrap(),
+                    b.inner.final_values().unwrap(),
+                ];
+                fixture.assert_columns(
+                    &proved.challenges,
+                    &columns,
+                    &chunks,
+                    g.inner.final_values().unwrap(),
+                    &proved,
+                );
+                verify(&prelude, &proved, &proof);
+                if dense_bits {
+                    let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_b175);
+                    let rho = point(8, &mut rng);
+                    let dense: Vec<_> = fixture
+                        .trace
+                        .source()
+                        .rows()
+                        .iter()
+                        .flat_map(|row| {
+                            (0..256).map(move |y| {
+                                F128::from_raw(u128::from((row[y / 64] >> (y % 64)) & 1))
+                            })
+                        })
+                        .collect();
+                    let opening: Vec<_> = rho.iter().chain(&proved.challenges).copied().collect();
+                    assert_eq!(
+                        columns
+                            .iter()
+                            .enumerate()
+                            .map(|(y, &c)| eq(&rho, y) * c)
+                            .sum::<F128>(),
+                        mle_at(&dense, &opening).unwrap()
+                    );
+                }
+            });
+        }
     }
 }
 
 #[test]
 fn tail_end_to_end_matches_committed_bits_and_verifies() {
-    acceptance(8, &[1], true);
+    acceptance(8, &[1], true, &[false]);
+}
+
+#[test]
+fn tail_reverse_rounds_and_finishes_match_one_dense_oracle() {
+    acceptance(8, &[1], true, &[false, true]);
 }
 
 #[test]
 fn tail_multichunk_rounds_and_passes_match_one_oracle_on_each_pool() {
-    acceptance(13, &[1, 12], false);
+    acceptance(13, &[1, 12], false, &[false]);
 }
 
 #[test]
 fn tail_small_domains_match_definitions() {
     for log_t in [1, 2] {
-        acceptance(log_t, &[1, 12], true);
+        acceptance(log_t, &[1, 12], true, &[false]);
     }
 }
 
@@ -667,7 +722,7 @@ fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
 
 #[test]
 fn tail_first_multichunk_pair_round_matches_the_oracle_on_each_pool() {
-    acceptance(14, &[1, 12], false);
+    acceptance(14, &[1, 12], false, &[false]);
 }
 
 #[test]

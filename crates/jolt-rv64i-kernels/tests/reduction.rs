@@ -8,9 +8,7 @@
 use jolt_field::{Field, F128};
 use jolt_poly::UnivariatePoly;
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
-use jolt_rv64i_kernels::reduction::{
-    g_pass_bytes, g_pass_digits, ColumnMap, ReductionCore, ReductionError,
-};
+use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionError};
 use jolt_rv64i_kernels::round::RoundError;
 use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
@@ -20,7 +18,7 @@ use jolt_sumcheck::{
     SumcheckVerifier, SUMCHECK_ROUND_TRANSCRIPT_LABEL,
 };
 use jolt_transcript::{Blake2bTranscript, Transcript};
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
@@ -96,7 +94,7 @@ fn eq(point: &[F128], vertex: usize) -> F128 {
 }
 
 #[test]
-fn table_passes_equal_summation_for_all_four_supports_and_indicator_rows() {
+fn digit_tables_equal_summation_on_indicator_rows() {
     let mut rng = ChaCha20Rng::seed_from_u64(718);
     for log_t in [3, 8] {
         let trace = Arc::new(
@@ -108,18 +106,7 @@ fn table_passes_equal_summation_for_all_four_supports_and_indicator_rows() {
             )
             .unwrap(),
         );
-        let random_rows: Vec<[u64; 4]> = (0..1 << log_t)
-            .map(|_| std::array::from_fn(|_| rng.next_u64()))
-            .collect();
         let weights = weights(&mut rng);
-        assert_eq!(
-            g_pass_bytes(&random_rows, &weights).unwrap(),
-            defining_tables(&random_rows, &weights)
-        );
-        assert_eq!(
-            g_pass_bytes(trace.rows(), &weights).unwrap(),
-            defining_tables(trace.rows(), &weights)
-        );
         let validated = ValidatedTrace::new(trace.clone()).unwrap();
         assert_eq!(
             g_pass_digits(&validated, &map(), &weights[1..]).unwrap(),
@@ -325,10 +312,6 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
     ));
     let trace = Arc::new(SyntheticTrace::new(SynthProfile::Local, 3, 2, 817).unwrap());
     let validated = ValidatedTrace::new(trace.clone()).unwrap();
-    assert!(matches!(
-        g_pass_bytes(trace.rows(), &[vec![zero; 255]]),
-        Err(ReductionError::WeightLength { actual: 255, .. })
-    ));
     assert!(matches!(
         g_pass_digits(&validated, &map(), &[vec![zero; 255]]),
         Err(ReductionError::WeightLength { actual: 255, .. })

@@ -1,4 +1,4 @@
-//! Compare the digit builder, byte builder and shared-table reduction on local traces.
+//! Compare the digit builder and shared-table reduction on local traces.
 
 pub mod support;
 
@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 use jolt_field::F128;
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::par::CycleChunks;
-use jolt_rv64i_kernels::reduction::{
-    g_pass_bytes, g_pass_digits, ColumnMap, ReductionCore, ReductionError,
-};
+use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionError};
 use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use rayon::prelude::*;
@@ -101,7 +99,7 @@ fn word_table(source: &SyntheticTrace, weight: &[F128]) -> Vec<F128> {
     table
 }
 
-fn run_variant(name: &str, bytes: bool, shared: bool) -> Result<(), RunnerError> {
+fn run_variant(name: &str, shared: bool) -> Result<(), RunnerError> {
     let cache = Mutex::new(None::<Fixture>);
     let map = map();
     let weights = weights();
@@ -116,9 +114,7 @@ fn run_variant(name: &str, bytes: bool, shared: bool) -> Result<(), RunnerError>
         name,
         &[SynthProfile::Local],
         |source| {
-            let tables = if bytes {
-                g_pass_bytes(source.rows(), &pass_weights)?
-            } else {
+            let tables = {
                 let mut cached = cache.lock().map_err(|_| BenchError::Cache)?;
                 if cached
                     .as_ref()
@@ -171,7 +167,6 @@ fn run_variant(name: &str, bytes: bool, shared: bool) -> Result<(), RunnerError>
 }
 
 fn main() -> Result<(), RunnerError> {
-    run_variant("reduction", false, false)?;
-    run_variant("reduction_bytes", true, false)?;
-    run_variant("reduction_shared", false, true)
+    run_variant("reduction", false)?;
+    run_variant("reduction_shared", true)
 }

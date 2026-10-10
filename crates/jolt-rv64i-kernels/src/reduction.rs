@@ -117,15 +117,6 @@ struct Sums {
 }
 impl Sums {
     #[inline(always)]
-    fn add(&mut self, weight: usize, value: F128) {
-        match weight & 3 {
-            0 => self.a += value,
-            1 => self.b += value,
-            2 => self.c += value,
-            _ => self.d += value,
-        }
-    }
-    #[inline(always)]
     fn values(self) -> [F128; 4] {
         [self.a, self.b, self.c, self.d]
     }
@@ -494,121 +485,6 @@ pub fn g_pass_digits<S: CycleSource>(
                         };
                     }
                     output[cycle] = value;
-                }
-            }
-        });
-    drop(views);
-    Ok(tables)
-}
-
-struct ByteLift {
-    position: usize,
-    weights: Vec<usize>,
-    entries: Vec<F128>,
-}
-
-#[inline(always)]
-fn byte_values(row: &[u64; 4], lifts: &[ByteLift]) -> [F128; 4] {
-    let mut sums = Sums::default();
-    for lift in lifts {
-        let byte = ((row[(lift.position / 8) & 3] >> (8 * (lift.position % 8))) & 255) as usize;
-        let entries = &lift.entries[byte * lift.weights.len()..(byte + 1) * lift.weights.len()];
-        for (&weight, &value) in lift.weights.iter().zip(entries) {
-            sums.add(weight, value);
-        }
-    }
-    sums.values()
-}
-
-/// Build weighted tables from packed rows, reading each cycle once. A byte's
-/// entries for all supported weight vectors are interleaved under one index.
-/// Rejects non-power-of-two row counts and weights other than 256 columns.
-pub fn g_pass_bytes(
-    rows: &[[u64; 4]],
-    weights: &[Vec<F128>],
-) -> Result<Vec<Vec<F128>>, ReductionError> {
-    check_weights(weights)?;
-    if !rows.len().is_power_of_two() {
-        return Err(ReductionError::TableLength {
-            table: 0,
-            actual: rows.len(),
-            expected: None,
-        });
-    }
-    let mut lifts = Vec::new();
-    for position in 0..32 {
-        let supported: Vec<_> = weights
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| {
-                w[position * 8..position * 8 + 8]
-                    .iter()
-                    .any(|&v| v != F128::from_raw(0))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if supported.is_empty() {
-            continue;
-        }
-        let mut entries = vec![F128::from_raw(0); 256 * supported.len()];
-        for byte in 1_usize..256 {
-            let bit = byte.trailing_zeros() as usize;
-            let prior = byte & (byte - 1);
-            for (slot, &weight) in supported.iter().enumerate() {
-                entries[byte * supported.len() + slot] =
-                    entries[prior * supported.len() + slot] + weights[weight][position * 8 + bit];
-            }
-        }
-        lifts.push(ByteLift {
-            position,
-            weights: supported,
-            entries,
-        });
-    }
-    let mut tables = vec![vec![F128::from_raw(0); rows.len()]; weights.len()];
-    if weights.is_empty() {
-        return Ok(tables);
-    }
-    let chunk = CycleChunks::new(rows.len().ilog2() as usize, 0)
-        .map_err(|_| ReductionError::TableLength {
-            table: 0,
-            actual: rows.len(),
-            expected: None,
-        })?
-        .chunk_len();
-    let mut views = output_views(&mut tables, chunk);
-    views
-        .par_chunks_mut(weights.len())
-        .zip(rows.par_chunks(chunk))
-        .for_each(|(outputs, rows)| {
-            if let [(_, a), (_, b), (_, c)] = outputs {
-                for (((a, b), c), row) in a.iter_mut().zip(b.iter_mut()).zip(c.iter_mut()).zip(rows)
-                {
-                    let sums = byte_values(row, &lifts);
-                    *a = sums[0];
-                    *b = sums[1];
-                    *c = sums[2];
-                }
-                return;
-            }
-
-            for (cycle, row) in rows.iter().enumerate() {
-                if weights.len() <= 4 {
-                    let sums = byte_values(row, &lifts);
-                    for ((_, output), value) in outputs.iter_mut().zip(sums) {
-                        output[cycle] = value;
-                    }
-                    continue;
-                }
-
-                for lift in &lifts {
-                    let byte =
-                        ((row[lift.position / 8] >> (8 * (lift.position % 8))) & 255) as usize;
-                    let entries =
-                        &lift.entries[byte * lift.weights.len()..(byte + 1) * lift.weights.len()];
-                    for (&weight, &value) in lift.weights.iter().zip(entries) {
-                        outputs[weight].1[cycle] += value;
-                    }
                 }
             }
         });

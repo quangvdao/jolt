@@ -170,13 +170,15 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadAddress<F>, Rv64iPlane>
                 })?;
             }
         }
-        let mut r = r.into_iter();
-        let pairs = h.map(|table| {
-            (
-                Polynomial::new(table),
-                Polynomial::new(r.next().unwrap_or_default()),
-            )
-        });
+        let pairs: [(Polynomial<F>, Polynomial<F>); 5] = h
+            .into_iter()
+            .zip(r)
+            .map(|(h, r)| (Polynomial::new(h), Polynomial::new(r)))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| KernelError::InvalidGeometry {
+                reason: "bytecode fold requires five paired tables".to_owned(),
+            })?;
         Ok(Box::new(AddressKernel {
             pairs,
             rounds: relation.rounds(),

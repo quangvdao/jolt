@@ -7,6 +7,3 @@ pub mod stage4;
 pub mod stage5;
 pub mod stage6a;
 pub mod stage6b;
-
-#[cfg(feature = "test-utils")]
-pub mod fixture;

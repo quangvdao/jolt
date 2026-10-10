@@ -11,6 +11,7 @@ use crate::proof::{BatchProof, BitsColumns};
 use crate::stages::stage6a::verify::Stage6aOutput;
 use crate::statement::CheckedInputs;
 use jolt_field::F128;
+use jolt_rv64i_arith::BITS_COLUMNS;
 use jolt_transcript::Transcript;
 
 /// Earlier batch points. Address geometry and bytecode folds come from checked inputs and batch 6a.
@@ -42,6 +43,9 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     state: S::VerifierState,
     opening_proof: &S::OpeningProof,
 ) -> Result<Output, Rv64iVerifierError> {
+    if proof.values.0.len() != BITS_COLUMNS {
+        return Err(Rv64iVerifierError::ProofShape(ProofDecodeError::ProofShape));
+    }
     let fail = |error: PointsError| BytecodeReadCycle::<F128>::term_error(error);
     for point in [&earlier.r_1, &earlier.r_3, &earlier.r_4, &earlier.r_5] {
         if point.len() != checked.log_T() {

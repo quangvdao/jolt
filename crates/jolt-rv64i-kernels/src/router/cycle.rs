@@ -161,7 +161,6 @@ struct Shared {
 /// Source tables must be `Source_ρ(x|src, ·)`: this is required of the caller,
 /// not checked, and detected by the verifier's final evaluation check.
 /// Points and table indices have their low variable first.
-#[derive(Clone)]
 pub struct RoutersCycleCore {
     shared: Arc<Mutex<Shared>>,
     log_t: usize,

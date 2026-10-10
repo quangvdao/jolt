@@ -1,5 +1,6 @@
 //! Source lifting sums out bit and word variables and retains shared trace-word lifts.
 
+#[cfg(feature = "test-utils")]
 use std::time::{Duration, Instant};
 
 use jolt_field::{Accumulator, F128Accumulator, F128};
@@ -44,8 +45,6 @@ impl RetainedWordLifts {
 pub struct SourceLiftOutput {
     pub source_tables: Vec<Vec<F128>>,
     pub lifts: RetainedWordLifts,
-    pub row_tables_time: Duration,
-    pub cycles_time: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -513,6 +512,35 @@ pub fn source_lift<S: CycleSource>(
     shapes: &[RouterShape],
     x: &[F128],
 ) -> Result<SourceLiftOutput, RouterError> {
+    source_lift_impl(trace, shapes, x, |_| {})
+}
+
+/// The source pass with diagnostic durations for row tables and cycles, in that
+/// order. It has the same checked and unchecked preconditions as `source_lift`.
+#[cfg(feature = "test-utils")]
+pub fn source_lift_timed<S: CycleSource>(
+    trace: &ValidatedTrace<S>,
+    shapes: &[RouterShape],
+    x: &[F128],
+) -> Result<(SourceLiftOutput, [Duration; 2]), RouterError> {
+    let mut times = [Duration::ZERO; 2];
+    let mut previous = None;
+    let output = source_lift_impl(trace, shapes, x, |phase| {
+        let now = Instant::now();
+        if let Some(start) = previous {
+            times[phase - 1] = now.duration_since(start);
+        }
+        previous = Some(now);
+    })?;
+    Ok((output, times))
+}
+
+fn source_lift_impl<S: CycleSource>(
+    trace: &ValidatedTrace<S>,
+    shapes: &[RouterShape],
+    x: &[F128],
+    mut phase: impl FnMut(usize),
+) -> Result<SourceLiftOutput, RouterError> {
     let source = trace.source().as_ref();
     let bit_point = x.get(..6).ok_or(RouterError::PointLength {
         expected: shapes.first().map_or(6, RouterShape::slots),
@@ -535,7 +563,7 @@ pub fn source_lift<S: CycleSource>(
         .iter()
         .map(|_| unsafe_allocate_zero_vec(source.cycles()))
         .collect();
-    let row_start = Instant::now();
+    phase(0);
     let mut rows: Vec<Vec<F128>> = plan
         .shapes
         .iter()
@@ -545,8 +573,7 @@ pub fn source_lift<S: CycleSource>(
     if !rows.is_empty() {
         plan.rows(source, &lift, &mut rows, geometry.chunk_len());
     }
-    let row_tables_time = row_start.elapsed();
-    let cycles_start = Instant::now();
+    phase(1);
     if !shapes.is_empty() {
         plan.cycles(
             source,
@@ -557,7 +584,7 @@ pub fn source_lift<S: CycleSource>(
             geometry.chunk_len(),
         );
     }
-    let cycles_time = cycles_start.elapsed();
+    phase(2);
     Ok(SourceLiftOutput {
         source_tables,
         lifts: RetainedWordLifts {
@@ -565,7 +592,5 @@ pub fn source_lift<S: CycleSource>(
             words: plan.trace.iter().map(|word| word.word).collect(),
             tables: lifts,
         },
-        row_tables_time,
-        cycles_time,
     })
 }

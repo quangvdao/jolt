@@ -1,6 +1,6 @@
 //! Kernel hooks separate phases without replacing the generated drivers.
 
-use super::allocator::{AllocationRecorder, CountingAllocator};
+use super::allocator::CountingAllocator;
 use jolt_field::F128;
 use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,

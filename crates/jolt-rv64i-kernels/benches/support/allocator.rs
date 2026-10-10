@@ -35,17 +35,6 @@ impl AtomicEntry {
     }
 }
 
-/// Lock-free inventory interface. Begin and read only while measured workers
-/// are idle; stop after joining measured work, before reading the entries.
-pub trait AllocationRecorder {
-    fn begin(threshold: usize);
-    fn phase(phase: usize);
-    fn stop();
-    fn overflow() -> usize;
-    fn entries() -> impl Iterator<Item = (usize, usize)>;
-    fn record(size: usize);
-}
-
 // The allocator is also included by private integration-test modules that use
 // totals only. Keep the inventory entry points reachable in those consumers.
 const _: fn(usize) = CountingAllocator::begin;
@@ -56,28 +45,30 @@ const _: fn() = || {
     let _ = CountingAllocator::entries();
 };
 
-impl AllocationRecorder for CountingAllocator {
-    fn begin(threshold: usize) {
+/// Lock-free inventory interface. Begin and read only while measured workers
+/// are idle; stop after joining measured work, before reading the entries.
+impl CountingAllocator {
+    pub fn begin(threshold: usize) {
         RECORD_COUNT.store(0, Ordering::Relaxed);
         RECORD_PHASE.store(0, Ordering::Relaxed);
         RECORD_THRESHOLD.store(threshold, Ordering::Relaxed);
     }
 
-    fn phase(phase: usize) {
+    pub fn phase(phase: usize) {
         RECORD_PHASE.store(phase, Ordering::Relaxed);
     }
 
-    fn stop() {
+    pub fn stop() {
         RECORD_THRESHOLD.store(usize::MAX, Ordering::Relaxed);
     }
 
-    fn overflow() -> usize {
+    pub fn overflow() -> usize {
         RECORD_COUNT
             .load(Ordering::Relaxed)
             .saturating_sub(RECORD_CAPACITY)
     }
 
-    fn entries() -> impl Iterator<Item = (usize, usize)> {
+    pub fn entries() -> impl Iterator<Item = (usize, usize)> {
         let count = RECORD_COUNT.load(Ordering::Relaxed).min(RECORD_CAPACITY);
         RECORDS[..count].iter().map(|entry| {
             (

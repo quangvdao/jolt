@@ -1,7 +1,7 @@
 //! Exact capacity laws from the two specs' Memory tables. Equal sizes can have
 //! several owners; the inventory lists every candidate, never a guessed owner.
 
-use super::allocator::{AllocationRecorder, CountingAllocator};
+use super::allocator::CountingAllocator;
 use super::timing::PHASES;
 use jolt_rv64i_prover::plane::Rv64iWitness;
 

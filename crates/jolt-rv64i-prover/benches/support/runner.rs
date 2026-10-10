@@ -2,7 +2,7 @@
 //! and owns its configuration loop, so cannot accept an executed witness or ids.
 //! Samples retain its rotation, warmed pools, baseline and median-of-sums rules.
 
-use super::allocator::{AllocationMeasurement, AllocationRecorder, CountingAllocator};
+use super::allocator::{AllocationMeasurement, CountingAllocator};
 use super::inventory::Inventory;
 use super::pipelines::{BenchResult, Fixture, Kernels};
 use super::timing::{Timing, PHASES};

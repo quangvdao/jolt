@@ -34,6 +34,7 @@ jolt-prover.workspace = true
 jolt-verifier.workspace = true
 tracing.workspace = true
 jolt-rv64i-verifier.workspace = true
+jolt-rv64i-pcs.workspace = true
 rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
 
 [dev-dependencies]

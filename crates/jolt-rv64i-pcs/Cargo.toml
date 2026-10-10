@@ -1,0 +1,23 @@
+[package]
+name = "jolt-rv64i-pcs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Binary-field RV64I bit-table commitment prover algorithms"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+arch = []
+
+[dependencies]
+blake2.workspace = true
+jolt-field = { path = "../jolt-field", default-features = false, features = ["binary"] }
+jolt-rv64i-verifier.workspace = true
+jolt-transcript = { workspace = true, features = ["transcript-blake2b"] }
+rayon.workspace = true
+
+[dev-dependencies]
+jolt-rv64i-verifier = { workspace = true, features = ["test-utils"] }

@@ -8,7 +8,9 @@
 use jolt_field::{Field, F128};
 use jolt_poly::UnivariatePoly;
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
-use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionError};
+use jolt_rv64i_kernels::reduction::{
+    g_pass_digits, ColumnMap, ReductionCore, ReductionError, ReductionLeg,
+};
 use jolt_rv64i_kernels::round::RoundError;
 use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
@@ -125,7 +127,7 @@ fn digit_tables_equal_summation_on_indicator_rows() {
 
 struct Fixture {
     tables: Vec<Vec<F128>>,
-    legs: Vec<(usize, Vec<F128>, F128, F128)>,
+    legs: Vec<ReductionLeg>,
 }
 
 impl Fixture {
@@ -148,18 +150,30 @@ impl Fixture {
                     .enumerate()
                     .map(|(j, &g)| eq(&point, j) * g)
                     .sum();
-                (table, point, F128::random(&mut rng), claim)
+                ReductionLeg {
+                    table,
+                    point,
+                    coefficient: F128::random(&mut rng),
+                    claim,
+                }
             })
             .collect();
         Self { tables, legs }
     }
     fn claim(&self) -> F128 {
-        self.legs.iter().map(|(_, _, k, claim)| *k * claim).sum()
+        self.legs
+            .iter()
+            .map(|leg| leg.coefficient * leg.claim)
+            .sum()
     }
     fn equality_tables(&self) -> Vec<Vec<F128>> {
         self.legs
             .iter()
-            .map(|(_, point, _, _)| (0..self.tables[0].len()).map(|j| eq(point, j)).collect())
+            .map(|leg| {
+                (0..self.tables[0].len())
+                    .map(|j| eq(&leg.point, j))
+                    .collect()
+            })
             .collect()
     }
     fn expected_round(&self, bound: &[F128]) -> UnivariatePoly<F128> {
@@ -174,7 +188,7 @@ impl Fixture {
             self.legs
                 .iter()
                 .enumerate()
-                .map(|(leg, (table, _, k, _))| *k * v[*table] * v[self.tables.len() + leg])
+                .map(|(index, leg)| leg.coefficient * v[leg.table] * v[self.tables.len() + index])
                 .sum()
         })
         .unwrap()
@@ -184,16 +198,17 @@ impl Fixture {
         self.legs
             .iter()
             .enumerate()
-            .map(|(leg, (table, _, k, _))| {
-                *k * mle_at(&self.tables[*table], point).unwrap()
-                    * mle_at(&eqs[leg], point).unwrap()
+            .map(|(index, leg)| {
+                leg.coefficient
+                    * mle_at(&self.tables[leg.table], point).unwrap()
+                    * mle_at(&eqs[index], point).unwrap()
             })
             .sum()
     }
 }
 
 fn prove_and_verify(fixture: &Fixture, honest: bool) {
-    let rounds = fixture.legs[0].1.len();
+    let rounds = fixture.legs[0].point.len();
     let mut core = ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
     if honest {
         core.check_claims().unwrap();
@@ -278,7 +293,7 @@ fn reduction_three_legs_and_four_shared_legs_match_oracle_and_verify() {
 #[test]
 fn changed_claim_fails_verifier_final_check_and_diagnostic_names_leg() {
     let mut fixture = Fixture::new(8, true);
-    fixture.legs[1].3 += F128::from_raw(1);
+    fixture.legs[1].claim += F128::from_raw(1);
     prove_and_verify(&fixture, false);
 }
 
@@ -291,7 +306,15 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
         Err(ReductionError::TableLength { actual: 12, .. })
     ));
     assert!(matches!(
-        ReductionCore::new(vec![vec![zero; 8]; 3], vec![(3, vec![zero; 3], one, zero)]),
+        ReductionCore::new(
+            vec![vec![zero; 8]; 3],
+            vec![ReductionLeg {
+                table: 3,
+                point: vec![zero; 3],
+                coefficient: one,
+                claim: zero
+            }]
+        ),
         Err(ReductionError::LegTable {
             leg: 0,
             table: 3,
@@ -299,7 +322,15 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
         })
     ));
     assert!(matches!(
-        ReductionCore::new(vec![vec![zero; 8]], vec![(0, vec![zero; 2], one, zero)]),
+        ReductionCore::new(
+            vec![vec![zero; 8]],
+            vec![ReductionLeg {
+                table: 0,
+                point: vec![zero; 2],
+                coefficient: one,
+                claim: zero
+            }]
+        ),
         Err(ReductionError::LegPoint {
             actual: 2,
             expected: 3,
@@ -307,7 +338,15 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
         })
     ));
     assert!(matches!(
-        ReductionCore::new(vec![vec![zero]], vec![(0, vec![], one, zero)]),
+        ReductionCore::new(
+            vec![vec![zero]],
+            vec![ReductionLeg {
+                table: 0,
+                point: vec![],
+                coefficient: one,
+                claim: zero
+            }]
+        ),
         Err(ReductionError::Round(RoundError::EmptyPoint))
     ));
     let trace = Arc::new(SyntheticTrace::new(SynthProfile::Local, 3, 2, 817).unwrap());
@@ -372,8 +411,16 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
         g_pass_digits(&validated, &map(), &[uncovered]),
         Err(ReductionError::Uncovered { column: 255, .. })
     ));
-    let core =
-        ReductionCore::new(vec![vec![zero; 8]], vec![(0, vec![zero; 3], one, zero)]).unwrap();
+    let core = ReductionCore::new(
+        vec![vec![zero; 8]],
+        vec![ReductionLeg {
+            table: 0,
+            point: vec![zero; 3],
+            coefficient: one,
+            claim: zero,
+        }],
+    )
+    .unwrap();
     assert!(matches!(
         core.final_values(),
         Err(ReductionError::Unfinished)
@@ -545,9 +592,12 @@ fn eight_reduction_legs_match_the_definition() {
         .map(|(j, &g)| eq(&point, j) * g)
         .sum();
     for _ in 0..4 {
-        fixture
-            .legs
-            .push((1, point.clone(), F128::from_raw(73), claim));
+        fixture.legs.push(ReductionLeg {
+            table: 1,
+            point: point.clone(),
+            coefficient: F128::from_raw(73),
+            claim,
+        });
     }
     prove_and_verify(&fixture, true);
 }
@@ -564,7 +614,18 @@ fn reduction_rejects_weight_and_leg_counts_above_the_bounds() {
         Err(ReductionError::WeightCount { count: 5 })
     );
     assert!(matches!(
-        ReductionCore::new(vec![vec![zero; 8]], vec![(0, vec![zero; 3], zero, zero); 9]),
+        ReductionCore::new(
+            vec![vec![zero; 8]],
+            vec![
+                ReductionLeg {
+                    table: 0,
+                    point: vec![zero; 3],
+                    coefficient: zero,
+                    claim: zero
+                };
+                9
+            ]
+        ),
         Err(ReductionError::LegCount { count: 9 })
     ));
 }

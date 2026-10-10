@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use jolt_field::F128;
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::par::CycleChunks;
-use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionError};
+use jolt_rv64i_kernels::reduction::{
+    g_pass_digits, ColumnMap, ReductionCore, ReductionError, ReductionLeg,
+};
 use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use rayon::prelude::*;
@@ -157,7 +159,12 @@ fn run_variant(name: &str, shared: bool) -> Result<(), RunnerError> {
                 });
                 let value = tables[table][vertex];
                 claim += coefficient * value;
-                legs.push((table, point, coefficient, value));
+                legs.push(ReductionLeg {
+                    table,
+                    point,
+                    coefficient,
+                    claim: value,
+                });
             }
             let core = ReductionCore::new(tables, legs)?;
             Ok::<_, BenchError>((core, claim))

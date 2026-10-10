@@ -414,7 +414,20 @@ pub fn g_pass_digits<S: CycleSource>(
     Ok(tables)
 }
 
-struct Leg {
+/// One input equality claim. Its defining equality sum is required of the
+/// caller, not checked by construction. A false claim produces messages of
+/// another polynomial and is detected by the verifier's final batched check,
+/// except when its coefficient is zero or legs at one point cancel.
+/// [`ReductionCore::check_claims`] diagnoses each individual leg instead.
+#[derive(Clone, Debug)]
+pub struct ReductionLeg {
+    pub table: usize,
+    pub point: Vec<F128>,
+    pub coefficient: F128,
+    pub claim: F128,
+}
+
+struct LegState {
     table: usize,
     point: Vec<F128>,
     coefficient: F128,
@@ -436,21 +449,20 @@ enum State {
 pub struct ReductionCore {
     tables: Vec<Vec<F128>>,
     scratch: Vec<Vec<F128>>,
-    legs: Vec<Leg>,
+    legs: Vec<LegState>,
     partials: Vec<F128Accumulator>,
     rounds: usize,
     state: State,
 }
 
 impl ReductionCore {
-    /// A leg is `(table_index, point, coefficient, claim)`; all tables have the
+    /// All tables have the
     /// same nonzero power-of-two length and points have its logarithm coordinates.
     /// Each claim must equal `sum_j eq(point,j)*table[j]`: this is required of the
-    /// caller, not checked here, and a violation is detected by the verifier.
-    pub fn new(
-        tables: Vec<Vec<F128>>,
-        legs: Vec<(usize, Vec<F128>, F128, F128)>,
-    ) -> Result<Self, ReductionError> {
+    /// caller, not checked here; the verifier detects a false batched statement
+    /// at its final check. Zero coefficients or cancelling legs at one point
+    /// can hide an individual false claim; `check_claims` diagnoses it.
+    pub fn new(tables: Vec<Vec<F128>>, legs: Vec<ReductionLeg>) -> Result<Self, ReductionError> {
         if legs.len() > 8 {
             return Err(ReductionError::LegCount { count: legs.len() });
         }
@@ -473,7 +485,16 @@ impl ReductionCore {
         }
         let rounds = length.ilog2() as usize;
         let mut checked = Vec::with_capacity(legs.len());
-        for (leg, (table, point, coefficient, claim)) in legs.into_iter().enumerate() {
+        for (
+            leg,
+            ReductionLeg {
+                table,
+                point,
+                coefficient,
+                claim,
+            },
+        ) in legs.into_iter().enumerate()
+        {
             if table >= tables.len() {
                 return Err(ReductionError::LegTable {
                     leg,
@@ -489,7 +510,7 @@ impl ReductionCore {
                 });
             }
             let eq = split_eq(&point, None)?;
-            checked.push(Leg {
+            checked.push(LegState {
                 table,
                 point,
                 coefficient,
@@ -525,7 +546,8 @@ impl ReductionCore {
         })
     }
 
-    /// Returns one table extension after `finish_rounds`, dropping all dense
+    /// Returns one value per input table, in table order, after `finish_rounds`,
+    /// dropping all dense
     /// tables and second buffers before the finished state becomes observable.
     pub fn final_values(&self) -> Result<&[F128], ReductionError> {
         match &self.state {
@@ -623,7 +645,7 @@ impl ReductionCore {
 
     fn accumulate_chunk<const N: usize>(
         views: &mut [(usize, &[F128], &mut [F128])],
-        legs: &[Leg],
+        legs: &[LegState],
         partials: &mut [F128Accumulator],
         index: usize,
         chunk: usize,
@@ -643,7 +665,7 @@ impl ReductionCore {
 
     fn accumulate_blocks(
         views: &mut [(usize, &[F128], &mut [F128])],
-        legs: &[Leg],
+        legs: &[LegState],
         (total, sums): (&mut [F128Accumulator], &mut [F128Accumulator]),
         (index, chunk): (usize, usize),
         bind: Option<F128>,
@@ -786,7 +808,7 @@ impl ProveRounds<F128> for ReductionCore {
 #[cfg(all(test, feature = "test-utils"))]
 #[expect(clippy::unwrap_used, reason = "test fixtures fail by panicking")]
 mod tests {
-    use super::ReductionCore;
+    use super::{ReductionCore, ReductionLeg};
     use crate::oracle::{mle_at, round_polynomial};
     use crate::synth::{SynthProfile, SyntheticTrace};
     use jolt_field::{Field, F128};
@@ -856,13 +878,11 @@ mod tests {
             let legs: Vec<_> = points[..count]
                 .iter()
                 .enumerate()
-                .map(|(i, point)| {
-                    (
-                        0,
-                        point.clone(),
-                        F128::from_raw(37 + i as u128),
-                        quotient(&table, &[], point),
-                    )
+                .map(|(i, point)| ReductionLeg {
+                    table: 0,
+                    point: point.clone(),
+                    coefficient: F128::from_raw(37 + i as u128),
+                    claim: quotient(&table, &[], point),
                 })
                 .collect();
             let eq_tables: Vec<Vec<_>> = points[..count]
@@ -872,7 +892,7 @@ mod tests {
             let leaves: Vec<_> = std::iter::once(table.as_slice())
                 .chain(eq_tables.iter().map(Vec::as_slice))
                 .collect();
-            let mut claim: F128 = legs.iter().map(|(_, _, k, c)| *k * c).sum();
+            let mut claim: F128 = legs.iter().map(|leg| leg.coefficient * leg.claim).sum();
             let mut core = ReductionCore::new(vec![table.clone()], legs.clone()).unwrap();
             for round in 0..rounds {
                 let message = core
@@ -889,7 +909,7 @@ mod tests {
                 let expected = round_polynomial(&leaves, &challenges[..round], 2, |v| {
                     legs.iter()
                         .enumerate()
-                        .map(|(i, (_, _, k, _))| *k * v[0] * v[i + 1])
+                        .map(|(i, leg)| leg.coefficient * v[0] * v[i + 1])
                         .sum()
                 })
                 .unwrap();

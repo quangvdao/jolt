@@ -1016,6 +1016,44 @@ impl Arithmetic {
     }
 
     fn run(&self) -> F128 {
+        match self.kind {
+            ArithmeticKind::Product => self.product_stream(),
+            ArithmeticKind::MulX => self.mul_x_stream(),
+            ArithmeticKind::Word => self.word_stream(),
+        }
+    }
+
+    #[inline(never)]
+    fn product_stream(&self) -> F128 {
+        self.run_with(|source, cycle| {
+            let a = trace_value(source, cycle);
+            let b = F128::from_raw(
+                u128::from(source.trace_word(2, cycle))
+                    | (u128::from(source.trace_word(3, cycle)) << 64),
+            );
+            a * b
+        })
+    }
+
+    #[inline(never)]
+    fn mul_x_stream(&self) -> F128 {
+        self.run_with(|source, cycle| {
+            let raw = trace_value(source, cycle).to_raw();
+            F128::from_raw((raw << 1) ^ (0x87 & 0_u128.wrapping_sub(raw >> 127)))
+        })
+    }
+
+    #[inline(never)]
+    fn word_stream(&self) -> F128 {
+        self.run_with(|source, cycle| {
+            F128::from_raw(u128::from(Self::word_mix(
+                source.trace_word(0, cycle),
+                source.trace_word(1, cycle),
+            )))
+        })
+    }
+
+    fn run_with(&self, operation: impl Fn(&SyntheticTrace, usize) -> F128 + Sync) -> F128 {
         let source = black_box(&self.source);
         (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
             .into_par_iter()
@@ -1024,25 +1062,7 @@ impl Arithmetic {
                 let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
                 let mut total = F128::from_raw(0);
                 for cycle in start..end {
-                    let a = black_box(trace_value(source, cycle));
-                    let result = match self.kind {
-                        ArithmeticKind::Product => {
-                            let b = black_box(F128::from_raw(
-                                u128::from(source.trace_word(2, cycle))
-                                    | (u128::from(source.trace_word(3, cycle)) << 64),
-                            ));
-                            a * b
-                        }
-                        ArithmeticKind::MulX => {
-                            let raw = a.to_raw();
-                            F128::from_raw((raw << 1) ^ (0x87 & 0_u128.wrapping_sub(raw >> 127)))
-                        }
-                        ArithmeticKind::Word => F128::from_raw(u128::from(Self::word_mix(
-                            a.to_raw() as u64,
-                            (a.to_raw() >> 64) as u64,
-                        ))),
-                    };
-                    total += black_box(result);
+                    total += operation(source, cycle);
                 }
                 total
             })

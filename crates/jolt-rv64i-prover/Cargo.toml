@@ -39,9 +39,13 @@ jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true
 
 [[test]]
-name = "bytecode"
+name = "bits_reduction"
 required-features = ["test-utils"]
 
 [[test]]
 name = "wire"
+required-features = ["test-utils"]
+
+[[test]]
+name = "bytecode"
 required-features = ["test-utils"]

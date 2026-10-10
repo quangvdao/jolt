@@ -12,7 +12,7 @@ use jolt_program::{
     image::{decode::decode_instruction, DecodeMode},
 };
 use jolt_riscv::{SourceInstructionKind as Kind, RV64I};
-use jolt_rv64i_arith::{Bytecode, Layout, LayoutError};
+use jolt_rv64i_arith::{Bytecode, Layout, LayoutError, MAX_LOG_K_BYTECODE};
 use jolt_rv64i_trace::{adapt, preprocess, AdapterError};
 use jolt_rv64i_verifier::{error::Rv64iVerifierError, statement::CheckedInputs};
 use rayon::ThreadPoolBuilder;
@@ -337,6 +337,10 @@ fn ram_exponent_boundaries_are_candidates_for_the_statement_checker() {
         prepared.adapt(&rows),
         Err(AdapterError::Layout(LayoutError::BitsRowOverflow { .. }))
     ));
+    for b in 1..=MAX_LOG_K_BYTECODE {
+        assert!(matches!(Layout::new(b, 48, lowest),
+            Err(LayoutError::BitsRowOverflow { .. })));
+    }
     rows[4] = replace(
         base,
         base.instruction_index(),

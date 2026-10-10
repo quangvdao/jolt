@@ -8,6 +8,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use jolt_field::F128;
+use rayon::iter::IntoParallelRefMutIterator;
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 use thiserror::Error;
 
@@ -200,22 +201,76 @@ impl<S: CycleSource> ScatterPlan<S> {
     }
 
     fn emit(&self, weight: &(impl Fn(usize) -> F128 + Sync), weights: &mut [F128]) {
+        match self.chunk_len {
+            4096 => self.emit_blocks::<4096>(weight, weights),
+            8192 => self.emit_blocks::<8192>(weight, weights),
+            16384 => self.emit_blocks::<16384>(weight, weights),
+            32768 => self.emit_blocks::<32768>(weight, weights),
+            65536 => self.emit_blocks::<65536>(weight, weights),
+            _ => weights
+                .par_chunks_mut(self.chunk_len)
+                .zip(self.slots.par_chunks(self.chunk_len))
+                .enumerate()
+                .for_each(|(chunk, (weights, slots))| {
+                    let start = chunk * self.chunk_len;
+                    for (cycle, &slot) in slots.iter().enumerate() {
+                        weights[usize::from(slot)] = weight(start + cycle);
+                    }
+                }),
+        }
+    }
+
+    fn emit_blocks<const N: usize>(
+        &self,
+        weight: &(impl Fn(usize) -> F128 + Sync),
+        weights: &mut [F128],
+    ) {
         weights
-            .par_chunks_mut(self.chunk_len)
-            .zip(self.slots.par_chunks(self.chunk_len))
+            .as_chunks_mut::<N>()
+            .0
+            .par_iter_mut()
+            .zip(self.slots.par_chunks(N))
             .enumerate()
             .for_each(|(chunk, (weights, slots))| {
-                let start = chunk * self.chunk_len;
+                let start = chunk * N;
                 for (cycle, &slot) in slots.iter().enumerate() {
-                    weights[usize::from(slot)] = weight(start + cycle);
+                    // new establishes slot < N; the mask exposes that bound to code generation.
+                    weights[usize::from(slot) & (N - 1)] = weight(start + cycle);
                 }
             });
     }
 
     fn apply(&self, weights: &[F128], output: &mut [F128]) {
+        match self.range_len {
+            4096 => self.apply_blocks::<4096>(weights, output),
+            65536 => self.apply_blocks::<65536>(weights, output),
+            _ => {
+                let chunks = self.cycles / self.chunk_len;
+                output
+                    .par_chunks_mut(self.range_len)
+                    .zip(self.segments.par_chunks(chunks))
+                    .for_each(|(output, segments)| {
+                        for (chunk, segment) in segments.iter().enumerate() {
+                            let start = chunk * self.chunk_len + segment.start as usize;
+                            let end = start + segment.len as usize;
+                            for (&row, &weight) in self.row_offsets[start..end]
+                                .iter()
+                                .zip(&weights[start..end])
+                            {
+                                output[usize::from(row)] += weight;
+                            }
+                        }
+                    });
+            }
+        }
+    }
+
+    fn apply_blocks<const N: usize>(&self, weights: &[F128], output: &mut [F128]) {
         let chunks = self.cycles / self.chunk_len;
         output
-            .par_chunks_mut(self.range_len)
+            .as_chunks_mut::<N>()
+            .0
+            .par_iter_mut()
             .zip(self.segments.par_chunks(chunks))
             .for_each(|(output, segments)| {
                 for (chunk, segment) in segments.iter().enumerate() {
@@ -225,7 +280,8 @@ impl<S: CycleSource> ScatterPlan<S> {
                         .iter()
                         .zip(&weights[start..end])
                     {
-                        output[usize::from(row)] += weight;
+                        // new establishes row < N for this range; no routing is recomputed here.
+                        output[usize::from(row) & (N - 1)] += weight;
                     }
                 }
             });

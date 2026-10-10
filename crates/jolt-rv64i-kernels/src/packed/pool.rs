@@ -215,7 +215,11 @@ impl Drop for ScratchGuard<'_> {
     fn drop(&mut self) {
         // A destructor cannot report poison. Returning ownership preserves the
         // array bound; later checked operations still return PoolError::Poisoned.
-        let mut state = self.pool.state.lock().unwrap_or_else(|err| err.into_inner());
+        let mut state = self
+            .pool
+            .state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         state.free.push(std::mem::take(&mut self.array));
         state.lent -= 1;
     }

@@ -8,8 +8,11 @@
 //! later levels share one table. `--load` reports uptime outside measurement.
 //! `--arithmetic --iterations 8000000 --samples 5` measures fully reduced
 //! K multiplication and E-by-K scaling throughput on independent chains.
+//! Provisioning rows time allocation and direct indexed parallel replication
+//! without butterflies. Subtracting them estimates provisioning cost because
+//! provisioning and transform traffic can overlap in the complete phase.
 
-use jolt_field::{ExtField, Zero};
+use jolt_field::ExtField;
 use jolt_field::{F192, F64};
 use jolt_rv64i_pcs::ntt::Encoder;
 use jolt_rv64i_verifier::commitment::BitsGeometry;
@@ -113,27 +116,32 @@ impl Fixture {
                 expected: 1,
                 actual: 0,
             })?;
-            let len = 2 * level0.lanes()? * (1 << level0.d);
+            let word_lanes = 2 * level0.lanes()?;
+            let len = word_lanes * (1 << level0.d);
             let mut code = try_vec(WhirPart::Leaves, len)?;
-            code.resize(len, F64::zero());
-            code.par_chunks_mut(self.rows.len() * 4).for_each(|coset| {
-                for (r, out) in self.rows.iter().zip(coset.chunks_exact_mut(4)) {
-                    for (word, slot) in r.iter().zip(out) {
-                        *slot = F64::from_raw(*word);
-                    }
-                }
-            });
+            let mask = self.rows.len() * 4 - 1;
+            (0..len)
+                .into_par_iter()
+                .with_min_len(word_lanes.max(4096))
+                .map(|index| {
+                    let word = index & mask;
+                    F64::from_raw(self.rows[word / 4][word % 4])
+                })
+                .collect_into_vec(&mut code);
             let _code = black_box(&code);
             let time = start.elapsed();
             drop(code);
             let mut times = vec![time];
             for (level, message) in self.levels.iter().skip(1).zip(&self.later) {
                 let start = Instant::now();
-                let len = level.lanes()? * (1usize << level.d);
+                let lanes = level.lanes()?;
+                let len = lanes * (1usize << level.d);
                 let mut code = try_vec(WhirPart::Leaves, len)?;
-                code.resize(len, F192::zero());
-                code.par_chunks_mut(message.len())
-                    .for_each(|block| block.copy_from_slice(message));
+                (0..len)
+                    .into_par_iter()
+                    .with_min_len(lanes.max(512))
+                    .map(|index| message[index & (message.len() - 1)])
+                    .collect_into_vec(&mut code);
                 let _code = black_box(&code);
                 times.push(start.elapsed());
                 drop(code);
@@ -286,7 +294,7 @@ fn report(options: &Options) -> Result<(), Box<dyn Error>> {
             if options.copy {
                 for (i, times) in copies.iter_mut().enumerate() {
                     println!(
-                        "# t={log_t},threads={threads},level={i},copy_ms={:.6}",
+                        "# t={log_t},threads={threads},level={i},provisioning_ms={:.6}",
                         stats(times).0
                     );
                 }

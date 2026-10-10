@@ -102,10 +102,18 @@ impl<'a> Encoder<'a> {
         let word_lanes = checked_product(WhirPart::Leaves, &[self.lanes, 2])?;
         let len = checked_product(WhirPart::Leaves, &[self.code_len, 2])?;
         let mut out = try_vec(WhirPart::Leaves, len)?;
-        out.resize(len, F64::zero());
-        self.initialize(&mut out, word_lanes, |index| {
-            F64::from_raw(rows[index / 4][index % 4])
-        });
+        let grain = word_lanes.max(4096);
+        (0..len)
+            .into_par_iter()
+            .with_min_len(grain)
+            .map(|index| {
+                // Encoder checks power-of-two message dimensions, so this
+                // mask wraps each replica to its position-major row source.
+                let source = index & (words - 1);
+                F64::from_raw(rows[source / 4][source % 4])
+            })
+            .collect_into_vec(&mut out);
+        self.forward(&mut out, word_lanes, self.c);
         Ok(out)
     }
 
@@ -123,43 +131,14 @@ impl<'a> Encoder<'a> {
             });
         }
         let mut out = try_vec(WhirPart::Leaves, self.code_len)?;
-        out.resize(self.code_len, F::zero());
-        out.par_chunks_mut(self.message_len)
-            .for_each(|block| block.copy_from_slice(message));
+        let grain = self.lanes.max(512);
+        (0..self.code_len)
+            .into_par_iter()
+            .with_min_len(grain)
+            .map(|index| message[index & (self.message_len - 1)])
+            .collect_into_vec(&mut out);
         self.forward(&mut out, self.lanes, self.c);
         Ok(out)
-    }
-
-    fn initialize<F: CodeSymbol>(
-        &self,
-        data: &mut [F],
-        lanes: usize,
-        read: impl Fn(usize) -> F + Sync,
-    ) {
-        let block_len = self.message_positions * lanes;
-        data.par_chunks_mut(block_len)
-            .enumerate()
-            .for_each(|(replica, block)| {
-                let base = replica * self.message_positions;
-                if self.c < 3 {
-                    for (index, value) in block.iter_mut().enumerate() {
-                        *value = read(index);
-                    }
-                    self.local_layers(block, lanes, base, self.c);
-                } else {
-                    let twiddles = self.radix8_twiddles(self.c - 1, base);
-                    let stride = block_len / 8;
-                    Self::radix8_tiles(block, true, |offset, mut rows| {
-                        for (slab, row) in rows.iter_mut().enumerate() {
-                            for (index, value) in row.iter_mut().enumerate() {
-                                *value = read(slab * stride + offset + index);
-                            }
-                        }
-                        Self::radix8(&mut rows, &twiddles);
-                    });
-                }
-            });
-        self.forward(data, lanes, self.c.saturating_sub(3));
     }
 
     fn forward<F: CodeSymbol>(&self, data: &mut [F], lanes: usize, remaining: usize) {

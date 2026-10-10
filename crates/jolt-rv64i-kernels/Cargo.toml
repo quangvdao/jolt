@@ -79,3 +79,12 @@ required-features = ["test-utils"]
 name = "tail"
 harness = false
 required-features = ["test-utils"]
+
+[[bench]]
+name = "memory_machinery"
+harness = false
+required-features = ["test-utils"]
+
+[[test]]
+name = "memory_views"
+required-features = ["test-utils"]

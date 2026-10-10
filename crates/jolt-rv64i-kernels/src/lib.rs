@@ -9,6 +9,7 @@
 
 pub mod chunk_product;
 pub mod column_pass;
+pub mod memory;
 pub mod outer_f2;
 pub mod packed;
 pub mod par;

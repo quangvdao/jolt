@@ -14,7 +14,39 @@ use std::sync::Arc;
 enum DigitRead {
     Field(DigitField),
     Flag(DigitField),
-    Kind(usize),
+    Kind(KindTable),
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+enum KindTable {
+    Shift,
+    Access,
+    Key,
+    Branch,
+}
+impl KindTable {
+    const ALL: [Self; 4] = [Self::Shift, Self::Access, Self::Key, Self::Branch];
+
+    fn bits(self) -> usize {
+        match self {
+            Self::Shift | Self::Key => 3,
+            Self::Access => 4,
+            Self::Branch => 0,
+        }
+    }
+
+    fn digit(self, variant: Variant) -> Option<u8> {
+        match self {
+            Self::Shift => variant.shift().map(|shift| shift.kind.index() as u8),
+            Self::Access => variant
+                .access()
+                .and_then(|access| access.kind)
+                .map(|kind| kind.index() as u8),
+            Self::Key => variant.key_kind().map(|kind| kind.index() as u8),
+            Self::Branch => variant.branch().map(|_| 0),
+        }
+    }
 }
 
 /// The sole numbering of digit columns, trace words and bytecode words.
@@ -96,9 +128,9 @@ impl WitnessColumns {
         let access_kind = shift_kind + 1;
         let key_kind = shift_kind + 2;
         let branch = shift_kind + 3;
-        for (kind, width) in [3, 4, 3, 0].into_iter().enumerate() {
+        for kind in KindTable::ALL {
             reads.push(DigitRead::Kind(kind));
-            widths.push(width);
+            widths.push(kind.bits());
         }
         let keys_differ = reads.len();
         let should_branch = keys_differ + 1;
@@ -244,7 +276,7 @@ pub struct WitnessSource {
     bytecode: Arc<Bytecode>,
     fields: DigitFields,
     columns: WitnessColumns,
-    kinds: [[Option<u8>; 64]; 4],
+    kinds: [[Option<u8>; 64]; KindTable::ALL.len()],
 }
 impl WitnessSource {
     pub fn new(witness: &Rv64iWitness) -> Result<Self, Rv64iProverError> {
@@ -261,15 +293,11 @@ impl WitnessSource {
                 words: witness.words.len(),
             });
         }
-        let mut kinds = [[None; 64]; 4];
-        for variant in Variant::ALL {
-            kinds[0][variant.index()] = variant.shift().map(|shift| shift.kind.index() as u8);
-            kinds[1][variant.index()] = variant
-                .access()
-                .and_then(|access| access.kind)
-                .map(|kind| kind.index() as u8);
-            kinds[2][variant.index()] = variant.key_kind().map(|kind| kind.index() as u8);
-            kinds[3][variant.index()] = variant.branch().map(|_| 0);
+        let mut kinds = [[None; 64]; KindTable::ALL.len()];
+        for kind in KindTable::ALL {
+            for variant in Variant::ALL {
+                kinds[kind as usize][variant.index()] = kind.digit(variant);
+            }
         }
         Ok(Self {
             words: Arc::clone(&witness.words),
@@ -338,7 +366,7 @@ impl CycleSource for WitnessSource {
             DigitRead::Flag(field) => (field.read(row) != 0).then_some(0),
             DigitRead::Kind(kind) => self
                 .kinds
-                .get(kind)?
+                .get(kind as usize)?
                 .get(self.fields.variant().read(row) as usize)
                 .copied()
                 .flatten()

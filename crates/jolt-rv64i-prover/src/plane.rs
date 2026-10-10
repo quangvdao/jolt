@@ -124,12 +124,6 @@ impl DigitFields {
     pub fn ram_index(&self) -> DigitField {
         self.ram_index
     }
-    pub fn bytecode_chunk(&self, chunk: usize) -> Option<DigitField> {
-        self.bytecode_fields().get(chunk).copied()
-    }
-    pub fn ram_chunk(&self, chunk: usize) -> Option<DigitField> {
-        self.ram_fields().get(chunk).copied()
-    }
     pub fn pos_fields(&self) -> [DigitField; 2] {
         self.pos
     }

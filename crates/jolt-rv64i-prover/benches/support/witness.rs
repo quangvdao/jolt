@@ -1,5 +1,6 @@
 //! Executed, nonterminating witness shared by the adapter measurements.
 
+use self::replay::State;
 use common::{
     constants::RAM_START_ADDRESS,
     jolt_device::{JoltDevice, MemoryConfig, MemoryLayout},
@@ -10,8 +11,7 @@ use jolt_rv64i_verifier::{
     preprocessing::VerifierPreprocessing,
     statement::{CheckedInputs, Statement},
 };
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
@@ -128,7 +128,7 @@ impl WitnessFixture {
         )?
         .initial_ram()
         .to_vec();
-        let mut initial = replay::State::new(RAM_START_ADDRESS);
+        let mut initial = State::new(RAM_START_ADDRESS);
         for &(index, value) in &initial_ram {
             initial.set_ram_word(index, value);
         }
@@ -190,7 +190,7 @@ impl WitnessFixture {
     }
 
     fn program() -> Vec<u32> {
-        let mut rng = ChaCha20Rng::from_seed(SEED);
+        let mut rng = StdRng::from_seed(SEED);
         let mut words = Vec::with_capacity(PROGRAM_ROWS);
         words.push(asm::auipc(31, 0));
         // Sixteen immutable address registers cover 4096 data words after the image.

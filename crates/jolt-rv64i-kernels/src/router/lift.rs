@@ -103,6 +103,50 @@ struct ShapePlan {
     flags_two: Vec<Flags<2, 4>>,
     flags_three: Vec<Flags<3, 8>>,
 }
+struct TileSums {
+    indices: [Option<usize>; SHAPES_PER_TILE],
+    count: usize,
+}
+
+impl TileSums {
+    fn new(shapes: &[ShapePlan], active: impl Fn(&ShapePlan) -> bool) -> Self {
+        let mut indices = [None; SHAPES_PER_TILE];
+        let mut count = 0;
+        for (index, shape) in shapes.iter().enumerate() {
+            if active(shape) {
+                indices[index] = Some(count);
+                count += 1;
+            }
+        }
+        Self { indices, count }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the plan marks every weighted term-bearing shape as active"
+    )]
+    fn index(&self, shape: usize) -> usize {
+        self.indices[shape].expect("weighted term has an accumulator")
+    }
+
+    #[inline]
+    fn with(&self, body: impl FnOnce(&mut [[F128Accumulator; TILE]])) {
+        const { assert!(SHAPES_PER_TILE == 8) };
+        debug_assert!(self.count <= SHAPES_PER_TILE);
+        match self.count {
+            0 => body(&mut []),
+            1 => body(&mut [[F128Accumulator::default(); TILE]; 1]),
+            2 => body(&mut [[F128Accumulator::default(); TILE]; 2]),
+            3 => body(&mut [[F128Accumulator::default(); TILE]; 3]),
+            4 => body(&mut [[F128Accumulator::default(); TILE]; 4]),
+            5 => body(&mut [[F128Accumulator::default(); TILE]; 5]),
+            6 => body(&mut [[F128Accumulator::default(); TILE]; 6]),
+            7 => body(&mut [[F128Accumulator::default(); TILE]; 7]),
+            _ => body(&mut [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE]),
+        }
+    }
+}
+
 struct Plan {
     shapes: Vec<ShapePlan>,
     trace: Vec<WordPlan>,
@@ -313,7 +357,11 @@ impl Plan {
     ) {
         let row_count = rows.len();
         let mut targets = chunk_views(rows, chunk);
-        let shapes = self.shapes.len();
+        let tiles: Vec<_> = self
+            .shapes
+            .chunks(SHAPES_PER_TILE)
+            .map(|shapes| TileSums::new(shapes, |shape| shape.bytecode_terms != 0))
+            .collect();
         let row_shapes: Vec<_> = self
             .shapes
             .iter()
@@ -328,43 +376,45 @@ impl Plan {
                 let len = outputs[0].len();
                 for offset in (0..len).step_by(TILE) {
                     let count = TILE.min(len - offset);
-                    for base in (0..shapes).step_by(SHAPES_PER_TILE) {
-                        let group = SHAPES_PER_TILE.min(shapes - base);
-                        let mut sums = [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE];
-                        for word in &self.bytecode {
-                            let mut values = [ZERO; TILE];
-                            for (row, value) in values[..count].iter_mut().enumerate() {
-                                *value = lift
-                                    .lift(source.bytecode_word(word.word, start + offset + row));
-                            }
-                            for term in word
-                                .terms
-                                .iter()
-                                .filter(|term| term.shape >= base && term.shape < base + group)
-                            {
-                                let sums = &mut sums[term.shape - base];
-                                for (sum, &value) in sums[..count].iter_mut().zip(&values) {
-                                    sum.fmadd(value, term.coefficient);
+                    for (tile_index, tile) in tiles.iter().enumerate() {
+                        let base = tile_index * SHAPES_PER_TILE;
+                        let end = base + SHAPES_PER_TILE;
+                        tile.with(|sums| {
+                            for word in &self.bytecode {
+                                let mut values = [ZERO; TILE];
+                                for (row, value) in values[..count].iter_mut().enumerate() {
+                                    *value = lift.lift(
+                                        source.bytecode_word(word.word, start + offset + row),
+                                    );
+                                }
+                                for term in word
+                                    .terms
+                                    .iter()
+                                    .filter(|term| term.shape >= base && term.shape < end)
+                                {
+                                    let sums = &mut sums[tile.index(term.shape - base)];
+                                    for (sum, &value) in sums[..count].iter_mut().zip(&values) {
+                                        sum.fmadd(value, term.coefficient);
+                                    }
                                 }
                             }
-                        }
-                        for &(shape_index, row) in row_shapes
-                            .iter()
-                            .filter(|&&(shape, _)| shape >= base && shape < base + group)
-                        {
-                            let shape = &self.shapes[shape_index];
-                            for (output, sum) in outputs[row][offset..offset + count]
-                                .iter_mut()
-                                .zip(sums[shape_index - base].iter().copied())
+                            for &(shape_index, row) in row_shapes
+                                .iter()
+                                .filter(|&&(shape, _)| shape >= base && shape < end)
                             {
-                                *output = shape.constant
-                                    + if shape.bytecode_terms == 0 {
-                                        ZERO
-                                    } else {
-                                        sum.reduce()
-                                    };
+                                let shape = &self.shapes[shape_index];
+                                let output = &mut outputs[row][offset..offset + count];
+                                if let Some(index) = tile.indices[shape_index - base] {
+                                    for (output, sum) in
+                                        output.iter_mut().zip(sums[index].iter().copied())
+                                    {
+                                        *output = shape.constant + sum.reduce();
+                                    }
+                                } else {
+                                    output.fill(shape.constant);
+                                }
                             }
-                        }
+                        });
                     }
                 }
             });
@@ -383,6 +433,15 @@ impl Plan {
         let mut lift_views = chunk_views(lifts, chunk);
         let mut outputs = chunk_views(tables, chunk);
         let shape_count = self.shapes.len();
+        let tiles: Vec<_> = self
+            .shapes
+            .chunks(SHAPES_PER_TILE)
+            .map(|shapes| {
+                TileSums::new(shapes, |shape| {
+                    shape.trace_terms != 0 && !shape.direct_trace
+                })
+            })
+            .collect();
         let mut lift_chunks = lift_views.chunks_mut(word_count.max(1));
         let mut target_chunks = outputs.chunks_mut(shape_count);
         let chunks: Vec<_> = (0..source.cycles() / chunk)
@@ -413,67 +472,71 @@ impl Plan {
                             ZERO
                         });
                     }
-                    for base in (0..shape_count).step_by(SHAPES_PER_TILE) {
+                    for (tile_index, tile) in tiles.iter().enumerate() {
+                        let base = tile_index * SHAPES_PER_TILE;
                         let group = SHAPES_PER_TILE.min(shape_count - base);
-                        let mut sums = [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE];
-                        for (word, values) in self.trace.iter().zip(words.iter()) {
-                            for term in word
-                                .terms
-                                .iter()
-                                .filter(|term| term.shape >= base && term.shape < base + group)
-                            {
-                                if self.shapes[term.shape].direct_trace {
-                                    for (output, &value) in outputs[term.shape]
-                                        [offset..offset + count]
-                                        .iter_mut()
-                                        .zip(&values[offset..offset + count])
-                                    {
-                                        *output += value;
-                                    }
-                                } else {
-                                    for (sum, &value) in sums[term.shape - base][..count]
-                                        .iter_mut()
-                                        .zip(&values[offset..offset + count])
-                                    {
-                                        sum.fmadd(value, term.coefficient);
-                                    }
-                                }
-                            }
-                        }
-                        for (local, shape) in self.shapes[base..base + group].iter().enumerate() {
-                            let output = &mut outputs[base + local][offset..offset + count];
-                            if shape.trace_terms != 0 && !shape.direct_trace {
-                                for (output, sum) in
-                                    output.iter_mut().zip(sums[local].iter().copied())
+                        tile.with(|sums| {
+                            for (word, values) in self.trace.iter().zip(words.iter()) {
+                                for term in word
+                                    .terms
+                                    .iter()
+                                    .filter(|term| term.shape >= base && term.shape < base + group)
                                 {
-                                    *output += sum.reduce();
+                                    if self.shapes[term.shape].direct_trace {
+                                        for (output, &value) in outputs[term.shape]
+                                            [offset..offset + count]
+                                            .iter_mut()
+                                            .zip(&values[offset..offset + count])
+                                        {
+                                            *output += value;
+                                        }
+                                    } else {
+                                        let sums = &mut sums[tile.index(term.shape - base)];
+                                        for (sum, &value) in sums[..count]
+                                            .iter_mut()
+                                            .zip(&values[offset..offset + count])
+                                        {
+                                            sum.fmadd(value, term.coefficient);
+                                        }
+                                    }
                                 }
                             }
-                            if let Some(row) = shape.row_table {
-                                let row_table = &rows[row];
-                                for (cycle, output) in output.iter_mut().enumerate() {
-                                    *output +=
-                                        row_table[source.bytecode_index(start + offset + cycle)];
+                            for (local, shape) in self.shapes[base..base + group].iter().enumerate()
+                            {
+                                let output = &mut outputs[base + local][offset..offset + count];
+                                if let Some(index) = tile.indices[local] {
+                                    for (output, sum) in
+                                        output.iter_mut().zip(sums[index].iter().copied())
+                                    {
+                                        *output += sum.reduce();
+                                    }
+                                }
+                                if let Some(row) = shape.row_table {
+                                    let row_table = &rows[row];
+                                    for (cycle, output) in output.iter_mut().enumerate() {
+                                        *output += row_table
+                                            [source.bytecode_index(start + offset + cycle)];
+                                    }
+                                }
+                                for digit in &shape.digits {
+                                    for (cycle, output) in output.iter_mut().enumerate() {
+                                        let value = source
+                                            .digit(digit.column, start + offset + cycle)
+                                            .map_or(0, |digit| digit + 1);
+                                        *output += digit.table[value];
+                                    }
+                                }
+                                for flags in &shape.flags_one {
+                                    flags.add(source, start + offset, output);
+                                }
+                                for flags in &shape.flags_two {
+                                    flags.add(source, start + offset, output);
+                                }
+                                for flags in &shape.flags_three {
+                                    flags.add(source, start + offset, output);
                                 }
                             }
-                            for digit in &shape.digits {
-                                for (cycle, output) in output.iter_mut().enumerate() {
-                                    let value = source
-                                        .digit(digit.column, start + offset + cycle)
-                                        .map_or(0, |digit| digit + 1);
-                                    *output += digit.table[value];
-                                }
-                            }
-                            for flags in &shape.flags_one {
-                                flags.add(source, start + offset, output);
-                            }
-                            for flags in &shape.flags_two {
-                                flags.add(source, start + offset, output);
-                            }
-                            for flags in &shape.flags_three {
-                                flags.add(source, start + offset, output);
-                            }
-                        }
+                        });
                     }
                 }
             });

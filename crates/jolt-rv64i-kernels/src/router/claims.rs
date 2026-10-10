@@ -271,6 +271,7 @@ pub fn claims_pass<S: CycleSource>(
     let trace_words = pass.trace(plan, &mut weights);
     let mut row_weights = unsafe_allocate_zero_vec(source.bytecode_rows());
     plan.apply_buffer(&weights, &mut row_weights)?;
+    drop(weights);
     let bytecode_words = pass.bytecode(source, lifts, &row_weights);
     Ok(ClaimsOutput {
         trace_words,

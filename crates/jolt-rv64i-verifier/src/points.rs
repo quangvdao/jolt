@@ -50,12 +50,12 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
     eq(point, &vertex)
 }
 
-/// Materializes at most 64 equality weights in low-variable-first index order.
+/// Materializes at most 256 equality weights in low-variable-first index order.
 /// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    if point.len() > 6 {
+    if point.len() > 8 {
         return Err(PointsError::Dimension {
-            expected: 6,
+            expected: 8,
             actual: point.len(),
         });
     }
@@ -91,9 +91,12 @@ pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
             actual: point.len(),
         });
     }
-    (0..64)
-        .filter(|bit| word & (1_u64 << bit) != 0)
-        .try_fold(F::zero(), |sum, bit| Ok(sum + eq_index(point, bit)?))
+    Ok(eq_table(point)?
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| word & (1_u64 << bit) != 0)
+        .map(|(_, weight)| *weight)
+        .sum())
 }
 
 pub fn chunk<F: JoltField>(
@@ -108,13 +111,21 @@ pub fn chunk<F: JoltField>(
             actual: point.len(),
         });
     }
-    let zero = eq_index(point, 0)?;
+    let weights = eq_table(point)?;
+    let zero = weights.first().copied().ok_or(PointsError::Index {
+        index: 0,
+        variables: expected,
+    })?;
     (1..=descriptor.indicators()).try_fold(zero, |sum, digit| {
         let column = usize::from(descriptor.start()) + digit - 1;
         let value = columns
             .get(column)
             .ok_or(PointsError::MissingColumn { column })?;
-        Ok(sum + (eq_index(point, digit)? + zero) * *value)
+        let weight = weights.get(digit).copied().ok_or(PointsError::Index {
+            index: digit,
+            variables: expected,
+        })?;
+        Ok(sum + (weight + zero) * *value)
     })
 }
 

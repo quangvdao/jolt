@@ -609,10 +609,12 @@ fn flag_groups_validate_width_count_ranges_overlap_and_columns() {
 }
 
 #[test]
-fn reduction_round_allocations_are_bounded_at_both_sizes() {
+fn reduction_round_allocations_are_bounded_and_do_not_grow_with_chunks() {
+    // Keep workers alive across measurements so teardown cannot lower live bytes.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     pool.install(|| {
-        for rounds in [8, 14] {
+        let mut counts = [0; 2];
+        for rounds in [8, 13, 14, 17] {
             let fixture = Fixture::new(rounds, true);
             let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
             let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * pool.current_num_threads();
@@ -622,7 +624,6 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
                 .collect();
             // Exclude only fixture-owned storage; the core releases its dense inputs.
             let resident = CountingAllocator::live_bytes();
-            let lifetime = AllocationMeasurement::begin();
             let mut core =
                 ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
             let measurement = AllocationMeasurement::begin();
@@ -647,17 +648,25 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
                 "{} allocations for {rounds} rounds",
                 stats.allocs
             );
+            if rounds == 13 {
+                counts[0] = stats.allocs;
+            }
+            if rounds == 17 {
+                counts[1] = stats.allocs;
+            }
             assert!(stats.peak_bytes >= stats.final_bytes);
             assert!(stats.peak_bytes <= 64 * 1024 + runtime_bytes);
             let final_values_bytes = std::mem::size_of_val(core.final_values().unwrap());
-            let lifetime_stats = lifetime.finish();
-            assert!((final_values_bytes..=final_values_bytes + runtime_bytes)
-                .contains(&lifetime_stats.final_bytes));
+            assert!((resident + final_values_bytes
+                ..=resident + final_values_bytes + runtime_bytes)
+                .contains(&CountingAllocator::live_bytes()));
             drop(core);
             assert!(
                 (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
             );
         }
+        // Four extra rounds add fixed metadata; round-chunks grow from 14 to 74.
+        assert!(counts[1] <= counts[0] + 16 * (17 - 13) + RAYON_WORKER_ALLOWANCE.allocs);
     });
 }
 
@@ -802,10 +811,12 @@ fn two_chunk_tables_round_messages_and_final_values_match_the_definition_on_each
 }
 
 #[test]
-fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
+fn digit_builder_allocations_are_bounded_per_pass_and_only_outputs_remain() {
+    // Keep workers alive across measurements so teardown cannot lower live bytes.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     pool.install(|| {
-        for log_t in [8, 14] {
+        let mut counts = [0; 2];
+        for log_t in [8, 14, 16] {
             let source = Arc::new(
                 SyntheticTrace::new(
                     SynthProfile::Local,
@@ -833,6 +844,12 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
                 "{} allocations at log_t={log_t}",
                 stats.allocs
             );
+            if log_t == 14 {
+                counts[0] = stats.allocs;
+            }
+            if log_t == 16 {
+                counts[1] = stats.allocs;
+            }
             let output_bytes = tables.capacity() * std::mem::size_of::<Vec<F128>>()
                 + tables
                     .iter()
@@ -846,6 +863,8 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
                 (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
             );
         }
+        // Lookup/view counts are fixed while tiles grow from 64 to 256.
+        assert!(counts[1] <= counts[0] + RAYON_WORKER_ALLOWANCE.allocs);
     });
 }
 

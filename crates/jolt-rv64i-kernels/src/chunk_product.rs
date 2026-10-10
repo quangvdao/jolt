@@ -91,6 +91,19 @@ pub enum ChunkProductError {
     Unfinished,
 }
 
+enum TermIndex {
+    Cycle(usize),
+    Point(usize),
+}
+
+fn weight_index(index: TermIndex, cycles: usize, next: bool) -> Option<usize> {
+    let index = match index {
+        TermIndex::Cycle(cycle) => cycle.checked_sub(usize::from(next)),
+        TermIndex::Point(point) => point.checked_add(usize::from(next)),
+    }?;
+    (index < cycles).then_some(index)
+}
+
 struct HalfTerm {
     low: Vec<F128>,
     high: Vec<F128>,
@@ -109,7 +122,8 @@ pub fn combined_weight(
     if log_t >= usize::BITS as usize - 5 {
         return Err(ChunkProductError::LogSize { log_t });
     }
-    let low_bits = log_t.div_ceil(2);
+    let geometry = CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
+    let low_bits = geometry.low_bits();
     let mask = (1 << low_bits) - 1;
     let mut halves = Vec::new();
     let mut singletons = Vec::new();
@@ -129,18 +143,25 @@ pub fn combined_weight(
             let index = point.iter().enumerate().fold(0, |index, (bit, &value)| {
                 index | (usize::from(value == ONE) << bit)
             });
-            if !next || index + 1 < 1 << log_t {
-                singletons.push((index + usize::from(next), coefficient));
+            if let Some(cycle) = weight_index(TermIndex::Point(index), geometry.len(), next) {
+                singletons.push((cycle, coefficient));
             }
         } else {
+            let (low, high) =
+                geometry
+                    .split_point(point)
+                    .map_err(|_| ChunkProductError::TermPoint {
+                        term,
+                        expected: log_t,
+                        actual: point.len(),
+                    })?;
             halves.push(HalfTerm {
-                low: eq_table(&point[..low_bits], None),
-                high: eq_table(&point[low_bits..], Some(coefficient)),
+                low: eq_table(low, None),
+                high: eq_table(high, Some(coefficient)),
                 next,
             });
         }
     }
-    let geometry = CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
     let mut output = unsafe_allocate_zero_vec(checked_len::<F128>(
         Some(geometry.len()),
         "combined weight",
@@ -154,10 +175,11 @@ pub fn combined_weight(
                 let cycle = start + offset;
                 let mut sum = F128Accumulator::default();
                 for term in &halves {
-                    if term.next && cycle == 0 {
+                    let Some(index) =
+                        weight_index(TermIndex::Cycle(cycle), geometry.len(), term.next)
+                    else {
                         continue;
-                    }
-                    let index = cycle - usize::from(term.next);
+                    };
                     sum.fmadd(term.low[index & mask], term.high[index >> low_bits]);
                 }
                 *value = sum.reduce();
@@ -514,18 +536,26 @@ impl ChunkProductCore {
         &mut self,
         round: usize,
     ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        let geometry =
+            CycleChunks::new(self.log_t, round + 1).map_err(|_| missing("chunk round geometry"))?;
+        let reduced = self.term_sums::<D, N>(geometry)?;
+        self.recover_terms::<D, N>(geometry, round, &reduced)
+    }
+
+    fn term_sums<const D: usize, const N: usize>(
+        &mut self,
+        geometry: CycleChunks,
+    ) -> Result<Vec<[F128; 8]>, SumcheckError<F128>> {
         let WeightState::Terms { terms, scratch } = &mut self.weight else {
             return Err(missing("chunk equality terms"));
         };
         if terms.is_empty() {
-            return Ok(UnivariatePoly::new(vec![ZERO; D + 2]));
+            return Ok(Vec::new());
         }
-        let geometry =
-            CycleChunks::new(self.log_t, round + 1).map_err(|_| missing("chunk round geometry"))?;
         let chunk_pairs = geometry.chunk_len();
         let columns = &self.columns;
         let stride = terms.len() * 8;
-        let reduced = match terms.len() {
+        Ok(match terms.len() {
             1 => stack_term_sums::<D, N, 1>(&self.columns, terms, geometry),
             2 => stack_term_sums::<D, N, 2>(&self.columns, terms, geometry),
             5 => stack_term_sums::<D, N, 5>(&self.columns, terms, geometry),
@@ -552,7 +582,7 @@ impl ChunkProductCore {
                                     for (factor, (lo, hi)) in factors[..D].iter_mut().zip(values) {
                                         *factor = [lo, lo + hi];
                                     }
-                                    let (left, right, groups) = product_points::<D, N>(&factors, D);
+                                    let (left, right, groups) = product_points::<N>(&factors, D);
                                     *q = std::array::from_fn(|i| {
                                         if i < N + 2 && groups > 1 {
                                             left[i] * right[i]
@@ -601,7 +631,20 @@ impl ChunkProductCore {
                     })
                     .collect()
             }
+        })
+    }
+
+    fn recover_terms<const D: usize, const N: usize>(
+        &mut self,
+        geometry: CycleChunks,
+        round: usize,
+        reduced: &[[F128; 8]],
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        let WeightState::Terms { terms, .. } = &mut self.weight else {
+            return Err(missing("chunk equality terms"));
         };
+        let chunk_pairs = geometry.chunk_len();
+        let columns = &self.columns;
         let mut coefficients = vec![ZERO; D + 2];
         for (index, term) in terms.iter_mut().enumerate() {
             let sums = reduced[index];
@@ -678,7 +721,7 @@ fn stack_term_sums<const D: usize, const N: usize, const M: usize>(
                     for (factor, (lo, hi)) in factors[..D].iter_mut().zip(values) {
                         *factor = [lo, lo + hi];
                     }
-                    let (left, right, groups) = product_points::<D, N>(&factors, D);
+                    let (left, right, groups) = product_points::<N>(&factors, D);
                     let q: [F128; 8] = std::array::from_fn(|i| {
                         if i < N + 2 && groups > 1 {
                             left[i] * right[i]
@@ -753,7 +796,7 @@ fn factor_points<const N: usize>(
 }
 
 #[inline(always)]
-fn product_points<const D: usize, const N: usize>(
+fn product_points<const N: usize>(
     factors: &[[F128; 2]; 8],
     count: usize,
 ) -> ([F128; 8], [F128; 8], usize) {
@@ -783,7 +826,7 @@ fn accumulate_product<const D: usize, const N: usize>(
     factors: &[[F128; 2]; 8],
     sums: &mut [F128Accumulator; 8],
 ) {
-    let (left, right, groups) = product_points::<D, N>(factors, D + 1);
+    let (left, right, groups) = product_points::<N>(factors, D + 1);
     for i in 0..N + 2 {
         if groups == 1 {
             sums[i].add(left[i]);
@@ -791,6 +834,24 @@ fn accumulate_product<const D: usize, const N: usize>(
             sums[i].fmadd(left[i], right[i]);
         }
     }
+}
+
+const fn node_count(degree: usize) -> usize {
+    degree.saturating_sub(2)
+}
+
+macro_rules! dispatch_round {
+    ($core:ident, $method:ident, $extra_degree:literal, $($argument:expr),*) => {
+        match $core.d {
+            1 => $core.$method::<1, { node_count(1 + $extra_degree) }>($($argument),*),
+            2 => $core.$method::<2, { node_count(2 + $extra_degree) }>($($argument),*),
+            3 => $core.$method::<3, { node_count(3 + $extra_degree) }>($($argument),*),
+            4 => $core.$method::<4, { node_count(4 + $extra_degree) }>($($argument),*),
+            5 => $core.$method::<5, { node_count(5 + $extra_degree) }>($($argument),*),
+            6 => $core.$method::<6, { node_count(6 + $extra_degree) }>($($argument),*),
+            _ => $core.$method::<7, { node_count(7 + $extra_degree) }>($($argument),*),
+        }
+    };
 }
 
 impl ProveRounds<F128> for ChunkProductCore {
@@ -832,24 +893,10 @@ impl ProveRounds<F128> for ChunkProductCore {
             }
         }
         let result = match &self.weight {
-            WeightState::Dense { .. } => match self.d {
-                1 => self.dense_round::<1, 0>(bind, round, previous_claim),
-                2 => self.dense_round::<2, 1>(bind, round, previous_claim),
-                3 => self.dense_round::<3, 2>(bind, round, previous_claim),
-                4 => self.dense_round::<4, 3>(bind, round, previous_claim),
-                5 => self.dense_round::<5, 4>(bind, round, previous_claim),
-                6 => self.dense_round::<6, 5>(bind, round, previous_claim),
-                _ => self.dense_round::<7, 6>(bind, round, previous_claim),
-            },
-            WeightState::Terms { .. } => match self.d {
-                1 => self.terms_round::<1, 0>(round),
-                2 => self.terms_round::<2, 0>(round),
-                3 => self.terms_round::<3, 1>(round),
-                4 => self.terms_round::<4, 2>(round),
-                5 => self.terms_round::<5, 3>(round),
-                6 => self.terms_round::<6, 4>(round),
-                _ => self.terms_round::<7, 5>(round),
-            },
+            WeightState::Dense { .. } => {
+                dispatch_round!(self, dense_round, 1, bind, round, previous_claim)
+            }
+            WeightState::Terms { .. } => dispatch_round!(self, terms_round, 0, round),
         };
         if result.is_ok() {
             self.state = if round + 1 == self.log_t {

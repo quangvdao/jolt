@@ -92,13 +92,13 @@ pub(super) fn product192([a0, a1, a2]: [u64; 3], [b0, b1, b2]: [u64; 3]) -> Unre
 }
 
 #[inline]
-pub(super) fn reduce64(product: Unreduced64) -> u64 {
+pub(super) const fn reduce64(product: Unreduced64) -> u64 {
     let low = product as u64;
-    let high = product >> 64;
+    let high = (product >> 64) as u64;
     let first = high ^ (high << 1) ^ (high << 3) ^ (high << 4);
-    let overflow = (first >> 64) as u64;
+    let overflow = (high >> 63) ^ (high >> 61) ^ (high >> 60);
     let second = overflow ^ (overflow << 1) ^ (overflow << 3) ^ (overflow << 4);
-    low ^ first as u64 ^ second
+    low ^ first ^ second
 }
 
 #[inline]

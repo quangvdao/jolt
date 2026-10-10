@@ -37,9 +37,7 @@ pub(super) fn reduce_accumulator64(product: Unreduced64) -> u64 {
 
 #[inline]
 fn reduce_word64(product: Word) -> u64 {
-    let k = Word::from_u64(0x1b);
-    let first = product.mul_hl(k);
-    (product ^ first ^ first.mul_hl(k)).low()
+    product.reduce64()
 }
 
 #[inline]

@@ -1,6 +1,11 @@
 use std::arch::x86_64::{
-    __m128i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128, _mm_shuffle_epi32,
-    _mm_slli_epi64, _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
+    __m128i, _mm_clmulepi64_si128, _mm_cvtsi64_si128, _mm_shuffle_epi32, _mm_slli_epi64,
+    _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
+};
+
+#[cfg(target_feature = "gfni")]
+use std::arch::x86_64::{
+    _mm_cvtsi128_si64, _mm_gf2p8affine_epi64_epi8, _mm_set1_epi64x, _mm_set_epi64x,
 };
 
 #[derive(Clone, Copy)]
@@ -12,6 +17,36 @@ pub(super) const KARATSUBA128: bool = true;
 pub(super) const SHIFT_SQUARE128: bool = true;
 
 impl Word {
+    #[inline]
+    pub(super) fn reduce64(self) -> u64 {
+        #[cfg(target_feature = "gfni")]
+        {
+            // SAFETY: the cfg guarantees GFNI, and SSE2 is baseline. Affine
+            // transforms act on each byte independently; the shifts place
+            // byte carries and the x^64 overflow in their reduced positions.
+            unsafe {
+                let high = _mm_shuffle_epi32::<0xee>(self.0);
+                let image = _mm_gf2p8affine_epi64_epi8::<0>(
+                    high,
+                    _mm_set_epi64x(
+                        const { affine_matrix(0, 8) } as i64,
+                        const { affine_matrix(0, 0) } as i64,
+                    ),
+                );
+                let carry = _mm_slli_si128::<1>(_mm_srli_si128::<8>(image));
+                let overflow = _mm_gf2p8affine_epi64_epi8::<0>(
+                    _mm_srli_epi64::<56>(high),
+                    _mm_set1_epi64x(const { affine_matrix(56, 0) } as i64),
+                );
+                let folded =
+                    _mm_xor_si128(_mm_xor_si128(self.0, image), _mm_xor_si128(carry, overflow));
+                _mm_cvtsi128_si64(folded) as u64
+            }
+        }
+        #[cfg(not(target_feature = "gfni"))]
+        super::portable::reduce64(self.to_u128())
+    }
+
     #[inline]
     pub(super) fn from_unreduced64(value: Unreduced64) -> Self {
         value
@@ -62,12 +97,6 @@ impl Word {
     pub(super) fn to_u128(self) -> u128 {
         // SAFETY: both types have 128 bits, all bit patterns are valid, and x86_64 is little-endian.
         unsafe { std::mem::transmute::<__m128i, u128>(self.0) }
-    }
-
-    #[inline]
-    pub(super) fn low(self) -> u64 {
-        // SAFETY: SSE2 is baseline on x86_64.
-        unsafe { _mm_cvtsi128_si64(self.0) as u64 }
     }
 
     #[inline]
@@ -123,4 +152,22 @@ impl Word {
         // SAFETY: SSE2 is baseline on x86_64.
         unsafe { Self(_mm_slli_si128::<8>(self.0)) }
     }
+}
+
+#[cfg(target_feature = "gfni")]
+const fn affine_matrix(input_shift: u32, output_shift: u32) -> u64 {
+    let mut matrix = 0;
+    let mut input_bit = 0;
+    while input_bit < 8 {
+        let image = super::portable::reduce64(1u128 << (64 + input_shift + input_bit));
+        let mut output_bit = 0;
+        while output_bit < 8 {
+            let bit = (image >> (output_shift + output_bit)) & 1;
+            // GFNI numbers the matrix's output rows from the most significant byte.
+            matrix |= bit << ((7 - output_bit) * 8 + input_bit);
+            output_bit += 1;
+        }
+        input_bit += 1;
+    }
+    matrix
 }

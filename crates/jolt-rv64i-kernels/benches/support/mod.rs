@@ -9,6 +9,8 @@
 
 mod allocator;
 pub mod example;
+pub mod fit;
+pub use self::fit::ChainFit;
 pub mod merge;
 pub mod scatter;
 
@@ -341,52 +343,18 @@ pub trait ProbeKernel: Send {
     }
 }
 
-/// Affine fit of fused-chain medians, with the zero-length control kept separate.
-pub struct ChainFit {
-    pub slope: f64,
-    pub intercept: f64,
-    pub baseline: f64,
-    pub reduction: f64,
-    pub residual: f64,
-}
-
-impl ChainFit {
-    fn new(points: &[(usize, f64)]) -> Option<Self> {
-        let baseline = points.iter().find(|p| p.0 == 0)?.1;
-        let fitted: Vec<_> = points.iter().filter(|p| p.0 != 0).collect();
-        if fitted.len() != 5 {
-            return None;
-        }
-        let mean_x = fitted.iter().map(|p| p.0 as f64).sum::<f64>() / 5.0;
-        let mean_y = fitted.iter().map(|p| p.1).sum::<f64>() / 5.0;
-        let variance = fitted
-            .iter()
-            .map(|p| (p.0 as f64 - mean_x).powi(2))
-            .sum::<f64>();
-        let slope = fitted
-            .iter()
-            .map(|p| (p.0 as f64 - mean_x) * (p.1 - mean_y))
-            .sum::<f64>()
-            / variance;
-        let intercept = mean_y - slope * mean_x;
-        let residual = fitted
-            .iter()
-            .map(|p| (p.1 - (intercept + slope * p.0 as f64)).abs())
-            .fold(0.0, f64::max);
-        Some(Self {
-            slope,
-            intercept,
-            baseline,
-            reduction: intercept - baseline,
-            residual,
-        })
-    }
+/// One measured primary pass or one fused-chain fit, with its full record id.
+pub struct ProbeRecord {
+    pub id: String,
+    pub median: f64,
+    pub fit: Option<ChainFit>,
 }
 
 /// Runs unit probes with warmed pools and resident sources excluded from timing.
 /// Each sample constructs fresh state under the counting allocator. `ns` is
 /// median primary wall time per operation; min/max bound the observed samples.
-/// `reduce_ns` is the auxiliary pass's median per operation for fmadd chains.
+/// Fused-chain fit records report slope, intercept, baseline, their difference
+/// and largest residual; ordinary chain ns values are per cycle.
 /// Allocation fields are maxima across samples and include construction; final
 /// bytes count the state still resident after its measured passes. Probe defaults
 /// are log_t=22, threads=1,12 and samples=5; `--units` selects case groups.
@@ -399,7 +367,7 @@ impl ChainFit {
 pub fn run_probe<C, E>(
     cases: &[ProbeCase],
     construct: impl Fn(&ProbeCase, Option<Arc<SyntheticTrace>>, usize) -> Result<C, E> + Sync,
-) -> Result<(), RunnerError>
+) -> Result<Vec<ProbeRecord>, RunnerError>
 where
     C: ProbeKernel,
     E: StdError,
@@ -414,6 +382,7 @@ where
         }
     }
     let pools = warmed_pools(&options.threads)?;
+    let mut records = Vec::new();
     let selected = |case: &&ProbeCase| {
         options.units.is_empty() || options.units.iter().any(|unit| unit == case.unit)
     };
@@ -503,11 +472,12 @@ where
                     chain_points.push((terms, primary.median));
                 }
                 let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
+                let id = format!(
+                    "probe/{}/{}/{profile_name}/{log_t}/{threads}",
+                    case.unit, case.variant
+                );
                 print!(
-                        "probe/{}/{}/{}/{log_t}/{threads} ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={} final_bytes={} allocs={}",
-                        case.unit,
-                        case.variant,
-                        profile_name,
+                        "{id} ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={} final_bytes={} allocs={}",
                         primary.median,
                         primary.min,
                         primary.max,
@@ -527,11 +497,22 @@ where
                     );
                 }
                 println!();
+                records.push(ProbeRecord {
+                    id,
+                    median: primary.median,
+                    fit: None,
+                });
             }
             if let Some(fit) = ChainFit::new(&chain_points) {
-                println!("probe/fmadd/fit/{}/{log_t}/{threads} slope_ns={:.6} intercept_ns={:.6} baseline_ns={:.6} reduction_ns={:.6} residual_ns={:.6}", profile_name, fit.slope, fit.intercept, fit.baseline, fit.reduction, fit.residual);
+                let id = format!("probe/fmadd/fit/{profile_name}/{log_t}/{threads}");
+                println!("{id} slope_ns={:.6} intercept_ns={:.6} baseline_ns={:.6} reduction_ns={:.6} residual_ns={:.6}", fit.slope, fit.intercept, fit.baseline, fit.reduction, fit.residual);
+                records.push(ProbeRecord {
+                    id,
+                    median: fit.slope,
+                    fit: Some(fit),
+                });
             }
         }
     }
-    Ok(())
+    Ok(records)
 }

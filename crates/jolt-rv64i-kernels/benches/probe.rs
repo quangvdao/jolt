@@ -1,111 +1,93 @@
-//! Unit costs on seeded packed traces, before the packed passes are available.
+//! Unit-cost calibration on opaque seeded packed traces.
 //!
-//! Canonical lookup ids narrow the outer/lift cases to suboperations:
-//! outer_materialise covers 48 of outer's 253 L per cycle; word_lift_bytes
-//! covers 48 of source_lift's 59 L, excluding digit and combined-row tables.
-//! Canonical g_digits has sixteen distinct byte banks and twenty-one compact
-//! banks (70,048 bytes, rounded to 69 KiB), fixed assignments with no aliasing.
-//! Every lookup prints allocated_bytes and addressable_entries, a conservative
-//! union bound from the synthetic value domains and both schedules, not a hit
-//! count. Artificial footprints have pressure in their ids.
-//! `lookup` issues 48 byte reads for the outer lanes, 48 for six word lifts,
-//! 37 for the digit builder, and 49 for the byte builder. Ordinary layouts have
-//! disjoint 256-entry banks and, at 5/69 KiB, a final 64-entry bank. That smaller
-//! bank masks byte indices to six bits. Two precomputed bank schedules alternate
-//! by chunk, covering a footprint with more banks than read streams. Smaller
-//! footprints reuse banks. The byte builder uses interleaved bank pairs and
-//! singleton banks; at 196 KiB these are exactly twenty pairs and nine singles.
-//! The 5 KiB byte layout uses a 128-position pair and a 64-position singleton,
-//! masking indices to seven/six bits. No timed lookup uses division or modulo.
-//! Requested KiB describes allocated banks, not the effective cache working set:
-//! only indices observed in the trace are read. In particular, high RAM chunks,
-//! flags, PC bytes and one-hot row bytes may access much smaller subsets. The
-//! active address set is the union of `base + ((value & mask) << shift)` over
-//! observed values and the two schedules. No synthetic bits expand digit values.
-//! Byte and digit distributions otherwise retain their trace locality. The
-//! byte builder interleaves the two weights on bytes
-//! 0–7 and 17–28, so a shared byte index selects adjacent weight entries. The
-//! digit builder counts two eight-byte Inc lifts, twelve chunk lookups plus
-//! KeysDiffer, and seven chunk lookups plus KeysDiffer; the other two flags
-//! require no lookup. This measures reads and XORs, with index decoding included.
+//! Construction, source generation, domain/count planning, allocation and initial
+//! zeroing are outside kernel timing. Each record prints its sample median and
+//! min/max in wall-clock nanoseconds divided by its operation count. Twelve-thread
+//! figures are a scaling column, never single-thread unit prices or CPU time.
+//! The final unit-table uses the largest requested stream with one thread and
+//! the representative ids below; excluded cases/one-thread runs say not_measured.
+//! Constants in this bench retain both specification estimates for comparison.
 //!
-//! `bucket` counts each F128 XOR update. Column buckets use all 32 row bytes.
-//! Fold buckets use the five router banks and their activity digits, including
-//! the two bytecode branch words and Imm in Compare. Variant has five trace
-//! words and eight metadata buckets (seven chunks and the three flags together).
-//! Its layouts occupy 10.383, 11.477 and 19.133 MiB per worker. A seeded trace
-//! word selects the requested share on the hot eight selectors at construction;
-//! timing reads one precomputed selector byte per cycle. The hot-eight
-//! layout varies its byte-update fraction; the all-nibble and all-byte layouts
-//! keep fractions zero and one while the share changes locality. The separate
-//! pass over four bytecode words per visited row is excluded from this unit.
-//!
-//! `sct/partitioned_emit` measures counted, range-partitioned scatter: each
-//! chunk emits (row, weight) in cycle order into disjoint portions of one
-//! range-contiguous buffer, then each range applies those pairs without source
-//! reads. Counts and storage are prepared outside timing. The `scatter` group
-//! contains alternatives, not sct unit prices: two atomic halves, worker tables
-//! including their merge, and destination-ordered gather. Default local/all_rows
-//! streams visit 2^16/2^20 rows respectively in the 2^20-row output.
-//!
-//! `fmadd` prepares the same twenty masked operand pairs at every chain length,
-//! accumulates zero, one, two, four, eight or twenty terms on the chunk stack,
-//! reduces nonempty chains there, and XORs each result into the chunk total.
-//! The runner fits per-cycle medians at nonzero lengths by least squares: A is
-//! the slope, R is the intercept minus the zero-length preparation/XOR baseline.
-//! The maximum absolute residual reports departures from this affine model.
-//! `merge` reports time per zero-filled or merged F128 element; its two variants
-//! count W*N and (2W-1)*N operations on N=10 MiB/16, respectively. All chunk sizes
-//! are fixed at 4096 cycles and no unit allocates during an individual chunk.
-//!
-//! | Record metric | Unit-table symbol | Included work |
+//! | Unit | Representative record (before size/thread suffix) | Timed work |
 //! |---|---|---|
-//! | lookup ns | L per lookup | index decoding and XOR |
-//! | bucket ns | Bk per F128 update | byte/nibble decoding |
-//! | sct/partitioned_emit ns | sct per cycle | cycle-order pair emission and range application |
-//! | fmadd fit slope_ns | A per term | fused stack chains, fixed preparation removed by fit |
-//! | fmadd fit reduction_ns | R per chain | fit intercept minus zero-length baseline |
-//! | merge ns | mrg per element | zero-fill, or zero-fill plus tree merge |
+//! | M | arithmetic/products/local | independent reduced trace-word products and chunk XOR |
+//! | A | fmadd/fit/local, slope_ns | least-squares slope of fused stack chains |
+//! | R | fmadd/fit/local, reduction_ns | fit intercept minus zero-length preparation/XOR baseline |
+//! | L | lookup/g_digits_69kib/local | the canonical digit builder's 37 reads/XORs |
+//! | Bk | bucket/fold_none_share_0/all_rows | default nibble-layout updates, selectors prepared first |
+//! | sct | sct/partitioned_emit_rows_20/all_rows | cycle-order pair emission and range-local application |
+//! | mrg | readout/column_128kib/independent | per-bit bucket read-out, normalized by reads/XORs |
+//! | X | arithmetic/mul_x_raw_shift_substitute/local | raw shift and conditional modulus XOR |
+//! | w | arithmetic/word_monomial_mix/local | representative outer monomial word operations |
 //!
-//! `arithmetic/products` measures independent reduced products from trace words.
-//! `mul_x_raw_shift_substitute` uses the raw shift and modulus-0x87 conditional
-//! XOR because the field's mul_x helper is not yet available. `word_monomial_mix`
-//! mirrors the outer monomial rounds: two three-stage Moebius transforms, AND,
-//! then stride-eight gather, totalling nine shifts, eleven ANDs, six XORs and
-//! three ORs (29 word operations). The spec does not fix the ratio within 410 w.
-//! `readout` reads the same column/fold bank geometry as the update probes:
-//! 128 reads per byte output bit, eight per nibble bit, individual indicator
-//! cells, flag-bit sums, and selector One totals. It excludes row-only banks.
+//! Fused chains have lengths 0,1,2,4,8,20. Every cycle prepares the same twenty
+//! masked operand pairs at every length. Nonempty chains accumulate and reduce
+//! on the stack, then XOR the result into the chunk total; zero uses one prepared
+//! operand and the same total XOR, with no multiplication/reduction. Fits use
+//! nonzero-length per-cycle medians and print slope, intercept, the zero control,
+//! their difference and the largest absolute residual. Reduction estimates may
+//! be negative on a noisy run; no estimate is clamped or represented as latency.
 //!
-//! Its table-layout, stream-storage and atomic
-//! substitutions are part of each unit cost, rather than isolated instructions.
+//! mul_x is absent from this branch's field API. Its substitute implements the
+//! specified polynomial-basis shift/reduction using modulus mask 0x87. The word
+//! stream mirrors outer rounds 1--3: two three-stage Moebius transforms, an AND
+//! product and stride-eight gather (nine shifts, eleven ANDs, six XORs, three
+//! ORs, 29 operations). The spec does not define an exact ratio behind its 410 w;
+//! this representative mix is explicit rather than claiming whole-core coverage.
 //!
-//! | Lookup pattern | Passage mirrored in the kernel specification | Accesses per cycle |
+//! Canonical lookup patterns and the specification passages they mirror:
+//! | Pattern | Passage/suboperation | L covered |
 //! |---|---|---|
-//! | outer | Bitwise outer sum-check, Rounds 7 and 8: materialise six lane words with WordLift | 48 byte lookups |
-//! | source_lift | Routers, source_lift: lift each of the six trace words once at r_bit | 48 byte lookups |
-//! | g_digits | Reduction of committed claims, g_pass_digits: word bytes and indicator digits | 16 byte and 21 digit lookups |
-//! | g_bytes | Reduction of committed claims, g_pass_bytes: row-byte tables with interleaved weights | 49 lookups over 29 byte positions |
+//! | outer_materialise_32kib | Bitwise outer, Rounds 7 and 8: six lane WordLifts | 48 of outer's 253 per cycle |
+//! | word_lift_bytes_32kib | Routers, source_lift: six trace-word WordLifts | 48 of source_lift's 59 per cycle |
+//! | g_digits_69kib | Reduction, g_pass_digits: two Inc lifts and compact indicator tables | all 37 per cycle |
+//! | g_bytes_196kib | Reduction, g_pass_bytes: interleaved weighted row bytes | all 49 per cycle |
 //!
-//! Every entry is one 16-byte F128. Ordinary full banks have eight index bits;
-//! their 64-entry tails have six. Interleaved full pairs have eight index bits
-//! and two adjacent entries per index; the 5 KiB pair has seven index bits.
-//! Digit lookups retain their original zero-to-four-bit value ranges within
-//! those banks. The following table gives bank counts for every footprint;
-//! each ordinary pattern uses its column and g_bytes uses the paired column.
+//! Every entry is 16 bytes. Canonical word lifts use eight 256-entry banks,
+//! eight index bits, shared by the six words. Canonical digits have sixteen
+//! distinct 256-entry byte banks plus twenty-one separately weighted compact
+//! banks: fifteen of width 16, four of width 8, one of width 2, one of width 8
+//! for three combined flags. They total 4,378 entries/70,048 bytes (69 KiB rounded).
+//! Each stream has a fixed bank: no rotation or byte/digit aliasing. Canonical
+//! bytes use twenty 256-position interleaved pairs and nine 256-entry singletons;
+//! positions 0--7 and 17--28 have two adjacent weights for one eight-bit index.
+//! Table values are seeded field entries: the cost is loads/XORs, not table building.
 //!
-//! | KiB | Ordinary banks (F128 entries) | Interleaved byte layout |
-//! |---|---|---|
-//! | 5 | 256 + 64 | one 128-position pair + 64 singleton |
-//! | 32 | 8 × 256 | three 256-position pairs + two 256 singletons |
-//! | 64 | 16 × 256 | six 256-position pairs + four 256 singletons |
-//! | 69 | 17 × 256 + 64 | six pairs + five 256 singletons + 64 singleton |
-//! | 96 | 24 × 256 | nine pairs + six 256 singletons |
-//! | 196 | 49 × 256 | twenty pairs + nine 256 singletons |
+//! Other footprints are labelled pressure, not builder implementations. Ordinary
+//! layouts use 256-entry/eight-bit banks with 64-entry/six-bit tails at 5/69 KiB,
+//! reuse banks in small sets, and alternate two fixed bank assignments by chunk.
+//! Interleaved pressure layouts reuse pairs/singletons; the 5 KiB case uses one
+//! 128-position pair (seven bits) and 64-entry singleton (six bits). No timed
+//! lookup divides/mods indices. Every lookup prints allocated_bytes and
+//! addressable_entries: a conservative union of synthetic value domains across
+//! stream assignments, computed before timing. It is not an empirical hit or
+//! cache-residency count; sparse one-hot bytes and high zero RAM digits remain sparse.
 //!
-//! Scatter destination coverage reaches the stated powers of two at log_t=22;
-//! smaller CLI streams visit at most their cycle count. Unit groups accepted by
-//! --units are lookup,bucket,scatter,fmadd,merge, or all.
+//! Column bucket updates use 32 row bytes and 128 KiB per worker. Fold updates
+//! mirror fold_pass's five cycle banks: five Variant words, seven chunk buckets
+//! and combined flags, plus active Shift, Memory, Compare and Branch words.
+//! Layouts occupy 10.383/11.477/19.133 MiB per worker. Requested hot shares are
+//! remapped once at construction; timing reads a selector byte, without remapping.
+//! Bucket read-out uses those same layouts: 128 reads per byte bit, eight per
+//! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
+//! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
+//!
+//! sct counts destinations outside timing. The timed stream writes rows and
+//! weights in cycle order through per-chunk cursors into one range-contiguous
+//! buffer, then applies buffered pairs without source reads or a worker-table
+//! merge. The scatter group's direct atomic halves, worker tables with merge,
+//! and destination-ordered gather are comparisons; none prices sct. Coverage at
+//! log_t=22 is 2^16 local and 2^20 all_rows destinations in a 2^20-row output;
+//! shorter streams visit at most their cycle count. Rows/weights cost 20 bytes
+//! per cycle. Stack slice views split safely using the cached per-chunk counts.
+//!
+//! Fixed-size readout/merge cases generate no trace and run once per thread count,
+//! under independent/fixed. Zero-fill is W*N operations on 10 MiB arrays;
+//! zero-fill plus tree is (2W-1)*N; merge alone is (W-1)*N and is skipped at W=1.
+//! Both tree callers use one allocation-free stride-doubling helper. Timing
+//! includes scheduling and final checksums, excludes allocation/first touch.
+//! All trace-driven chunks contain 4096 cycles, independent of the thread count.
+//! --units accepts lookup,bucket,scatter,sct,fmadd,arithmetic,readout,merge, or all.
 
 pub mod support;
 
@@ -124,7 +106,7 @@ use thiserror::Error;
 
 use support::merge::tree_merge;
 use support::scatter::{PartitionedScatter, ScatterError};
-use support::{run_probe, ProbeCase, ProbeKernel, RunnerError};
+use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
 
@@ -982,7 +964,7 @@ impl Fmadd {
                     let operands: [(F128, F128); 20] =
                         black_box(std::array::from_fn(|i| (a + masks[i].0, b + masks[i].1)));
                     let result = if self.terms == 0 {
-                        operands[0].0 + operands[0].1
+                        operands[0].0
                     } else {
                         let mut accumulator = F128Accumulator::default();
                         for &(a, b) in &operands[..self.terms] {
@@ -1439,6 +1421,113 @@ fn field_values(entries: usize) -> Vec<F128> {
     (0..entries).map(|_| F128::random(&mut rng)).collect()
 }
 
+#[derive(Clone, Copy)]
+enum PriceMetric {
+    Time,
+    Slope,
+    Reduction,
+}
+
+struct UnitPrice {
+    unit: &'static str,
+    record: &'static str,
+    estimates: [f64; 2],
+    metric: PriceMetric,
+}
+
+const UNIT_PRICES: [UnitPrice; 9] = [
+    UnitPrice {
+        unit: "M",
+        record: "probe/arithmetic/products/local/",
+        estimates: [1.83, 0.9],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "A",
+        record: "probe/fmadd/fit/local/",
+        estimates: [1.10, 0.7],
+        metric: PriceMetric::Slope,
+    },
+    UnitPrice {
+        unit: "R",
+        record: "probe/fmadd/fit/local/",
+        estimates: [0.7, 0.2],
+        metric: PriceMetric::Reduction,
+    },
+    UnitPrice {
+        unit: "L",
+        record: "probe/lookup/g_digits_69kib/local/",
+        estimates: [0.4, 0.4],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "Bk",
+        record: "probe/bucket/fold_none_share_0/all_rows/",
+        estimates: [0.6, 0.6],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "sct",
+        record: "probe/sct/partitioned_emit_rows_20/all_rows/",
+        estimates: [1.4, 1.4],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "mrg",
+        record: "probe/readout/column_128kib/independent/",
+        estimates: [0.3, 0.3],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "X",
+        record: "probe/arithmetic/mul_x_raw_shift_substitute/local/",
+        estimates: [0.2, 0.2],
+        metric: PriceMetric::Time,
+    },
+    UnitPrice {
+        unit: "w",
+        record: "probe/arithmetic/word_monomial_mix/local/",
+        estimates: [0.05, 0.05],
+        metric: PriceMetric::Time,
+    },
+];
+
+impl UnitPrice {
+    #[expect(
+        clippy::print_stdout,
+        reason = "unit-table is the probe's calibration summary contract"
+    )]
+    fn print_table(records: &[ProbeRecord]) {
+        println!("unit-table");
+        for price in &UNIT_PRICES {
+            let record = records
+                .iter()
+                .filter(|record| record.id.starts_with(price.record) && record.id.ends_with("/1"))
+                .max_by_key(|record| {
+                    record
+                        .id
+                        .split('/')
+                        .nth(4)
+                        .and_then(|log_t| log_t.parse::<usize>().ok())
+                        .unwrap_or(0)
+                });
+            let value = record.and_then(|record| match price.metric {
+                PriceMetric::Time => Some(record.median),
+                PriceMetric::Slope => record.fit.as_ref().map(|fit| fit.slope),
+                PriceMetric::Reduction => record.fit.as_ref().map(|fit| fit.reduction),
+            });
+            if let Some((record, value)) = record.zip(value) {
+                println!(
+                    "unit-table {} record={} median_ns={value:.6} spec_1_ns={:.6} spec_2_ns={:.6}",
+                    price.unit, record.id, price.estimates[0], price.estimates[1]
+                );
+            } else {
+                println!("unit-table {} record={} median_ns=not_measured spec_1_ns={:.6} spec_2_ns={:.6} reason=matching_single_thread_record_not_requested", price.unit, price.record, price.estimates[0], price.estimates[1]);
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), RunnerError> {
     let mut cases = Vec::new();
     for kib in [5, 32, 64, 69, 96, 196] {
@@ -1534,5 +1623,7 @@ fn main() -> Result<(), RunnerError> {
             minimum_threads: 1,
         });
     }
-    run_probe(&cases, Unit::new)
+    let records = run_probe(&cases, Unit::new)?;
+    UnitPrice::print_table(&records);
+    Ok(())
 }

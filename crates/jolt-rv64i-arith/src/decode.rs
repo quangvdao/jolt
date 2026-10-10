@@ -48,6 +48,19 @@ impl Source {
         Self::One,
     ];
 }
+/// Linear sources of a destination post-value in the router bank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RdWriteSource {
+    RdPreValue,
+    Inc,
+}
+impl Variant {
+    /// Expands the destination post-value under this variant's XOR update.
+    pub fn rd_write_sources(self) -> impl Iterator<Item = RdWriteSource> {
+        std::iter::once(RdWriteSource::RdPreValue)
+            .chain((!self.is_store()).then_some(RdWriteSource::Inc))
+    }
+}
 /// Stack values of the sixteen named source words.
 #[derive(Clone, Copy, Debug)]
 pub struct Sources([u64; 16]);

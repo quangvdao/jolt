@@ -10,20 +10,27 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
+use jolt_rv64i_arith::{BitsRow, BITS_COLUMNS};
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkWeight, ChunkWeightTerm,
 };
+use jolt_rv64i_kernels::column_pass::column_pass;
+use jolt_rv64i_kernels::reduction::{g_pass_digits, ReductionCore, ReductionLeg};
 use jolt_rv64i_verifier::ids::{BytecodeCycleDerived, CycleWeight, DerivedId, RamRaProductDerived};
+use jolt_rv64i_verifier::stages::stage6b::bits_reduction::{
+    BitsReductionInputClaims, BitsReductionOutputClaims,
+};
 use jolt_rv64i_verifier::stages::stage6b::bytecode_read_cycle::{
     BytecodeReadCycleInputClaims, BytecodeReadCycleOutputClaims,
 };
 use jolt_rv64i_verifier::stages::stage6b::ram_ra_product::{
     RamRaProductChallenges, RamRaProductInputClaims, RamRaProductOutputClaims,
 };
-use jolt_rv64i_verifier::stages::stage6b::{BytecodeReadCycle, RamRaProduct};
+use jolt_rv64i_verifier::stages::stage6b::{BitsReduction, BytecodeReadCycle, RamRaProduct};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::fmt::Display;
+use std::sync::Arc;
 
 fn geometry(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
@@ -58,7 +65,9 @@ impl PrepareKernel<F128, BytecodeReadCycle<F128>, Rv64iPlane> for BytecodeReadCy
     {
         let columns = inputs.relation.chunks().len();
         if !(1..=7).contains(&columns) {
-            return Err(geometry(format!("bytecode chunk count {columns}; expected 1..=7")));
+            return Err(geometry(format!(
+                "bytecode chunk count {columns}; expected 1..=7"
+            )));
         }
         let shared = session.state_or_insert_with(SharedSource::default);
         let _ = shared.prepare(witness, None)?;
@@ -177,10 +186,13 @@ impl PrepareKernel<F128, RamRaProduct<F128>, Rv64iPlane> for RamRaProductPrepare
         session: &mut ProofSession,
         witness: &Rv64iWitness,
         inputs: ProverInputs<'_, F128, RamRaProduct<F128>>,
-    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RamRaProduct<F128>>>, KernelError<F128>> {
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RamRaProduct<F128>>>, KernelError<F128>>
+    {
         let columns = inputs.relation.chunks().len();
         if !(1..=7).contains(&columns) {
-            return Err(geometry(format!("RAM chunk count {columns}; expected 1..=7")));
+            return Err(geometry(format!(
+                "RAM chunk count {columns}; expected 1..=7"
+            )));
         }
         let shared = session.state_or_insert_with(SharedSource::default);
         let _ = shared.prepare(witness, None)?;
@@ -261,5 +273,132 @@ impl SumcheckKernel<F128> for RamKernel {
             });
         }
         Ok(())
+    }
+}
+
+/// Builds the three grouped reduction tables; returns committed columns at the bound cycle point.
+#[derive(Default)]
+pub struct BitsReductionPrepare;
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct BitsKernel {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    core: ReductionCore,
+    bits: Arc<[BitsRow]>,
+    point: Vec<F128>,
+    initial_claim: F128,
+}
+
+impl PrepareKernel<F128, BitsReduction<F128>, Rv64iPlane> for BitsReductionPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, BitsReduction<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = BitsReduction<F128>>>, KernelError<F128>>
+    {
+        let shared = session.state_or_insert_with(SharedSource::default);
+        let trace = shared.prepare(witness, None)?;
+        let c = inputs.challenges;
+        let mut weights: [Vec<F128>; 3] =
+            std::array::from_fn(|_| vec![F128::from_raw(0); BITS_COLUMNS]);
+        for (support, (leg, coefficient)) in inputs.relation.weights().iter().zip([
+            (0, c.direct_columns),
+            (1, c.variant_bits),
+            (1, c.pos_ra_0),
+            (1, c.pos_ra_1),
+            (1, c.should_branch),
+            (2, c.inc),
+        ]) {
+            for &(column, weight) in support {
+                let value = weights[leg].get_mut(column).ok_or_else(|| {
+                    geometry(format!("reduction weight column {column} exceeds 255"))
+                })?;
+                *value += coefficient * weight;
+            }
+        }
+        let tables = g_pass_digits(&trace, trace.source().columns().column_map(), &weights)
+            .map_err(geometry)?;
+        let [z_0, z_1] = inputs.relation.pos_zero();
+        let claims = [
+            c.direct_columns * inputs.claims.direct_columns,
+            c.variant_bits * inputs.claims.variant_bits
+                + c.pos_ra_0 * (inputs.claims.pos_ra_0 + z_0)
+                + c.pos_ra_1 * (inputs.claims.pos_ra_1 + z_1)
+                + c.should_branch * inputs.claims.should_branch,
+            c.inc * inputs.claims.inc,
+        ];
+        let legs = [
+            inputs.relation.r_1(),
+            inputs.relation.r_3(),
+            inputs.relation.r_5(),
+        ]
+        .into_iter()
+        .zip(claims)
+        .enumerate()
+        .map(|(table, (point, claim))| ReductionLeg {
+            table,
+            point: point.to_vec(),
+            coefficient: F128::from_raw(1),
+            claim,
+        })
+        .collect();
+        let core = ReductionCore::new(tables, legs).map_err(geometry)?;
+        let point = Vec::with_capacity(core.num_rounds());
+        Ok(Box::new(BitsKernel {
+            core,
+            bits: Arc::clone(&witness.bits),
+            point,
+            initial_claim: claims.into_iter().sum(),
+        }))
+    }
+}
+
+impl ProveRounds<F128> for BitsKernel {
+    fn num_rounds(&self) -> usize {
+        self.core.num_rounds()
+    }
+    fn prove_round(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+        previous_claim: F128,
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        if round == 0 && previous_claim != self.initial_claim {
+            return Err(SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual: self.initial_claim,
+            });
+        }
+        let message = self.core.prove_round(bind, round, previous_claim)?;
+        if let Some(bind) = bind {
+            self.point.push(bind);
+        }
+        Ok(message)
+    }
+    fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
+        self.core.finish_rounds(bind)?;
+        self.point.push(bind);
+        Ok(())
+    }
+}
+
+impl SumcheckKernel<F128> for BitsKernel {
+    type Relation = BitsReduction<F128>;
+    fn output_claims(
+        &mut self,
+        _inputs: &BitsReductionInputClaims<F128>,
+    ) -> Result<BitsReductionOutputClaims<F128>, SumcheckKernelError<F128>> {
+        let remaining = self.core.num_rounds() - self.point.len();
+        if remaining != 0 {
+            return Err(SumcheckKernelError::NotFullyBound { remaining });
+        }
+        let columns = column_pass(&self.bits, &self.point)
+            .map_err(|_| SumcheckKernelError::InvariantViolation {
+                reason: "bound reduction point does not match its committed bits",
+            })?
+            .to_vec();
+        Ok(BitsReductionOutputClaims { columns })
     }
 }

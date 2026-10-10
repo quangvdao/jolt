@@ -3,6 +3,10 @@ use std::arch::x86_64::{
     _mm_sll_epi64, _mm_slli_epi64, _mm_slli_si128, _mm_srl_epi64, _mm_srli_epi64, _mm_srli_si128,
     _mm_xor_si128,
 };
+#[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+use std::arch::x86_64::{
+    _mm512_castsi128_si512, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32, _mm512_inserti32x4,
+};
 use std::ops::{Shl, Shr};
 
 #[derive(Clone, Copy)]
@@ -14,6 +18,35 @@ pub(super) const KARATSUBA128: bool = true;
 pub(super) const SHIFT_SQUARE128: bool = true;
 
 impl Word {
+    #[inline]
+    pub(super) fn products<const N: usize>(a: [Self; N], b: [Self; N]) -> [Self; N] {
+        const { assert!(N == 2 || N == 3) };
+        #[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
+        {
+            // SAFETY: the cfg guarantees AVX-512 and VPCLMULQDQ. N is checked
+            // at compile time; every returned 128-bit lane is initialized.
+            unsafe {
+                let mut left = _mm512_castsi128_si512(a[0].0);
+                let mut right = _mm512_castsi128_si512(b[0].0);
+                left = _mm512_inserti32x4::<1>(left, a[1].0);
+                right = _mm512_inserti32x4::<1>(right, b[1].0);
+                if N == 3 {
+                    left = _mm512_inserti32x4::<2>(left, a[2].0);
+                    right = _mm512_inserti32x4::<2>(right, b[2].0);
+                }
+                let product = _mm512_clmulepi64_epi128::<0>(left, right);
+                let words = [
+                    Self(_mm512_extracti32x4_epi32::<0>(product)),
+                    Self(_mm512_extracti32x4_epi32::<1>(product)),
+                    Self(_mm512_extracti32x4_epi32::<2>(product)),
+                ];
+                std::array::from_fn(|i| words[i])
+            }
+        }
+        #[cfg(not(all(target_feature = "vpclmulqdq", target_feature = "avx512f")))]
+        std::array::from_fn(|i| a[i].mul_ll(b[i]))
+    }
+
     #[inline]
     pub(super) fn reduce64(self) -> u64 {
         self.low() ^ super::portable::fold64(self.high_to_low()).low()

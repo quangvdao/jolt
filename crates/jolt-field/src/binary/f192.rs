@@ -99,7 +99,13 @@ impl ExtField<F64> for F192 {
     }
 
     fn mul_base(self, x: F64) -> Self {
-        Self(self.0.map(|c| c * x))
+        Self(
+            arithmetic::reduce192(arithmetic::product192_base(
+                self.0.map(F64::to_raw),
+                x.to_raw(),
+            ))
+            .map(F64::from_raw),
+        )
     }
 
     fn from_base_fn<G: FnMut(usize) -> F64>(f: G) -> Self {

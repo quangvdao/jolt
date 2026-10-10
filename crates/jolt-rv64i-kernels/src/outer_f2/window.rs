@@ -1,21 +1,10 @@
 use super::{merge, Sums, ONE, ZERO};
+use crate::packed::lift::{compact_table, LiftError};
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::LaneSource;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use rayon::prelude::*;
-
-fn window_table<const N: usize>(weights: &[F128]) -> [F128; N] {
-    let mut table = [ZERO; N];
-    for (bit, &weight) in weights.iter().enumerate() {
-        let width = 1 << bit;
-        let (lo, hi) = table[..2 * width].split_at_mut(width);
-        for (out, &value) in hi.iter_mut().zip(lo.iter()) {
-            *out = value + weight;
-        }
-    }
-    table
-}
 
 pub(super) struct Window<const N: usize, const A: usize, const C: usize> {
     a: Vec<[[F128; N]; A]>,
@@ -26,38 +15,50 @@ pub(super) struct Window<const N: usize, const A: usize, const C: usize> {
 }
 
 impl<const N: usize, const A: usize, const C: usize> Window<N, A, C> {
-    pub(super) fn new(point: &[F128], rho: &[F128], omega: &[F128], folded: bool) -> Self {
+    pub(super) fn new(
+        point: &[F128],
+        rho: &[F128],
+        omega: &[F128],
+        folded: bool,
+    ) -> Result<Self, LiftError> {
         let bits = eq_table(point, None);
         let width = N.ilog2() as usize;
         let bytes = bits.len() / width;
-        let b: Vec<_> = bits.chunks_exact(width).map(window_table).collect();
+        let b = bits
+            .chunks_exact(width)
+            .map(compact_table)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut a = Vec::with_capacity(if folded { 2 } else { 1 });
         let mut c = Vec::with_capacity(a.capacity());
         for &scale in if folded { &omega[..2] } else { &[ONE] } {
-            a.push(std::array::from_fn(|byte| {
+            let mut av = [[ZERO; N]; A];
+            let mut cv = [[ZERO; N]; C];
+            for (byte, table) in av.iter_mut().enumerate() {
                 let weight = rho[byte / (2 * bytes)] * scale;
-                window_table(
+                *table = compact_table(
                     &std::array::from_fn::<_, 8, _>(|bit| {
                         bits[(byte % bytes) * width + bit % width] * weight
                     })[..width],
-                )
-            }));
-            c.push(std::array::from_fn(|byte| {
+                )?;
+            }
+            for (byte, table) in cv.iter_mut().enumerate() {
                 let weight = rho[byte / bytes] * scale;
-                window_table(
+                *table = compact_table(
                     &std::array::from_fn::<_, 8, _>(|bit| {
                         bits[(byte % bytes) * width + bit % width] * weight
                     })[..width],
-                )
-            }));
+                )?;
+            }
+            a.push(av);
+            c.push(cv);
         }
-        Self {
+        Ok(Self {
             a,
             b,
             c,
             omega: [omega[0], omega[1]],
             folded,
-        }
+        })
     }
 
     #[inline]

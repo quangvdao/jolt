@@ -1,94 +1,23 @@
 use super::{merge, OuterError, Sums, ONE, ZERO};
 use crate::packed::bits::{gather, moebius};
+use crate::packed::lift::{CompactLift, CompactView};
 use crate::packed::pool::ScratchPool;
 use crate::par::CycleChunks;
 use crate::source::LaneSource;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use rayon::prelude::*;
 
-#[derive(Clone, Copy)]
-struct Lift {
-    start: usize,
-    len: usize,
-    bits: usize,
-}
-
-impl Lift {
-    fn new(weights: &[F128], bits: usize, tables: &mut Vec<F128>) -> Self {
-        let bits = bits.min(weights.len());
-        let size = 1 << bits;
-        let len = size * weights.len().div_ceil(bits);
-        let start = tables.len();
-        tables.resize(start + len, ZERO);
-        for (table, weights) in tables[start..]
-            .chunks_exact_mut(size)
-            .zip(weights.chunks(bits))
-        {
-            for (bit, &weight) in weights.iter().enumerate() {
-                let width = 1 << bit;
-                let (low, high) = table[..2 * width].split_at_mut(width);
-                for (out, &value) in high.iter_mut().zip(low.iter()) {
-                    *out = value + weight;
-                }
-            }
-        }
-        Self { start, len, bits }
-    }
-
-    fn view<'a>(&self, tables: &'a [F128]) -> LiftView<'a> {
-        let tables = &tables[self.start..self.start + self.len];
-        match self.bits {
-            8 => LiftView::Byte(tables.as_chunks::<256>().0),
-            4 => LiftView::Nibble(tables.as_chunks::<16>().0),
-            2 => LiftView::Two(&tables.as_chunks::<4>().0[0]),
-            _ => LiftView::One(&tables.as_chunks::<2>().0[0]),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum LiftView<'a> {
-    Byte(&'a [[F128; 256]]),
-    Nibble(&'a [[F128; 16]]),
-    Two(&'a [F128; 4]),
-    One(&'a [F128; 2]),
-}
-
-impl LiftView<'_> {
-    #[inline]
-    fn lift(self, mut word: u64) -> F128 {
-        let mut value = ZERO;
-        match self {
-            Self::Byte(tables) => {
-                for table in tables {
-                    value += table[(word & 255) as usize];
-                    word >>= 8;
-                }
-            }
-            Self::Nibble(tables) => {
-                for table in tables {
-                    value += table[(word & 15) as usize];
-                    word >>= 4;
-                }
-            }
-            Self::Two(table) => value = table[(word & 3) as usize],
-            Self::One(table) => value = table[(word & 1) as usize],
-        }
-        value
-    }
-}
-
-struct TermView<'a> {
+struct TermView<'a, const N: usize, const TABLES: usize> {
     pairs: &'a [(usize, usize, usize)],
-    x: [LiftView<'a>; 2],
-    y: Option<[LiftView<'a>; 2]>,
+    x: [CompactView<'a, N, TABLES>; 2],
+    y: Option<[CompactView<'a, N, TABLES>; 2]>,
 }
 
 struct Term {
     start: usize,
     end: usize,
-    x: [Lift; 2],
-    y: Option<[Lift; 2]>,
+    x: [CompactLift; 2],
+    y: Option<[CompactLift; 2]>,
 }
 
 pub(super) struct Monomial {
@@ -98,7 +27,12 @@ pub(super) struct Monomial {
 }
 
 impl Monomial {
-    pub(super) fn new(point: &[F128], rho: &[F128], omega: &[F128], nibble: bool) -> Self {
+    pub(super) fn new(
+        point: &[F128],
+        rho: &[F128],
+        omega: &[F128],
+        nibble: bool,
+    ) -> Result<Self, OuterError> {
         let k = point.len();
         let count = 3_usize.pow(k as u32);
         let mut pairs = Vec::with_capacity(1 << (2 * k));
@@ -140,13 +74,14 @@ impl Monomial {
                 digits /= 3;
             }
             let mut lifts = |scalar| {
-                std::array::from_fn(|group| {
+                let mut build = |group: usize| {
                     let mut weights = [ZERO; 32];
                     for (out, &weight) in weights.iter_mut().zip(rho) {
                         *out = weight * omega[group] * scalar;
                     }
-                    Lift::new(&weights[..rho.len()], bits, &mut tables)
-                })
+                    CompactLift::new(&weights[..rho.len()], bits, &mut tables)
+                };
+                Ok::<_, OuterError>([build(0)?, build(1)?])
             };
             let end = start
                 + pairs[start..]
@@ -156,21 +91,21 @@ impl Monomial {
             terms.push(Term {
                 start,
                 end,
-                x: lifts(scalar),
-                y: squared.then(|| lifts(scalar + reduced)),
+                x: lifts(scalar)?,
+                y: squared.then(|| lifts(scalar + reduced)).transpose()?,
             });
             start = end;
         }
-        Self {
+        Ok(Self {
             terms,
             pairs,
             tables,
-        }
+        })
     }
 
     #[inline]
-    fn values<const K: usize, const AT_ONE: bool>(
-        terms: &[TermView<'_>],
+    fn values<const K: usize, const AT_ONE: bool, const N: usize, const TABLES: usize>(
+        terms: &[TermView<'_, N, TABLES>],
         lanes: [[u64; 3]; 2],
     ) -> Sums {
         let mut sums = [ZERO; 2];
@@ -230,7 +165,13 @@ impl Monomial {
         sums
     }
 
-    pub(super) fn pass<const K: usize, const AT_ONE: bool, S: LaneSource>(
+    pub(super) fn pass<
+        const K: usize,
+        const AT_ONE: bool,
+        const N: usize,
+        const TABLES: usize,
+        S: LaneSource,
+    >(
         &self,
         source: &S,
         chunks: CycleChunks,
@@ -238,17 +179,23 @@ impl Monomial {
         hi: &[F128],
         histogram: Option<&ScratchPool>,
     ) -> Result<Sums, OuterError> {
-        let terms: Vec<_> = self
+        let terms = self
             .terms
             .iter()
-            .map(|term| TermView {
-                pairs: &self.pairs[term.start..term.end],
-                x: term.x.map(|lift| lift.view(&self.tables)),
-                y: term
-                    .y
-                    .map(|lifts| lifts.map(|lift| lift.view(&self.tables))),
+            .map(|term| {
+                let views = |lifts: [CompactLift; 2]| -> Result<_, OuterError> {
+                    Ok([
+                        lifts[0].view::<N, TABLES>(&self.tables)?,
+                        lifts[1].view::<N, TABLES>(&self.tables)?,
+                    ])
+                };
+                Ok::<_, OuterError>(TermView {
+                    pairs: &self.pairs[term.start..term.end],
+                    x: views(term.x)?,
+                    y: term.y.map(views).transpose()?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         let sums = (0..chunks.len() / chunks.chunk_len())
             .into_par_iter()
             .map(|chunk| {
@@ -262,7 +209,8 @@ impl Monomial {
                     let mut h = [ZERO; 64];
                     for (offset, &low) in lo.iter().enumerate() {
                         let cycle = start + block * chunks.block_len() + offset;
-                        let values = Self::values::<K, AT_ONE>(&terms, source.lanes(cycle));
+                        let values =
+                            Self::values::<K, AT_ONE, N, TABLES>(&terms, source.lanes(cycle));
                         if K != 0 {
                             inner[0].fmadd(low, values[0]);
                         }

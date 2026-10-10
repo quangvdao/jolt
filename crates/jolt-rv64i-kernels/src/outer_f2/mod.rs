@@ -5,7 +5,7 @@
 mod monomial;
 mod window;
 
-use crate::packed::lift::WordLift;
+use crate::packed::lift::{LiftError, WordLift};
 use crate::packed::pool::{PoolError, ScratchPool};
 use crate::par::{CycleChunks, ParError};
 use crate::round::eq::{eq_table, split_eq};
@@ -54,6 +54,9 @@ pub enum OuterError {
     /// A shared cycle geometry helper rejected its dimensions.
     #[error(transparent)]
     Geometry(#[from] ParError),
+    /// A compact lift rejected its table layout.
+    #[error(transparent)]
+    Lift(#[from] LiftError),
     /// Histogram scratch could not be lent or merged.
     #[error(transparent)]
     Scratch(#[from] PoolError),
@@ -192,13 +195,13 @@ impl<S: LaneSource> OuterF2Core<S> {
                 &rho,
                 &self.omega,
                 k >= 2 || k == 1 && self.options.nibble_round_2,
-            );
+            )?;
             let pool = (k == 0 && !AT_ONE)
                 .then(|| ScratchPool::new(64))
                 .transpose()?;
             macro_rules! pass {
-                ($k:literal) => {
-                    form.pass::<$k, AT_ONE, S>(
+                ($k:literal, $n:literal, $tables:literal) => {
+                    form.pass::<$k, AT_ONE, $n, $tables, S>(
                         &*self.source,
                         self.chunks,
                         &self.lo,
@@ -208,12 +211,13 @@ impl<S: LaneSource> OuterF2Core<S> {
                 };
             }
             let sums = match k {
-                0 => pass!(0),
-                1 => pass!(1),
-                2 => pass!(2),
-                3 => pass!(3),
-                4 => pass!(4),
-                _ => pass!(5),
+                0 => pass!(0, 256, 4),
+                1 if self.options.nibble_round_2 => pass!(1, 16, 4),
+                1 => pass!(1, 256, 2),
+                2 => pass!(2, 16, 2),
+                3 => pass!(3, 16, 1),
+                4 => pass!(4, 4, 1),
+                _ => pass!(5, 2, 1),
             };
             if let Some(pool) = pool {
                 self.histogram.copy_from_slice(&pool.merge()?);
@@ -227,7 +231,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                         &rho,
                         &self.omega,
                         self.options.folded_group_weights,
-                    )
+                    )?
                     .pass::<$units, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi)
                 };
             }
@@ -311,14 +315,8 @@ impl<S: LaneSource> OuterF2Core<S> {
     }
 
     fn materialise(&mut self) -> Sums {
-        let weights: [F128; 64] = std::array::from_fn(|index| {
-            self.point
-                .iter()
-                .enumerate()
-                .map(|(bit, &r)| if index >> bit & 1 == 0 { ONE + r } else { r })
-                .product()
-        });
-        let lift = WordLift::new(&weights);
+        let weights = eq_table(&self.point, None);
+        let lift = WordLift::new(&std::array::from_fn(|index| weights[index]));
         self.tail_values = std::array::from_fn(|byte| self.tail_at(byte));
         self.groups =
             std::array::from_fn(|_| std::array::from_fn(|_| vec![ZERO; self.chunks.len()]));

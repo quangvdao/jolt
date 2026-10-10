@@ -145,7 +145,7 @@ impl Options {
                 "--log-t" => options.log_t = parsed,
                 "--threads" => options.threads = parsed,
                 "--samples" if parsed.len() == 1 && (!comparison || parsed[0] >= 5) => {
-                    options.samples = parsed[0]
+                    options.samples = parsed[0];
                 }
                 _ => {
                     return Err(RunnerError::InvalidValue {
@@ -313,6 +313,16 @@ pub struct Record {
 }
 
 impl Record {
+    #[expect(
+        clippy::print_stdout,
+        reason = "interleaved comparison is benchmark output"
+    )]
+    pub fn print_comparison(&self, id: &str, default: &Self) {
+        let gain = default.total.median - self.total.median;
+        let spread = default.total.spread() + self.total.spread();
+        println!("{id} samples={} alternating=true same_source=true min_ns={:.6} median_ns={:.6} max_ns={:.6} gain_over_default_ns={gain:.6} combined_spread_ns={spread:.6} gain_exceeds_spread={} loaded_machine=true", self.samples, self.total.min, self.total.median, self.total.max, gain > spread);
+    }
+
     #[expect(clippy::print_stdout, reason = "runner records are benchmark output")]
     pub fn print(&self, id: &str, names: &[String], threshold: Option<f64>) {
         print!("{id}");

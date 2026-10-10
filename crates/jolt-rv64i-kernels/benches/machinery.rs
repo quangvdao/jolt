@@ -18,7 +18,7 @@
 pub mod support;
 
 use jolt_field::F128;
-use jolt_rv64i_kernels::packed::buckets::{BucketError, NibbleBuckets};
+use jolt_rv64i_kernels::packed::buckets::{BucketError, BucketPlacement, NibbleBuckets};
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
@@ -269,9 +269,11 @@ impl Machinery {
     }
 
     #[inline(always)]
-    fn word(buckets: &mut NibbleBuckets<'_>, base: usize, slot: usize, word: u64, e: F128) {
-        let start = base + slot * 16;
-        let positions = &mut buckets.positions_mut()[start..start + 16];
+    fn word(buckets: &mut [F128], base: usize, slot: usize, word: u64, e: F128) {
+        let start = base + slot * BucketPlacement::Nibble.word_entries();
+        let positions = buckets[start..start + NibbleBuckets::ELEMENTS_PER_WORD]
+            .as_chunks_mut::<{ NibbleBuckets::ENTRIES_PER_POSITION }>()
+            .0;
         for (positions, byte) in positions
             .as_chunks_mut::<2>()
             .0
@@ -383,40 +385,36 @@ impl MachineryKernel for Machinery {
                     .into_par_iter()
                     .try_for_each(|chunk| -> Result<(), MachineryError> {
                         let mut guard = pool.take()?;
-                        let mut buckets = NibbleBuckets::new(&mut guard)?;
                         for cycle in chunk * CHUNK..((chunk + 1) * CHUNK).min(source.cycles()) {
                             let e = inputs.weight(cycle);
                             let selector = source.digit(12, cycle).unwrap_or(0);
                             for (slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 Self::word(
-                                    &mut buckets,
-                                    calibration.variant_base(selector)? / 16,
+                                    &mut guard,
+                                    calibration.variant_base(selector)?,
                                     slot,
                                     source.trace_word(word, cycle),
                                     e,
                                 );
                             }
+                            let metadata = calibration.variant_metadata_base(selector)?;
+                            let mut buckets = NibbleBuckets::new(
+                                &mut guard
+                                    [metadata..metadata + 8 * NibbleBuckets::ENTRIES_PER_POSITION],
+                            )?;
                             for (slot, column) in (5..12).enumerate() {
-                                buckets.xor(
-                                    calibration.variant_metadata_base(selector)? / 16 + slot,
-                                    source.digit(column, cycle).unwrap_or(0),
-                                    e,
-                                )?;
+                                buckets.xor(slot, source.digit(column, cycle).unwrap_or(0), e)?;
                             }
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets.xor(
-                                calibration.variant_metadata_base(selector)? / 16 + 7,
-                                flags,
-                                e,
-                            )?;
+                            buckets.xor(7, flags, e)?;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
                                 Self::word(
-                                    &mut buckets,
-                                    calibration.shape_base(1, low + 8 * high + 64 * kind)? / 16,
+                                    &mut guard,
+                                    calibration.shape_base(1, low + 8 * high + 64 * kind)?,
                                     0,
                                     source.trace_word(0, cycle),
                                     e,
@@ -425,8 +423,8 @@ impl MachineryKernel for Machinery {
                             if let Some(kind) = source.digit(14, cycle) {
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     Self::word(
-                                        &mut buckets,
-                                        calibration.shape_base(2, low + 8 * kind)? / 16,
+                                        &mut guard,
+                                        calibration.shape_base(2, low + 8 * kind)?,
                                         slot,
                                         source.trace_word(word, cycle),
                                         e,
@@ -442,8 +440,8 @@ impl MachineryKernel for Machinery {
                                         source.bytecode_word(0, row)
                                     };
                                     Self::word(
-                                        &mut buckets,
-                                        calibration.shape_base(3, low + 8 * high + 64 * kind)? / 16,
+                                        &mut guard,
+                                        calibration.shape_base(3, low + 8 * high + 64 * kind)?,
                                         slot,
                                         word,
                                         e,
@@ -455,8 +453,8 @@ impl MachineryKernel for Machinery {
                             {
                                 for slot in 0..2 {
                                     Self::word(
-                                        &mut buckets,
-                                        calibration.shape_base(4, 0)? / 16,
+                                        &mut guard,
+                                        calibration.shape_base(4, 0)?,
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         e,

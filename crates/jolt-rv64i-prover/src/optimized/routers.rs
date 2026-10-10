@@ -197,6 +197,7 @@ pub struct RouterShortPrepare;
 struct ShortKernel {
     #[cfg_attr(feature = "allocative", allocative(skip))]
     core: RouterShortCore,
+    bound: usize,
 }
 
 impl PrepareKernel<F128, RouterShort<F128>, Rv64iPlane> for RouterShortPrepare {
@@ -227,7 +228,7 @@ impl PrepareKernel<F128, RouterShort<F128>, Rv64iPlane> for RouterShortPrepare {
         drop(folded.ra_fold);
         let core =
             RouterShortCore::new(&shapes, inputs.relation.w(), folded.folds).map_err(geometry)?;
-        Ok(Box::new(ShortKernel { core }))
+        Ok(Box::new(ShortKernel { core, bound: 0 }))
     }
 }
 
@@ -241,16 +242,34 @@ impl ProveRounds<F128> for ShortKernel {
         round: usize,
         previous_claim: F128,
     ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
-        self.core.prove_round(bind, round, previous_claim)
+        let message = self.core.prove_round(bind, round, previous_claim)?;
+        self.bound += usize::from(bind.is_some());
+        Ok(message)
     }
     fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
-        self.core.finish_rounds(bind)
+        self.core.finish_rounds(bind)?;
+        self.bound += 1;
+        Ok(())
     }
 }
 
-fn output_error(_: impl Display) -> SumcheckKernelError<F128> {
-    SumcheckKernelError::InvariantViolation {
-        reason: "router output state is incomplete",
+fn output_error(reason: &'static str) -> SumcheckKernelError<F128> {
+    SumcheckKernelError::InvariantViolation { reason }
+}
+
+fn final_value_error(error: RouterError, remaining: usize) -> SumcheckKernelError<F128> {
+    match error {
+        RouterError::Unfinished => SumcheckKernelError::NotFullyBound { remaining },
+        RouterError::Poisoned => output_error("router cycle core lock is poisoned"),
+        _ => output_error("router core refused final values"),
+    }
+}
+
+impl ShortKernel {
+    fn values(&self) -> Result<Vec<(F128, F128)>, SumcheckKernelError<F128>> {
+        self.core.final_values().map_err(|error| {
+            final_value_error(error, self.core.num_rounds().saturating_sub(self.bound))
+        })
     }
 }
 
@@ -260,14 +279,14 @@ impl SumcheckKernel<F128> for ShortKernel {
         &mut self,
         _: &RouterShortInputClaims<F128>,
     ) -> Result<RouterShortOutputClaims<F128>, SumcheckKernelError<F128>> {
-        let pairs = self.core.final_values().map_err(output_error)?;
+        let pairs = self.values()?;
         let value = |router| {
             ROUTERS
                 .iter()
                 .zip(&pairs)
                 .find(|(name, _)| **name == router)
                 .map(|(_, pair)| pair.0)
-                .ok_or_else(|| output_error("missing fold"))
+                .ok_or_else(|| output_error("router short fold claim is absent"))
         };
         Ok(RouterShortOutputClaims {
             variant: value(Router::Variant)?,
@@ -284,7 +303,7 @@ impl SumcheckKernel<F128> for ShortKernel {
         output_points: &RouterShortOutputClaims<Vec<F128>>,
         challenges: &NoChallenges<F128>,
     ) -> Result<(), SumcheckKernelError<F128>> {
-        let pairs = self.core.final_values().map_err(output_error)?;
+        let pairs = self.values()?;
         for (router, (_, got)) in ROUTERS.into_iter().zip(pairs) {
             let id = DerivedId::RouterShort(RouterShortDerived::RouteWeight(router));
             let expected =
@@ -479,8 +498,8 @@ impl CycleGroup {
                 WitnessColumns::ram_read_value(),
                 WitnessColumns::next_pc(),
             ];
-            let output =
-                claims_pass(&self.trace, lifts, &words, plan, r_3).map_err(output_error)?;
+            let output = claims_pass(&self.trace, lifts, &words, plan, r_3)
+                .map_err(|_| output_error("router claims_pass refused extraction"))?;
             // Assignment drops the retained lifts and this group's plan Arc at extraction.
             self.extraction = Extraction::Complete {
                 trace_words: words.into_iter().zip(output.trace_words).collect(),
@@ -496,7 +515,7 @@ impl CycleGroup {
             bytecode_words,
         } = &self.extraction
         else {
-            return Err(output_error("claims are absent"));
+            return Err(output_error("router word claims have not been extracted"));
         };
         let value = match word_slot(word) {
             WordSlot::Trace(index) => trace_words
@@ -508,7 +527,7 @@ impl CycleGroup {
         };
         value
             .copied()
-            .ok_or_else(|| output_error("word claim is absent"))
+            .ok_or_else(|| output_error("requested router word claim is absent"))
     }
 }
 
@@ -549,9 +568,16 @@ impl<R> ProveRounds<F128> for CycleKernel<R> {
 
 impl<R> CycleKernel<R> {
     fn factors(&self) -> Result<(F128, Vec<F128>), SumcheckKernelError<F128>> {
-        let (source, values) = self.member.final_values().map_err(output_error)?;
+        let (source, values) = self.member.final_values().map_err(|error| {
+            final_value_error(
+                error,
+                self.member.num_rounds().saturating_sub(self.r_3.len()),
+            )
+        })?;
         if values.len() != self.factors.len() {
-            return Err(output_error("factor claims are absent"));
+            return Err(output_error(
+                "router factor claim count differs from the bank",
+            ));
         }
         Ok((source, values))
     }
@@ -565,7 +591,7 @@ fn factor_value(
         .clone()
         .find(|(name, _)| **name == factor)
         .map(|(_, value)| *value)
-        .ok_or_else(|| output_error("factor claim is absent"))
+        .ok_or_else(|| output_error("requested router factor claim is absent"))
 }
 
 trait CycleAdapter: Send + Sync + 'static {
@@ -616,7 +642,10 @@ impl<A: CycleAdapter> SumcheckKernel<F128> for CycleKernel<A> {
     ) -> Result<SumcheckOutputClaims<F128, Self::Relation>, SumcheckKernelError<F128>> {
         let (source, values) = self.factors()?;
         let factors = self.factors.iter().zip(&values);
-        let mut state = self.group.lock().map_err(output_error)?;
+        let mut state = self
+            .group
+            .lock()
+            .map_err(|_| output_error("router cycle group lock is poisoned"))?;
         state.claims(&self.r_3)?;
         A::output(&state, source, &factors)
     }
@@ -631,7 +660,10 @@ impl<A: CycleAdapter> SumcheckKernel<F128> for CycleKernel<A> {
         if !A::VALIDATES_DERIVED {
             return Ok(());
         }
-        let state = self.group.lock().map_err(output_error)?;
+        let state = self
+            .group
+            .lock()
+            .map_err(|_| output_error("router cycle group lock is poisoned"))?;
         A::validate(&state, relation, input_points, output_points, challenges)
     }
 

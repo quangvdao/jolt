@@ -4,6 +4,7 @@
     reason = "test setup failures are assertion failures"
 )]
 
+use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_kernels::source::{
     CycleSource, DigitColumns, LaneSource, SourceError, ValidatedTrace,
 };
@@ -385,4 +386,126 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     assert!(matches!(ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::ValidationScratchSize { len, element_size, .. })
         if len == rows && element_size == size_of::<usize>()));
+}
+
+struct OrderedFaults {
+    row_fault: bool,
+    same_cycle_row_fault: bool,
+}
+
+impl CycleSource for OrderedFaults {
+    fn cycles(&self) -> usize {
+        1 << 14
+    }
+    fn trace_words(&self) -> usize {
+        0
+    }
+    fn trace_word(&self, _word: usize, _cycle: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        1 << 13
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _word: usize, _row: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        if cycle < self.cycles() {
+            cycle & ((1 << 13) - 1)
+        } else {
+            0
+        }
+    }
+    fn digit_columns(&self) -> usize {
+        3
+    }
+    fn bits(&self, column: usize) -> usize {
+        match column {
+            0 | 1 => 2,
+            2 => 8,
+            _ => 0,
+        }
+    }
+    fn by_row(&self, column: usize) -> bool {
+        column == 0 || column == 2
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        if cycle >= self.cycles() {
+            return None;
+        }
+        match (column, cycle) {
+            (0, 8190) if self.same_cycle_row_fault => Some(1),
+            (0, 8192) => Some(1),
+            (1, 8190) => Some(4),
+            (0 | 1, _) => Some(0),
+            (2, _) => Some(255),
+            _ => None,
+        }
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        if row >= self.bytecode_rows() {
+            return None;
+        }
+        match (column, row) {
+            (0, 4095) if self.row_fault => Some(4),
+            (2, 4094) if self.row_fault => Some(256),
+            (0, _) => Some(0),
+            (2, _) => Some(255),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn parallel_validation_returns_the_earliest_row_or_cycle_fault_on_every_pool() {
+    assert_eq!(CycleChunks::new(14, 0).unwrap().ranges().len(), 4);
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let source = Arc::new(OrderedFaults {
+                row_fault: false,
+                same_cycle_row_fault: false,
+            });
+            assert_eq!(
+                ValidatedTrace::new(source).err(),
+                Some(SourceError::Digit {
+                    column: 1,
+                    cycle: 8190,
+                    digit: 4,
+                    bound: 4,
+                })
+            );
+            let source = Arc::new(OrderedFaults {
+                row_fault: true,
+                same_cycle_row_fault: false,
+            });
+            assert_eq!(
+                ValidatedTrace::new(source).err(),
+                Some(SourceError::RowDigitRange {
+                    column: 2,
+                    row: 4094,
+                    digit: 256,
+                    bound: 256,
+                })
+            );
+            let source = Arc::new(OrderedFaults {
+                row_fault: false,
+                same_cycle_row_fault: true,
+            });
+            assert_eq!(
+                ValidatedTrace::new(source).err(),
+                Some(SourceError::RowDigit {
+                    column: 0,
+                    cycle: 8190,
+                    row: 8190,
+                })
+            );
+        });
+    }
 }

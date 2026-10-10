@@ -42,6 +42,7 @@ use std::sync::Arc;
 const ZERO: F128 = F128::from_raw(0);
 const ONE: F128 = F128::from_raw(1);
 const LABEL: &[u8] = b"rv64i-routers-definition";
+const ROUTER_TRACE_WORDS: [usize; 6] = [0, 1, 2, 3, 4, 5];
 
 fn shape(request: RouterShapeRequest) -> RouterShape {
     RouterShape::new(request).unwrap()
@@ -957,7 +958,7 @@ fn malformed_router_sources_and_points_return_named_errors() {
             &plan,
             &r_cycle
         ),
-        Err(RouterError::WordIndex { index: 6, .. })
+        Err(RouterError::WordIndex { index, .. }) if index == source.trace_words()
     ));
     assert!(matches!(
         RouterShortCore::new(
@@ -1033,8 +1034,8 @@ fn malformed_router_sources_and_points_return_named_errors() {
             factor(),
             RouterError::WordIndex {
                 bank: "trace",
-                index: 6,
-                words: 6,
+                index: source.trace_words(),
+                words: source.trace_words(),
             },
         ),
         (
@@ -1049,31 +1050,34 @@ fn malformed_router_sources_and_points_return_named_errors() {
         (
             WordSlot::Zero,
             SelectorFactor {
-                column: 21,
+                column: source.digit_columns(),
                 slots: vec![],
             },
             RouterError::Column {
-                column: 21,
-                columns: 21,
+                column: source.digit_columns(),
+                columns: source.digit_columns(),
             },
         ),
         (
             WordSlot::Bits(vec![BitEntry::Indicator {
-                column: 21,
+                column: source.digit_columns(),
                 value: 0,
             }]),
             factor(),
             RouterError::Column {
-                column: 21,
-                columns: 21,
+                column: source.digit_columns(),
+                columns: source.digit_columns(),
             },
         ),
         (
-            WordSlot::Bits(vec![BitEntry::DigitBit { column: 21, bit: 0 }]),
+            WordSlot::Bits(vec![BitEntry::DigitBit {
+                column: source.digit_columns(),
+                bit: 0,
+            }]),
             factor(),
             RouterError::Column {
-                column: 21,
-                columns: 21,
+                column: source.digit_columns(),
+                columns: source.digit_columns(),
             },
         ),
         (
@@ -1162,8 +1166,9 @@ fn router_pipeline_two_and_four_chunks_match_one_oracle_per_size_on_one_and_twel
             })
             .collect();
         let bit_weights: Vec<_> = (0..64).map(|bit| equality(&x[..6], bit)).collect();
-        let trace_lifts: Vec<Vec<_>> = (0..source.trace_words())
-            .map(|word| {
+        let trace_lifts: Vec<Vec<_>> = ROUTER_TRACE_WORDS
+            .iter()
+            .map(|&word| {
                 (0..source.cycles())
                     .map(|cycle| word_extension(source.trace_word(word, cycle), &bit_weights))
                     .collect()
@@ -1213,6 +1218,7 @@ fn router_pipeline_two_and_four_chunks_match_one_oracle_per_size_on_one_and_twel
                 assert_eq!(short.final_values().unwrap(), short_final);
                 let lifted = source_lift(&trace, &shapes, &x).unwrap();
                 assert_eq!(lifted.source_tables, definition.sources);
+                assert_eq!(lifted.lifts.word_indices(), ROUTER_TRACE_WORDS);
                 for (&word, table) in lifted
                     .lifts
                     .word_indices()
@@ -1253,8 +1259,9 @@ fn router_pipeline_two_and_four_chunks_match_one_oracle_per_size_on_one_and_twel
                         (expected[1], expected[2..].to_vec())
                     );
                 }
-                let words: Vec<_> = (0..source.trace_words()).collect();
-                let claims = claims_pass(&trace, &lifted.lifts, &words, &plan, &r_prime).unwrap();
+                let claims =
+                    claims_pass(&trace, &lifted.lifts, &ROUTER_TRACE_WORDS, &plan, &r_prime)
+                        .unwrap();
                 assert_eq!(claims.trace_words, trace_claims);
                 assert_eq!(claims.bytecode_words, bytecode_claims);
                 assert_eq!(claims.row_weights, expected_rows);
@@ -1318,6 +1325,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
             let measurement = AllocationMeasurement::begin();
             let lifted = source_lift(&trace, &shapes, &x).unwrap();
             let stats = measurement.finish();
+            assert_eq!(lifted.lifts.word_indices(), ROUTER_TRACE_WORDS);
             let outputs = lifted.source_tables.capacity() * size_of::<Vec<F128>>()
                 + std::mem::size_of_val(lifted.lifts.tables())
                 + std::mem::size_of_val(lifted.lifts.word_indices())
@@ -1388,7 +1396,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
                     cycle_allocations = Some((log_t, stats.allocs, pass_chunks));
                 }
             }
-            let words: Vec<_> = (0..source.trace_words()).collect();
+            let words = ROUTER_TRACE_WORDS.to_vec();
             drop(claims_pass(&trace, &lifted.lifts, &words, &plan, &challenges).unwrap());
             let measurement = AllocationMeasurement::begin();
             let output = claims_pass(&trace, &lifted.lifts, &words, &plan, &challenges).unwrap();

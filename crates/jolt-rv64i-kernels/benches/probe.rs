@@ -269,9 +269,10 @@ impl Lookup {
     ) -> usize {
         let visited = match source.profile() {
             SynthProfile::Local => source.bytecode_rows() / 16,
-            SynthProfile::AllRows | SynthProfile::UniformDigits | SynthProfile::SmallValues => {
-                source.bytecode_rows()
-            }
+            SynthProfile::AllRows
+            | SynthProfile::UniformDigits
+            | SynthProfile::SmallValues
+            | SynthProfile::Chained => source.bytecode_rows(),
         }
         .max(1)
         .min(CycleSource::cycles(source));

@@ -995,6 +995,7 @@ mod tests {
     #[test]
     fn router_source_validation_names_invalid_words_columns_widths_and_entries() {
         let trace = ValidatedTrace::new(Arc::new(Trace::synthetic(3, 831))).unwrap();
+        let columns = trace.source().digit_columns();
         for (word, error) in [
             (
                 WordSlot::Trace(6),
@@ -1014,19 +1015,22 @@ mod tests {
             ),
             (
                 WordSlot::Bits(vec![BitEntry::Indicator {
-                    column: 21,
+                    column: columns,
                     value: 0,
                 }]),
                 RouterError::Column {
-                    column: 21,
-                    columns: 21,
+                    column: columns,
+                    columns,
                 },
             ),
             (
-                WordSlot::Bits(vec![BitEntry::DigitBit { column: 21, bit: 0 }]),
+                WordSlot::Bits(vec![BitEntry::DigitBit {
+                    column: columns,
+                    bit: 0,
+                }]),
                 RouterError::Column {
-                    column: 21,
-                    columns: 21,
+                    column: columns,
+                    columns,
                 },
             ),
             (
@@ -1069,7 +1073,7 @@ mod tests {
             slots: 6,
             bank: vec![WordSlot::Zero],
             factors: vec![SelectorFactor {
-                column: 21,
+                column: columns,
                 slots: vec![],
             }],
             word_slots: vec![],
@@ -1080,8 +1084,8 @@ mod tests {
         assert_eq!(
             selector_counts(&trace, &column),
             Err(RouterError::Column {
-                column: 21,
-                columns: 21
+                column: columns,
+                columns
             })
         );
         let width = RouterShape::new(RouterShapeRequest {

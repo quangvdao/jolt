@@ -1,6 +1,6 @@
 use std::arch::x86_64::{
-    __m128i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128, _mm_shuffle_epi32,
-    _mm_slli_epi64, _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
+    __m128i, _mm_clmulepi64_si128, _mm_cvtsi64_si128, _mm_shuffle_epi32, _mm_slli_epi64,
+    _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
 };
 
 #[derive(Clone, Copy)]
@@ -77,12 +77,6 @@ impl Word {
     pub(super) fn to_u128(self) -> u128 {
         // SAFETY: both types have 128 bits, all bit patterns are valid, and x86_64 is little-endian.
         unsafe { std::mem::transmute::<__m128i, u128>(self.0) }
-    }
-
-    #[inline]
-    pub(super) fn low(self) -> u64 {
-        // SAFETY: SSE2 is baseline on x86_64.
-        unsafe { _mm_cvtsi128_si64(self.0) as u64 }
     }
 
     #[inline]

@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 emulator = ["dep:tracer"]
+arch-check = ["emulator", "dep:jolt-rv64i-prover", "dep:jolt-rv64i-verifier", "dep:object"]
 
 [dependencies]
 jolt-rv64i-arith.workspace = true
@@ -20,6 +21,13 @@ common = { workspace = true, features = ["std"] }
 rayon.workspace = true
 thiserror.workspace = true
 tracer = { workspace = true, optional = true, features = ["std"] }
+jolt-rv64i-prover = { workspace = true, optional = true, features = ["test-utils"] }
+jolt-rv64i-verifier = { workspace = true, optional = true }
+object = { workspace = true, optional = true }
+
+[[bin]]
+name = "rv64i-arch-check"
+required-features = ["arch-check"]
 
 [dev-dependencies]
 tracer = { workspace = true, features = ["std", "test-utils"] }

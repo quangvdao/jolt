@@ -77,6 +77,26 @@ Steps performed:
 A non-zero exit from the runner fails the Make target and, in CI, fails
 the job.
 
+## RV64I cycle-row checks
+
+`make arch-tests-rv64i RV64I_ARCH_EXPECT=<n>` reuses the existing generation,
+then runs `rv64i-arch-check` on ELF basenames matching `I-*` in data-hole decode
+mode. The checker adapts the execution trace to cycle facts and checks the
+replayed witness rows and the final `tohost` word. The runner requires exactly
+`n` matches before applying the skip list and rejects an empty selection.
+
+The count is not known yet: the pinned ACT4 commit is
+`a7c99303516f4e668f7488f172043392e23b9dfd`, and its suite has not been generated
+for this check. `RV64I_ARCH_EXPECT` remains unset in the Makefile and the target
+fails with a first-generation pinning instruction until a count is supplied.
+The full ACT4 RV64I acceptance criterion has not been shown.
+
+`make arch-tests-rv64i-smoke` assembles the existing deliberate-failure program
+with `-march=rv64i`, decodes it strictly, and requires the checker's HTIF-failure
+exit status of 1. Success or another failure status fails the smoke target.
+Both targets find the checker and write smoke artifacts under
+`CARGO_TARGET_DIR` when it is set, otherwise under `target/`.
+
 ## Skip list
 
 `tests/arch-tests/skip.txt` contains one test basename per line, with

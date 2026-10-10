@@ -36,11 +36,6 @@ pub fn trace(
     let mut backend = SourceTracerBackend::default().with_decode_mode(decode);
     Ok(program.trace_with(
         &mut backend,
-        TraceInputs::new(
-            inputs.to_vec(),
-            Vec::new(),
-            Vec::new(),
-            *memory_config,
-        ),
+        TraceInputs::new(inputs.to_vec(), Vec::new(), Vec::new(), *memory_config),
     )?)
 }

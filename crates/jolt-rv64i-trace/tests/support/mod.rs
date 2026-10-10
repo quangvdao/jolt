@@ -147,8 +147,13 @@ impl Prepared {
 
     pub fn check(&self, execution: &Execution, witness: &Rv64iWitness) {
         for (source, fact) in self.output.trace.rows().iter().zip(&execution.facts) {
-            assert_eq!(fact.bytecode_index as usize,
-                self.preprocessing.bytecode().index_of_pc(source.pc()).unwrap());
+            assert_eq!(
+                fact.bytecode_index as usize,
+                self.preprocessing
+                    .bytecode()
+                    .index_of_pc(source.pc())
+                    .unwrap()
+            );
         }
         let system = RowSystem::new(&witness.layout);
         for (cycle, bits) in witness.bits.iter().enumerate() {
@@ -157,7 +162,11 @@ impl Prepared {
             let base = witness.words[cycle]
                 .base_words(row.variant.unwrap().is_store(), witness.layout.inc(bits));
             let checked = system.check(&WitnessRow::compute(&witness.layout, row, &base, bits));
-            assert!(checked.is_ok(), "cycle {cycle} at {:#x}: {checked:?}", row.pc);
+            assert!(
+                checked.is_ok(),
+                "cycle {cycle} at {:#x}: {checked:?}",
+                row.pc
+            );
             assert_eq!(
                 execution.facts[cycle].bytecode_index as usize,
                 witness.bytecode.index_of_pc(row.pc).unwrap()

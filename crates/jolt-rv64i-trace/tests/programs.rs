@@ -338,8 +338,10 @@ fn ram_exponent_boundaries_are_candidates_for_the_statement_checker() {
         Err(AdapterError::Layout(LayoutError::BitsRowOverflow { .. }))
     ));
     for b in 1..=MAX_LOG_K_BYTECODE {
-        assert!(matches!(Layout::new(b, 48, lowest),
-            Err(LayoutError::BitsRowOverflow { .. })));
+        assert!(matches!(
+            Layout::new(b, 48, lowest),
+            Err(LayoutError::BitsRowOverflow { .. })
+        ));
     }
     rows[4] = replace(
         base,

@@ -52,10 +52,16 @@ pub fn preprocess(
 }
 
 impl Program {
-    fn valid_rows(bytecode: &Bytecode, instructions: &[SourceInstruction]) -> Result<(), AdapterError> {
+    fn valid_rows(
+        bytecode: &Bytecode,
+        instructions: &[SourceInstruction],
+    ) -> Result<(), AdapterError> {
         for (index, (row, instruction)) in bytecode.rows().iter().zip(instructions).enumerate() {
             if row.variant.is_none() {
-                return Err(AdapterError::InvalidBytecodeRow { index, pc: instruction.row().address as u64 });
+                return Err(AdapterError::InvalidBytecodeRow {
+                    index,
+                    pc: instruction.row().address as u64,
+                });
             }
         }
         Ok(())
@@ -98,7 +104,10 @@ mod tests {
             Bytecode::preprocess(&[instruction], &Layout::new(1, 5, 0).unwrap()).unwrap();
         assert!(matches!(
             Program::valid_rows(&bytecode, &[instruction]),
-            Err(AdapterError::InvalidBytecodeRow { index: 0, pc: RAM_START_ADDRESS })
+            Err(AdapterError::InvalidBytecodeRow {
+                index: 0,
+                pc: RAM_START_ADDRESS
+            })
         ));
     }
 }

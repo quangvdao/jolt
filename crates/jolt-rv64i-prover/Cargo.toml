@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-allocative = ["dep:allocative", "jolt-rv64i-verifier/allocative", "jolt-kernels/allocative"]
+allocative = ["dep:allocative", "jolt-rv64i-verifier/allocative", "jolt-kernels/allocative", "jolt-verifier/allocative"]
 parallel = ["jolt-kernels/parallel", "jolt-sumcheck/parallel"]
 test-utils = ["jolt-rv64i-verifier/test-utils", "dep:rand"]
 

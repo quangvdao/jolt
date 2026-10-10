@@ -358,7 +358,9 @@ impl RoutersCycleCore {
     }
 
     /// One handle per shape, in shape order. Handles share source and selector
-    /// transitions; the batch may visit them in any order each round.
+    /// transitions. A member's messages and final values do not depend on which
+    /// other members are driven or on the order of the first call each round.
+    /// Driven members must use the same round challenges and finish challenge.
     pub fn members(&self) -> Vec<RouterCycleMember> {
         (0..self.shapes)
             .map(|shape| RouterCycleMember {
@@ -394,8 +396,8 @@ pub struct RouterCycleMember {
 }
 impl RouterCycleMember {
     /// Returns source and factors at the cycle challenge point, in factor order.
-    /// This member must have finished; earlier reads return an error. Complete
-    /// every member's `finish_rounds` before reading the batch's final values.
+    /// This member must have finished; earlier reads return an error. Other
+    /// members need not be driven or finished before reading this member.
     pub fn final_values(&self) -> Result<(F128, Vec<F128>), RouterError> {
         let shared = self.shared.lock().map_err(|_| RouterError::Poisoned)?;
         if shared.finished.is_none() || !self.finished {

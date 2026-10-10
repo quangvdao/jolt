@@ -14,6 +14,7 @@ use crate::source::LaneSource;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_poly::{gruen_mul_linear, gruen_recover_endpoint, GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_utils::unsafe_allocate_zero_vec;
 use monomial::Monomial;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -319,7 +320,7 @@ impl<S: LaneSource> OuterF2Core<S> {
         let lift = WordLift::new(&std::array::from_fn(|index| weights[index]));
         self.tail_values = std::array::from_fn(|byte| self.tail_at(byte));
         self.groups =
-            std::array::from_fn(|_| std::array::from_fn(|_| vec![ZERO; self.chunks.len()]));
+            std::array::from_fn(|_| std::array::from_fn(|_| unsafe_allocate_zero_vec(self.chunks.len())));
         self.tail = vec![0; self.chunks.len()];
         let [group0, group1] = &mut self.groups;
         let [a0, b0, c0] = group0;

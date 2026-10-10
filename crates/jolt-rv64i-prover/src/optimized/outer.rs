@@ -9,7 +9,7 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
-use jolt_rv64i_arith::rows::TailError;
+use jolt_rv64i_arith::rows::{F2Tail, TailError};
 use jolt_rv64i_arith::words::F2Words;
 use jolt_rv64i_arith::{FormError, RowSystem, Sources};
 use jolt_rv64i_kernels::outer_f2::{OuterF2Core, OuterF2Options};
@@ -72,7 +72,8 @@ impl WitnessLanes {
             .into());
         }
         let chunks = CycleChunks::new(cycles.ilog2() as usize, 0)?;
-        let rows = RowSystem::try_new(&witness.layout)?;
+        let rows = RowSystem::new(&witness.layout);
+        let table = rows.f2_tail()?;
         let view = witness.cycles();
         let mut lanes = vec![[[0; 3]; 2]; cycles];
         let mut tail = vec![0; cycles];
@@ -83,7 +84,7 @@ impl WitnessLanes {
             .filter_map(|(chunk, (lanes, tail))| {
                 for (offset, (lanes, tail)) in lanes.iter_mut().zip(tail).enumerate() {
                     let cycle = chunk * chunks.chunk_len() + offset;
-                    match Self::cycle(&view, &rows, cycle) {
+                    match Self::cycle(&view, &rows, &table, cycle) {
                         Ok((values, byte)) => {
                             *lanes = values;
                             *tail = byte;
@@ -105,13 +106,17 @@ impl WitnessLanes {
     pub fn cycle(
         view: &WitnessCycles<'_>,
         rows: &RowSystem,
+        table: &F2Tail,
         cycle: usize,
     ) -> Result<([[u64; 3]; 2], u8), LanesError> {
         let parts = view.parts(cycle)?;
         let sources = Sources::from_parts(parts.fetched, &parts.base, parts.sources);
         let evaluated = F2Words::compute(parts.fetched, &sources, parts.sources.pos)
             .map_err(|source| LanesError::Evaluation { cycle, source })?;
-        Ok(rows.f2_values(&evaluated, parts.sources.keys_differ)?)
+        Ok((
+            rows.f2_lanes(&evaluated),
+            table.value(&evaluated, parts.sources.keys_differ),
+        ))
     }
 }
 

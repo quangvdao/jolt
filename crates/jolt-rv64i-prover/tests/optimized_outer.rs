@@ -39,6 +39,7 @@ fn outer_backend() -> Rv64iBackend {
 
 fn check_lanes(witness: &Rv64iWitness) {
     let rows = RowSystem::new(&witness.layout);
+    let table = rows.f2_tail().unwrap();
     let cycles = witness.cycles();
     for threads in [1, 12] {
         let pool = ThreadPoolBuilder::new()
@@ -65,7 +66,7 @@ fn check_lanes(witness: &Rv64iWitness) {
             }
             assert_eq!(tail >> 6, 0, "cycle {cycle}");
             assert_eq!(
-                WitnessLanes::cycle(&cycles, &rows, cycle).unwrap(),
+                WitnessLanes::cycle(&cycles, &rows, &table, cycle).unwrap(),
                 (expected, tail),
                 "cycle {cycle}",
             );
@@ -74,7 +75,7 @@ fn check_lanes(witness: &Rv64iWitness) {
         for cycle in [lanes.cycles(), usize::MAX] {
             assert_eq!(lanes.lanes(cycle), [[0; 3]; 2]);
             assert_eq!(lanes.tail(cycle), 0);
-            assert!(WitnessLanes::cycle(&cycles, &rows, cycle).is_err());
+            assert!(WitnessLanes::cycle(&cycles, &rows, &table, cycle).is_err());
         }
     }
 }
@@ -87,6 +88,7 @@ fn lanes_match_row_definitions_on_programs_and_separating_jalr() {
     let (_, _, witness) = support::separating_fixture();
     check_lanes(&witness);
     let rows = RowSystem::new(&witness.layout);
+    let table = rows.f2_tail().unwrap();
     let cycle = witness
         .bits
         .iter()
@@ -96,11 +98,11 @@ fn lanes_match_row_definitions_on_programs_and_separating_jalr() {
         })
         .unwrap();
     let cycles = witness.cycles();
-    let before = WitnessLanes::cycle(&cycles, &rows, cycle).unwrap();
+    let before = WitnessLanes::cycle(&cycles, &rows, &table, cycle).unwrap();
     let mut changed = witness.clone();
     Arc::make_mut(&mut changed.words)[cycle].next_pc ^= 4;
     let changed_cycles = changed.cycles();
-    let after = WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap();
+    let after = WitnessLanes::cycle(&changed_cycles, &rows, &table, cycle).unwrap();
     assert_ne!(before.0[0], after.0[0], "JALR adder must read NextPC");
     let row = changed_cycles.row(cycle).unwrap();
     assert_eq!(after.0[0], rows.lane_rows()[0].values(&row));
@@ -110,6 +112,7 @@ fn lanes_match_row_definitions_on_programs_and_separating_jalr() {
 fn lanes_read_decoded_keys_differ_without_reading_committed_bits() {
     let (_, _, witness) = support::separating_fixture();
     let rows = RowSystem::new(&witness.layout);
+    let table = rows.f2_tail().unwrap();
     let cycles = witness.cycles();
     let key_cycle = (0..witness.bits.len())
         .find(|&cycle| cycles.parts(cycle).unwrap().variant.key_kind().is_some())
@@ -140,12 +143,12 @@ fn lanes_read_decoded_keys_differ_without_reading_committed_bits() {
                 "cycle {cycle}, pool with {threads} threads",
             );
             assert_eq!(
-                WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap(),
-                WitnessLanes::cycle(&cycles, &rows, cycle).unwrap(),
+                WitnessLanes::cycle(&changed_cycles, &rows, &table, cycle).unwrap(),
+                WitnessLanes::cycle(&cycles, &rows, &table, cycle).unwrap(),
                 "public cycle {cycle}",
             );
             assert_eq!(
-                WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap(),
+                WitnessLanes::cycle(&changed_cycles, &rows, &table, cycle).unwrap(),
                 expected,
                 "public cycle {cycle}, pool with {threads} threads",
             );
@@ -375,6 +378,7 @@ fn malformed_lanes_report_first_cycle_on_every_pool_and_invalid_geometry() {
     let (statement, verifier, mut witness) = support::counting_loop_at(14);
     let honest = witness.clone();
     let rows = RowSystem::new(&witness.layout);
+    let table = rows.f2_tail().unwrap();
     let geometry = CycleChunks::new(usize::from(statement.log_T), 0).unwrap();
     let cycles: Vec<_> = geometry
         .ranges()
@@ -393,7 +397,7 @@ fn malformed_lanes_report_first_cycle_on_every_pool_and_invalid_geometry() {
             (decoded.digits & !(mask << field.shift())) | ((invalid_index as u64) << field.shift());
     }
     let view = witness.cycles();
-    let expected = WitnessLanes::cycle(&view, &rows, cycles[0])
+    let expected = WitnessLanes::cycle(&view, &rows, &table, cycles[0])
         .err()
         .unwrap()
         .to_string();

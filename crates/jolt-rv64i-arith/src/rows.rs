@@ -237,6 +237,30 @@ pub enum TailError {
     },
 }
 
+/// Checked binary tail bytes derived by [`RowSystem::f2_tail`] from rows 128
+/// and 129, in `LaneSource` order: A, B, C, low row first in each pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct F2Tail {
+    table: [u8; 16],
+}
+
+impl F2Tail {
+    /// Tail of one cycle, indexed by `l | r << 1 | t << 2 | k << 3`.
+    #[inline]
+    pub fn value(&self, words: &F2Words, keys_differ: bool) -> u8 {
+        let index = (words.left_key_bit & 1)
+            | ((words.right_key_bit & 1) << 1)
+            | ((words.less_than & 1) << 2)
+            | (u64::from(keys_differ) << 3);
+        self.table.get(index as usize).copied().unwrap_or(0)
+    }
+
+    /// The sixteen tail bytes in the order used by [`Self::value`].
+    pub fn table(&self) -> &[u8; 16] {
+        &self.table
+    }
+}
+
 /// XOR of packed terms, plus the witness column `ONE` when `one` is set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PackedForm {
@@ -378,7 +402,7 @@ pub struct RowFailure {
 pub struct RowSystem {
     lanes: [LaneRows; 2],
     f2_lanes: [F2LaneRows; 2],
-    tail: Result<[u8; 16], TailError>,
+    keys_differ_column: usize,
     packed: Vec<PackedRow>,
 }
 
@@ -515,28 +539,24 @@ impl RowSystem {
             });
         }
         Self {
-            tail: Self::compile_tail(&packed, layout),
+            keys_differ_column: COLUMN_BITS + layout.keys_differ(),
             lanes: lane_rows.map(LaneRows::from),
             f2_lanes: lane_rows,
             packed,
         }
     }
 
-    /// Constructs the full equations and rejects a tail dependency or coefficient
-    /// that the compact evaluator cannot represent.
-    pub fn try_new(layout: &Layout) -> Result<Self, TailError> {
-        let rows = Self::new(layout);
-        let _table = rows.f2_tail_table()?;
-        Ok(rows)
-    }
-
-    fn compile_tail(packed: &[PackedRow], layout: &Layout) -> Result<[u8; 16], TailError> {
+    /// Checks every term of rows 128 and 129 before tabulating their six bits
+    /// in `LaneSource` order on the sixteen assignments of the four inputs.
+    pub fn f2_tail(&self) -> Result<F2Tail, TailError> {
+        let packed = &self.packed;
+        let keys_differ_column = self.keys_differ_column;
         let columns = [
             COLUMN_ONE,
             COLUMN_LEFT_KEY_BIT,
             COLUMN_RIGHT_KEY_BIT,
             COLUMN_LESS_THAN,
-            COLUMN_BITS + layout.keys_differ(),
+            keys_differ_column,
         ];
         for (offset, row) in packed.iter().take(2).enumerate() {
             for (name, form) in [
@@ -569,50 +589,33 @@ impl RowSystem {
                 }
             }
         }
-        Ok(std::array::from_fn(|index| {
-            let words = Words {
-                left_key_bit: (index & 1) as u64,
-                right_key_bit: ((index >> 1) & 1) as u64,
-                less_than: ((index >> 2) & 1) as u64,
-                ..Words::default()
-            };
-            let mut bits = [0; 4];
-            set_bit(&mut bits, layout.keys_differ(), index & 8 != 0);
-            let witness = WitnessRow::assemble(&words, &bits);
-            let mut byte = 0;
-            for (offset, row) in packed.iter().take(2).enumerate() {
-                for (column, value) in row.values(&witness).into_iter().enumerate() {
-                    byte |= (value.to_raw() as u8) << (2 * column + offset);
+        Ok(F2Tail {
+            table: std::array::from_fn(|index| {
+                let words = Words {
+                    left_key_bit: (index & 1) as u64,
+                    right_key_bit: ((index >> 1) & 1) as u64,
+                    less_than: ((index >> 2) & 1) as u64,
+                    ..Words::default()
+                };
+                let mut bits = [0; 4];
+                set_bit(&mut bits, keys_differ_column - COLUMN_BITS, index & 8 != 0);
+                let witness = WitnessRow::assemble(&words, &bits);
+                let mut byte = 0;
+                for (offset, row) in packed.iter().take(2).enumerate() {
+                    for (column, value) in row.values(&witness).into_iter().enumerate() {
+                        byte |= (value.to_raw() as u8) << (2 * column + offset);
+                    }
                 }
-            }
-            byte
-        }))
+                byte
+            }),
+        })
     }
 
-    /// Tail bytes in `LaneSource` order, indexed by `l | r << 1 | t << 2 | k << 3`.
-    /// Construction checks every term before tabulating the actual packed rows.
+    /// Word triples of rows 0..128, from the same lane definitions as full rows.
     #[inline]
-    pub fn f2_tail_table(&self) -> Result<&[u8; 16], TailError> {
-        self.tail.as_ref().map_err(Clone::clone)
-    }
-
-    /// Values of rows 0..130 on the compact evaluator: lane triples and the
-    /// six packed bits, derived from the same definitions as the full rows.
-    #[inline]
-    pub fn f2_values(
-        &self,
-        words: &F2Words,
-        keys_differ: bool,
-    ) -> Result<([[u64; 3]; 2], u8), TailError> {
-        let lanes = self
-            .f2_lanes
-            .map(|row| LaneRows::values_from(row.ab_mask, row.lanes, |lane| words.lane(lane)));
-        let index = (words.left_key_bit & 1)
-            | ((words.right_key_bit & 1) << 1)
-            | ((words.less_than & 1) << 2)
-            | (u64::from(keys_differ) << 3);
-        let table = self.f2_tail_table()?;
-        Ok((lanes, table.get(index as usize).copied().unwrap_or(0)))
+    pub fn f2_lanes(&self, words: &F2Words) -> [[u64; 3]; 2] {
+        self.f2_lanes
+            .map(|row| LaneRows::values_from(row.ab_mask, row.lanes, |lane| words.lane(lane)))
     }
 
     /// The two 64-row lane families, starting at rows 0 and 64.
@@ -734,7 +737,7 @@ mod tests {
         let term = PackedTerm::new(64, 1, 0, 0, true).unwrap();
         rows.packed[0].a.terms.push(term);
         assert_eq!(
-            RowSystem::compile_tail(&rows.packed, &layout),
+            rows.f2_tail(),
             Err(TailError::UnsupportedColumn {
                 row: 128,
                 form: TailForm::A,
@@ -751,7 +754,7 @@ mod tests {
         let term = PackedTerm::new(COLUMN_LEFT_KEY_BIT as u16, 1, 0, 1, false).unwrap();
         rows.packed[1].c.terms.push(term);
         assert_eq!(
-            RowSystem::compile_tail(&rows.packed, &layout),
+            rows.f2_tail(),
             Err(TailError::NonBinaryCoefficient {
                 row: 129,
                 form: TailForm::C,

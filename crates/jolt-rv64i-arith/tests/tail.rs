@@ -10,9 +10,9 @@ use jolt_rv64i_arith::{BaseWords, BytecodeRow, Layout, RowSystem, Sources, Varia
 
 #[test]
 fn reference_tail_table_matches_wire_literal() {
-    let rows = RowSystem::try_new(&Layout::new(20, 20, 0).unwrap()).unwrap();
+    let rows = RowSystem::new(&Layout::new(20, 20, 0).unwrap());
     assert_eq!(
-        rows.f2_tail_table().unwrap(),
+        rows.f2_tail().unwrap().table(),
         &[
             0x08, 0x0a, 0x0e, 0x0c, 0x18, 0x1a, 0x1e, 0x1c, 0x0b, 0x09, 0x0d, 0x0f, 0x1b, 0x19,
             0x1d, 0x1f
@@ -22,7 +22,8 @@ fn reference_tail_table_matches_wire_literal() {
 
 #[test]
 fn absent_rails_keep_one_and_keys_differ_in_the_tail() {
-    let rows = RowSystem::try_new(&Layout::new(20, 20, 0).unwrap()).unwrap();
+    let rows = RowSystem::new(&Layout::new(20, 20, 0).unwrap());
+    let table = rows.f2_tail().unwrap();
     let row = BytecodeRow {
         variant: Some(Variant::NOOP),
         ..BytecodeRow::default()
@@ -41,7 +42,8 @@ fn absent_rails_keep_one_and_keys_differ_in_the_tail() {
             },
         );
         let words = F2Words::compute(&row, &sources, 0).unwrap();
-        let (lanes, tail) = rows.f2_values(&words, keys_differ).unwrap();
+        let lanes = rows.f2_lanes(&words);
+        let tail = table.value(&words, keys_differ);
         assert_eq!(lanes, [[0; 3]; 2]);
         assert_eq!(
             tail,

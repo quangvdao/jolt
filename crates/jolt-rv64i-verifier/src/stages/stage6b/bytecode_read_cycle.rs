@@ -208,7 +208,7 @@ impl<F: JoltField> BytecodeReadCycle<F> {
                         actual: point.len(),
                     });
                 }
-                Ok(point.iter().map(|v| F::one() + *v).product())
+                points::eq_index(point, 0)
             }
             CycleWeight::Next => points::next(&self.r_3, point),
         }

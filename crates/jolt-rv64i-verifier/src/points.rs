@@ -5,6 +5,10 @@
 //! of a word. `chunk` extends a full digit selector, reconstructing digit zero
 //! as the complement of the stored indicators. Lengths are checked before
 //! calling the polynomial layer's infallible evaluators.
+//!
+//! `eq` and `lt` use the factor `1 + x + y`, which is the equality extension of
+//! one coordinate only in characteristic 2. The `JoltField` bound does not
+//! enforce that; the protocol instantiates every helper at `F128`.
 
 use jolt_field::JoltField;
 use jolt_poly::EqPlusOnePolynomial;

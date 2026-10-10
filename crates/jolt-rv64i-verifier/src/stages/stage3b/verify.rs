@@ -10,20 +10,65 @@ use super::router_cycle::{
     RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims, RouterCycleVariantInputClaims,
     RouterCycleVariantOutputClaims,
 };
-use super::{Stage3bInputClaims, Stage3bOutputClaims, Stage3bOutputPoints, Stage3bSumchecks};
+use super::{
+    Stage3bInputClaims, Stage3bInputPoints, Stage3bOutputClaims, Stage3bOutputPoints,
+    Stage3bSumchecks,
+};
 use crate::commitment::BitsCommitmentScheme;
 use crate::error::Rv64iVerifierError;
 use crate::points::PointsError;
 use crate::proof::{BatchProof, RouterCycleValues, RouterFoldValues};
-use crate::stages::stage3a::verify::Output as ShortOutput;
+use crate::stages::stage1::Output as Stage1Output;
+use crate::stages::stage3a::{self, Output as ShortOutput};
 use crate::statement::CheckedInputs;
 
+/// Verified router-cycle cells consumed by batches 4, 6a and 6b at low-variable-first points.
 pub struct Output {
-    pub r_3: Vec<F128>,
+    /// Word, kind and committed values consumed by batches 4, 6a and 6b.
     pub claims: Stage3bOutputClaims<F128>,
+    /// Inner-first, cycle-last cell points consumed by batches 4, 6a and 6b.
     pub points: Stage3bOutputPoints<F128>,
 }
 
+impl Output {
+    /// Borrows the common cycle point read by batches 4, 6a and 6b.
+    pub fn r_3(&self) -> &[F128] {
+        &self.points.branch.branch
+    }
+}
+
+/// Concrete cycle batch and its five consumed short folds.
+pub struct Inputs {
+    pub batch: Stage3bSumchecks<F128>,
+    pub claims: Stage3bInputClaims<F128>,
+    pub points: Stage3bInputPoints<F128>,
+}
+
+/// Converts stage-1's cycle suffix and stage-3a's router folds into cycle-batch inputs.
+/// Short slots and cycle points are low-variable-first; invalid dimensions return `PointsError`.
+pub fn from_upstream<S: BitsCommitmentScheme>(
+    checked: &CheckedInputs<'_, S>,
+    stage1: &Stage1Output,
+    stage3a: &ShortOutput,
+) -> Result<Inputs, PointsError> {
+    let r_1 = stage1.r_1()?;
+    if r_1.len() != checked.log_T() {
+        return Err(PointsError::Dimension {
+            expected: checked.log_T(),
+            actual: r_1.len(),
+        });
+    }
+    let batch = Stage3bSumchecks::new(checked.layout(), r_1.to_vec(), stage3a.x.clone())?;
+    let claims = input_values(&stage3a::verify::values(&stage3a.claims));
+    let points = batch.input_points()?;
+    Ok(Inputs {
+        batch,
+        claims,
+        points,
+    })
+}
+
+/// Converts the five canonical short wire folds to cycle input cells.
 pub fn input_values(values: &RouterFoldValues) -> Stage3bInputClaims<F128> {
     Stage3bInputClaims {
         variant: RouterCycleVariantInputClaims {
@@ -86,6 +131,7 @@ pub fn expand(values: &RouterCycleValues) -> Stage3bOutputClaims<F128> {
     }
 }
 
+/// Extracts canonical wire cells, skipping alias copies.
 pub fn values(claims: &Stage3bOutputClaims<F128>) -> RouterCycleValues {
     RouterCycleValues {
         rs1_value: claims.variant.rs1_value,
@@ -109,27 +155,36 @@ pub fn values(claims: &Stage3bOutputClaims<F128>) -> RouterCycleValues {
     }
 }
 
+/// Verifies batch 3b from stage 1's cycle point and stage 3a's short folds.
+/// Points are low-variable-first; invalid dimensions or failed equations return a stage-3b error.
 pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     checked: &CheckedInputs<'_, S>,
     proof: &BatchProof<RouterCycleValues>,
     transcript: &mut T,
+    stage1: &Stage1Output,
     stage3a: &ShortOutput,
 ) -> Result<Output, Rv64iVerifierError> {
-    if stage3a.r_1.len() != checked.log_T() {
-        return Err(VerifierError::StageClaimSumcheckFailed {
+    let inputs = from_upstream(checked, stage1, stage3a).map_err(|error| {
+        VerifierError::StageClaimSumcheckFailed {
             stage: "Stage3b".to_owned(),
-            reason: "router cycle point differs from the checked trace dimension".to_owned(),
+            reason: error.to_string(),
         }
-        .into());
-    }
-    let error = |error: PointsError| VerifierError::StageClaimSumcheckFailed {
-        stage: "Stage3b".to_owned(),
-        reason: error.to_string(),
-    };
-    let sumchecks = Stage3bSumchecks::new(checked.layout(), stage3a.r_1.clone(), stage3a.x.clone())
-        .map_err(error)?;
-    let inputs = input_values(&stage3a.values);
-    let input_points = sumchecks.input_points().map_err(error)?;
+    })?;
+    verify_converted(proof, transcript, inputs)
+}
+
+/// Verifies the cycle batch from converted short folds and low-variable-first points.
+/// The inputs must come from stages 1 and 3a; failed equations return a stage-3b error.
+pub fn verify_converted<T: Transcript<Challenge = F128>>(
+    proof: &BatchProof<RouterCycleValues>,
+    transcript: &mut T,
+    inputs: Inputs,
+) -> Result<Output, Rv64iVerifierError> {
+    let Inputs {
+        batch: sumchecks,
+        claims: inputs,
+        points: input_points,
+    } = inputs;
     let challenges = sumchecks.draw_challenges(transcript)?;
     let claims = expand(&proof.values);
     sumchecks.validate_output_claims(&claims)?;
@@ -143,9 +198,5 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
         3,
     )?;
     sumchecks.append_output_claims(transcript, &claims);
-    Ok(Output {
-        r_3: points.branch.branch.clone(),
-        claims,
-        points,
-    })
+    Ok(Output { claims, points })
 }

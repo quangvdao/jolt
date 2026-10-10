@@ -604,8 +604,8 @@ fn counting_loop_batches_one_and_two_reject_each_wire_value() {
         stage2::verify::verify(&checked, &proof2, &mut verifier_transcript, &verified1).unwrap();
     assert_eq!(verifier_transcript.state(), transcript.state());
     let rows = witness_rows(&witness);
-    let r_1 = &verified1.point[8..];
-    let w = &verified2.point;
+    let r_1 = verified1.r_1().unwrap();
+    let w = verified2.w().unwrap();
     let expected_routed: F128 = (1..4)
         .chain(16..27)
         .chain(64..768)

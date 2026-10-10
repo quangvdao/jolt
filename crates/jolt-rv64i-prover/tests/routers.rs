@@ -541,14 +541,21 @@ fn prove_router_batches(
     short.append_output_claims(&mut verifier, &proof.output_claims);
     assert_eq!(prover.state(), verifier.state());
     assert_eq!(outputs, proof.output_points);
-    let stage3a_output = checked.map(|checked| {
+    let stage3a_output = checked.map(|_checked| {
         let wire = BatchProof {
             rounds: proof.recorded.proof.clone(),
             values: stage3a::verify::values(&proof.output_claims),
         };
-        let output =
-            stage3a::verify::verify(checked, &wire, &mut stage_transcript, &w, &r1, routed)
-                .unwrap();
+        let output = stage3a::verify::verify_converted(
+            &wire,
+            &mut stage_transcript,
+            stage3a::verify::Inputs {
+                batch: VerifierStage3a::new(w.clone(), r1.clone(), Arc::clone(&routes)).unwrap(),
+                claims: inputs.clone(),
+                points: input_points.clone(),
+            },
+        )
+        .unwrap();
         assert_eq!(output.points, outputs);
         assert_eq!(stage_transcript.state(), prover.state());
         output
@@ -664,13 +671,21 @@ fn prove_router_batches(
     cycle.append_output_claims(&mut verifier, &proof.output_claims);
     assert_eq!(prover.state(), verifier.state());
     assert_eq!(points, proof.output_points);
-    if let (Some(checked), Some(short_output)) = (checked, &stage3a_output) {
+    if let (Some(_checked), Some(_short_output)) = (checked, &stage3a_output) {
         let wire = BatchProof {
             rounds: proof.recorded.proof.clone(),
             values: stage3b::verify::values(&proof.output_claims),
         };
-        let output =
-            stage3b::verify::verify(checked, &wire, &mut stage_transcript, short_output).unwrap();
+        let output = stage3b::verify::verify_converted(
+            &wire,
+            &mut stage_transcript,
+            stage3b::verify::Inputs {
+                batch: VerifierStage3b::new(&witness.layout, r1.clone(), x.clone()).unwrap(),
+                claims: inputs.clone(),
+                points: input_points.clone(),
+            },
+        )
+        .unwrap();
         assert_eq!(output.points, points);
         assert_eq!(stage_transcript.state(), prover.state());
     }

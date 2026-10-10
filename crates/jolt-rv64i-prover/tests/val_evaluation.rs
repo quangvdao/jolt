@@ -26,8 +26,7 @@ use jolt_rv64i_verifier::claims::val_evaluation::{
     RamValEvaluationInputClaims, RegistersValEvaluationInputClaims,
 };
 use jolt_rv64i_verifier::stages::stage5::{
-    verify, Stage5InputClaims, Stage5InputPoints, Stage5Source,
-    Stage5Sumchecks as VerifierStage5Sumchecks,
+    verify, Stage5InputClaims, Stage5InputPoints, Stage5Sumchecks as VerifierStage5Sumchecks,
 };
 use jolt_rv64i_verifier::{
     points::to_high_to_low,
@@ -196,7 +195,7 @@ impl Fixture {
         )
         .unwrap()
     }
-    fn source(&self) -> Stage5Source {
+    fn source(&self) -> Stage5InputPoints<F128> {
         let a_reg = &self.a_ram[self.a_ram.len() - 5..];
         let registers_val = a_reg
             .iter()
@@ -212,14 +211,11 @@ impl Fixture {
             .copied()
             .collect();
         let ram_val_final = self.a_ram.iter().chain(&self.r_bit).copied().collect();
-        Stage5Source {
-            values: Stage5InputClaims::from_stage4(&self.stage4),
-            points: Stage5InputPoints {
-                registers_val_evaluation: RegistersValEvaluationInputClaims { registers_val },
-                ram_val_evaluation: RamValEvaluationInputClaims {
-                    ram_val,
-                    ram_val_final,
-                },
+        Stage5InputPoints {
+            registers_val_evaluation: RegistersValEvaluationInputClaims { registers_val },
+            ram_val_evaluation: RamValEvaluationInputClaims {
+                ram_val,
+                ram_val_final,
             },
         }
     }
@@ -395,26 +391,30 @@ fn stage5_proves_four_wire_values_and_matches_the_verifier_transcript() {
     );
     let wire = Fixture::wire(&proof);
     let mut transcript = Fixture::transcript();
-    let output = verify::verify(
-        &fixture.checked(),
+    let output = verify::verify_inputs(
+        &fixture.batch().0,
         &wire,
         &mut transcript,
+        &Stage5InputClaims::from_stage4(&fixture.stage4),
         &fixture.source(),
     )
     .unwrap();
-    assert_eq!(output.output_points, proof.output_points);
-    assert_eq!(output.output_values, proof.output_claims);
+    assert_eq!(output.points, proof.output_points);
+    assert_eq!(output.claims, proof.output_claims);
     assert_eq!(prover_transcript.state(), transcript.state());
-    assert_eq!(wire.values.rd_wa, evaluate(fixture.rd.clone(), &output.r_5));
+    assert_eq!(
+        wire.values.rd_wa,
+        evaluate(fixture.rd.clone(), output.r_5())
+    );
     assert_eq!(
         wire.values.ram_ra,
-        evaluate(fixture.ra.clone(), &output.r_5)
+        evaluate(fixture.ra.clone(), output.r_5())
     );
     assert_eq!(
         wire.values.store,
-        evaluate(fixture.store.clone(), &output.r_5)
+        evaluate(fixture.store.clone(), output.r_5())
     );
-    assert_eq!(wire.values.inc, evaluate(fixture.inc.clone(), &output.r_5));
+    assert_eq!(wire.values.inc, evaluate(fixture.inc.clone(), output.r_5()));
 }
 
 #[test]
@@ -430,10 +430,11 @@ fn stage5_rejects_a_changed_initial_ram_word() {
         original + changed,
         basis(&fixture.a_ram, 0) * basis(&fixture.r_bit, 0)
     );
-    assert!(verify::verify(
-        &fixture.checked(),
+    assert!(verify::verify_inputs(
+        &fixture.batch().0,
         &wire,
         &mut Fixture::transcript(),
+        &Stage5InputClaims::from_stage4(&fixture.stage4),
         &fixture.source()
     )
     .is_err());
@@ -446,9 +447,9 @@ fn stage5_rejects_inconsistent_consumed_points_and_output_aliases() {
     for cell in 0..3 {
         let mut source = fixture.source();
         let point = match cell {
-            0 => &mut source.points.registers_val_evaluation.registers_val,
-            1 => &mut source.points.ram_val_evaluation.ram_val,
-            _ => &mut source.points.ram_val_evaluation.ram_val_final,
+            0 => &mut source.registers_val_evaluation.registers_val,
+            1 => &mut source.ram_val_evaluation.ram_val,
+            _ => &mut source.ram_val_evaluation.ram_val_final,
         };
         point[0] += F128::one();
         assert!(VerifierStage5Sumchecks::new(&fixture.checked(), &source).is_err());
@@ -465,8 +466,8 @@ fn stage5_rejects_inconsistent_consumed_points_and_output_aliases() {
         let challenges = batch.draw_challenges(&mut transcript).unwrap();
         assert!(batch
             .verify_clear(
-                &fixture.source().values,
-                &fixture.source().points,
+                &Stage5InputClaims::from_stage4(&fixture.stage4),
+                &fixture.source(),
                 &challenges,
                 &claims,
                 &proof.recorded.proof,

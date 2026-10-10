@@ -13,6 +13,7 @@ use crate::ids::{BytecodeAddressDerived, DerivedId};
 use crate::points::{PointsError, WordLift};
 pub use crate::public::bytecode::BytecodeReadPoints;
 
+/// Address relation over a low-variable-first bytecode index, using earlier router and state points.
 #[derive(Clone)]
 pub struct BytecodeReadAddress<F: JoltField> {
     symbolic: BytecodeReadAddressSymbolic,
@@ -22,6 +23,8 @@ pub struct BytecodeReadAddress<F: JoltField> {
 }
 
 impl<F: JoltField> BytecodeReadAddress<F> {
+    /// Checks the bytecode exponent and earlier bit, kind, register and cycle dimensions.
+    /// Entry and final PCs come from checked inputs; all word points share the six low bit variables.
     pub fn new(
         log_K_bytecode: usize,
         points: BytecodeReadPoints<F>,
@@ -46,9 +49,11 @@ impl<F: JoltField> BytecodeReadAddress<F> {
         })
     }
 
+    /// Returns the earlier low-variable-first points used by public bytecode folds.
     pub fn public_points(&self) -> &BytecodeReadPoints<F> {
         &self.points
     }
+    /// Builds word, selector and update points with their cycle coordinates last.
     pub fn input_points(&self) -> BytecodeReadAddressInputClaims<Vec<F>> {
         self.points.input_points()
     }

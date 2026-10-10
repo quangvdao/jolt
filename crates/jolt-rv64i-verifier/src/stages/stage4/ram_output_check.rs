@@ -14,6 +14,8 @@ use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
 
+/// Final-RAM agreement over low-variable-first addresses, at one fixed six-coordinate bit point.
+/// `new` checks the point bounds and public I/O interval while sharing its words.
 #[derive(Clone)]
 pub struct RamOutputCheck<F: JoltField> {
     symbolic: RamOutputCheckSymbolic,
@@ -22,6 +24,8 @@ pub struct RamOutputCheck<F: JoltField> {
     io: Arc<PublicIoMemory>,
 }
 impl<F: JoltField> RamOutputCheck<F> {
+    /// Establishes a six-coordinate bit point and at least five address coordinates.
+    /// Rejects malformed dimensions or an I/O interval outside that address cube.
     pub fn new(
         tau: Vec<F>,
         r_bit: Vec<F>,
@@ -48,12 +52,15 @@ impl<F: JoltField> RamOutputCheck<F> {
             io,
         })
     }
+    /// Low-variable-first output-check address challenge.
     pub fn tau(&self) -> &[F] {
         &self.tau
     }
+    /// Six bit coordinates, low variable first, shared by public and final words.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// Public I/O words and mask validated by `new`, borrowed from the shared allocation.
     pub fn io(&self) -> &PublicIoMemory {
         &self.io
     }

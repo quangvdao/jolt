@@ -66,16 +66,17 @@ pub struct OuterF2Options {
     pub monomial_rounds: usize,
     /// Use nibble rather than byte lifts in the second round (default false).
     pub nibble_round_2: bool,
-    /// Fold group weights into the window lifts (default false).
+    /// Fold group weights into the window lifts (default true).
     pub folded_group_weights: bool,
 }
 
+/// Uses three monomial rounds, byte lifts in round two, and folded group weights.
 impl Default for OuterF2Options {
     fn default() -> Self {
         Self {
             monomial_rounds: 3,
             nibble_round_2: false,
-            folded_group_weights: false,
+            folded_group_weights: true,
         }
     }
 }

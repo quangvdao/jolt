@@ -13,7 +13,8 @@ use jolt_field::{Field, F128};
 use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
-use jolt_rv64i_kernels::par::CycleChunks;
+use jolt_rv64i_kernels::par::{CycleChunks, ParError};
+use jolt_rv64i_kernels::round::RoundError;
 use jolt_rv64i_kernels::router::claims::claims_pass;
 use jolt_rv64i_kernels::router::cycle::{RouterCycleMember, RoutersCycleCore};
 use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout};
@@ -906,6 +907,11 @@ fn malformed_router_sources_and_points_return_named_errors() {
         })
     ));
     let lifted = source_lift(&trace, &shapes, &x).unwrap();
+    let partial_lifts = source_lift(&trace, &shapes[..1], &x).unwrap();
+    assert!(matches!(
+        claims_pass(&trace, &partial_lifts.lifts, &[3], &plan, &r_cycle),
+        Err(RouterError::MissingRetainedWord { word: 3 })
+    ));
     assert!(matches!(
         claims_pass(&trace, &lifted.lifts, &[0], &plan, &r_cycle[..2]),
         Err(RouterError::PointLength {
@@ -1383,7 +1389,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
 fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
     assert!(matches!(
         RouterShortCore::new(&[], &[], vec![]),
-        Err(RouterError::Factors { count: 0 })
+        Err(RouterError::EmptyShapes)
     ));
     let shapes = synthetic_router_shapes().unwrap();
     assert!(matches!(
@@ -1403,10 +1409,7 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
             .collect(),
     )
     .unwrap();
-    assert!(matches!(
-        core.final_values(),
-        Err(RouterError::TableLength { .. })
-    ));
+    assert!(matches!(core.final_values(), Err(RouterError::Unfinished)));
     let source = Arc::new(TinyTrace {
         words: vec![0; 2],
         digits: vec![Some(0); 2],
@@ -1418,7 +1421,7 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
     ];
     assert!(matches!(
         RouterShortCore::new(&mixed, &[], vec![vec![ZERO; 64]; 2]),
-        Err(RouterError::PointLength {
+        Err(RouterError::SlotCount {
             expected: 6,
             actual: 7
         })
@@ -1431,8 +1434,14 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
         vec![vec![ZERO; 2]],
     )
     .unwrap();
-    assert!(core.members()[0].final_values().is_err());
-    assert!(RoutersCycleCore::new(&trace, &[], &[ZERO], &[], vec![]).is_err());
+    assert!(matches!(
+        core.members()[0].final_values(),
+        Err(RouterError::Unfinished)
+    ));
+    assert!(matches!(
+        RoutersCycleCore::new(&trace, &[], &[ZERO], &[], vec![]),
+        Err(RouterError::EmptyShapes)
+    ));
     assert!(RoutersCycleCore::new(&trace, &mixed[..1], &[ZERO], &[ZERO; 6], vec![]).is_err());
 }
 
@@ -1512,10 +1521,10 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     })];
     assert!(matches!(
         RoutersCycleCore::new(&trace, &shapes, &[ZERO], &[ZERO; 14], vec![vec![ZERO; 2]]),
-        Err(RouterError::FactorWidth {
+        Err(RouterError::FactorCapacity {
             column: 1,
-            expected: 7,
-            actual: 8
+            bound: 7,
+            width: 8
         })
     ));
     let trace = ValidatedTrace::new(Arc::new(TinyTrace {
@@ -1526,10 +1535,7 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     let shapes = vec![tiny_shape(WordSlot::Zero, 6, vec![])];
     assert!(matches!(
         RoutersCycleCore::new(&trace, &shapes, &[], &[ZERO; 6], vec![vec![ZERO]]),
-        Err(RouterError::PointLength {
-            expected: 1,
-            actual: 0
-        })
+        Err(RouterError::Round(RoundError::EmptyPoint))
     ));
 }
 
@@ -1640,4 +1646,13 @@ fn singular_cycle_batch_endpoints_match_definitions_for_all_factor_counts() {
     for reverse in [false, true] {
         prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
     }
+}
+
+#[test]
+fn router_geometry_error_preserves_the_dependency_rejection() {
+    let error = CycleChunks::new(1, 2).unwrap_err();
+    assert_eq!(
+        RouterError::from(error),
+        RouterError::Geometry(ParError::Round { log_t: 1, round: 2 })
+    );
 }

@@ -189,7 +189,7 @@ impl RoutersCycleCore {
             });
         }
         if shapes.is_empty() {
-            return Err(RouterError::Factors { count: 0 });
+            return Err(RouterError::EmptyShapes);
         }
         for shape in shapes {
             shape.check_source(source.as_ref())?;
@@ -216,12 +216,8 @@ impl RoutersCycleCore {
                 });
             }
         }
-        let geometry =
-            CycleChunks::new(log_t, 0).map_err(|_| RouterError::Dimension { variables: log_t })?;
-        let eq = split_eq(r_cycle, None).map_err(|_| RouterError::PointLength {
-            expected: 1,
-            actual: r_cycle.len(),
-        })?;
+        let geometry = CycleChunks::new(log_t, 0)?;
+        let eq = split_eq(r_cycle, None)?;
         let mut factors: Vec<SelectorFactor> = Vec::new();
         let mut recipe = Recipe {
             columns: Vec::new(),
@@ -233,10 +229,10 @@ impl RoutersCycleCore {
             for factor in value.factors() {
                 let bits = source.bits(factor.column);
                 if bits >= 8 {
-                    return Err(RouterError::FactorWidth {
+                    return Err(RouterError::FactorCapacity {
                         column: factor.column,
-                        expected: 7,
-                        actual: bits,
+                        bound: 7,
+                        width: bits,
                     });
                 }
                 let index = factors
@@ -322,12 +318,7 @@ impl RoutersCycleCore {
             widths: factors.iter().map(|factor| factor.slots.len()).collect(),
             cycles,
         };
-        let columns =
-            LazyFoldedRa::try_new(tables, compact).map_err(|_| RouterError::TableLength {
-                table: "router selector tables",
-                expected: width,
-                actual: width,
-            })?;
+        let columns = LazyFoldedRa::try_new(tables, compact)?;
         let sources = source_tables
             .into_iter()
             .map(|table| SourceTable {
@@ -335,8 +326,7 @@ impl RoutersCycleCore {
                 scratch: unsafe_allocate_zero_vec(cycles / 2),
             })
             .collect();
-        let pairs_geometry =
-            CycleChunks::new(log_t, 1).map_err(|_| RouterError::Dimension { variables: log_t })?;
+        let pairs_geometry = CycleChunks::new(log_t, 1)?;
         let partial_len = checked_len::<Partial>(
             (pairs_geometry.len() / pairs_geometry.chunk_len())
                 .checked_mul(shapes.len())
@@ -412,17 +402,9 @@ impl RouterCycleMember {
     /// This member must have finished; earlier reads return an error. Complete
     /// every member's `finish_rounds` before reading the batch's final values.
     pub fn final_values(&self) -> Result<(F128, Vec<F128>), RouterError> {
-        let shared = self.shared.lock().map_err(|_| RouterError::TableLength {
-            table: "router finished state",
-            expected: 1,
-            actual: 0,
-        })?;
+        let shared = self.shared.lock().map_err(|_| RouterError::Poisoned)?;
         if shared.finished.is_none() || !self.finished {
-            return Err(RouterError::TableLength {
-                table: "router final values",
-                expected: 1,
-                actual: 0,
-            });
+            return Err(RouterError::Unfinished);
         }
         Ok((
             shared.final_sources[self.shape],

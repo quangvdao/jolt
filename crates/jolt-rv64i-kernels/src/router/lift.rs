@@ -525,9 +525,7 @@ pub fn source_lift<S: CycleSource>(
     let log_t = source.cycles().ilog2() as usize;
     let _ = table_len(log_t)?;
     let _ = table_len(source.bytecode_rows().ilog2() as usize)?;
-    let geometry = CycleChunks::new(log_t, 0).map_err(|_| RouterError::Dimension {
-        variables: source.cycles().ilog2() as usize,
-    })?;
+    let geometry = CycleChunks::new(log_t, 0)?;
     let mut source_tables: Vec<Vec<F128>> = shapes
         .iter()
         .map(|_| unsafe_allocate_zero_vec(source.cycles()))

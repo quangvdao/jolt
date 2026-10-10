@@ -105,7 +105,7 @@ impl RouterShortCore {
         w: &[F128],
         folds: Vec<Vec<F128>>,
     ) -> Result<Self, RouterError> {
-        let first = shapes.first().ok_or(RouterError::Factors { count: 0 })?;
+        let first = shapes.first().ok_or(RouterError::EmptyShapes)?;
         if folds.len() != shapes.len() {
             return Err(RouterError::TableLength {
                 table: "fold list",
@@ -124,7 +124,7 @@ impl RouterShortCore {
         let output_weights = eq_table(w, None);
         for (shape, fold) in shapes.iter().zip(folds) {
             if shape.slots() != slots {
-                return Err(RouterError::PointLength {
+                return Err(RouterError::SlotCount {
                     expected: slots,
                     actual: shape.slots(),
                 });
@@ -204,13 +204,9 @@ impl RouterShortCore {
     }
 
     /// After the final bind, returns `(Fold(x), Idle(x) * W(x))` in shape order.
-    /// Calls before completion return `TableLength` for the unfinished cube.
+    /// Calls before completion return `RouterError::Unfinished`.
     pub fn final_values(&self) -> Result<Vec<(F128, F128)>, RouterError> {
-        self.values.clone().ok_or(RouterError::TableLength {
-            table: "finished short fold",
-            expected: 1,
-            actual: self.shapes.first().map_or(0, |shape| shape.fold.len()),
-        })
+        self.values.clone().ok_or(RouterError::Unfinished)
     }
 }
 

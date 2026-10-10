@@ -166,7 +166,7 @@ pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
 
 #[inline]
 pub(super) fn reduce192(product: Unreduced192) -> [u64; 3] {
-    product.map(reduce_word64)
+    Word::reduce3(product)
 }
 
 #[inline]

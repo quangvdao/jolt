@@ -4,7 +4,9 @@ use std::arch::x86_64::{
 };
 
 #[cfg(target_feature = "gfni")]
-use std::arch::x86_64::{_mm_cvtsi128_si64, _mm_gf2p8affine_epi64_epi8, _mm_set1_epi64x};
+use std::arch::x86_64::{
+    _mm_cvtsi128_si64, _mm_gf2p8affine_epi64_epi8, _mm_set1_epi64x, _mm_set_epi64x,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct Word(__m128i);
@@ -23,23 +25,21 @@ impl Word {
             // transforms act on each byte independently; the shifts place
             // byte carries and the x^64 overflow in their reduced positions.
             unsafe {
-                let high = _mm_srli_si128::<8>(self.0);
-                let low = _mm_gf2p8affine_epi64_epi8::<0>(
+                let high = _mm_shuffle_epi32::<0xee>(self.0);
+                let image = _mm_gf2p8affine_epi64_epi8::<0>(
                     high,
-                    _mm_set1_epi64x(affine_matrix(0, 0) as i64),
+                    _mm_set_epi64x(
+                        const { affine_matrix(0, 8) } as i64,
+                        const { affine_matrix(0, 0) } as i64,
+                    ),
                 );
-                let carry = _mm_gf2p8affine_epi64_epi8::<0>(
-                    high,
-                    _mm_set1_epi64x(affine_matrix(0, 8) as i64),
-                );
+                let carry = _mm_slli_si128::<1>(_mm_srli_si128::<8>(image));
                 let overflow = _mm_gf2p8affine_epi64_epi8::<0>(
                     _mm_srli_epi64::<56>(high),
-                    _mm_set1_epi64x(affine_matrix(56, 0) as i64),
+                    _mm_set1_epi64x(const { affine_matrix(56, 0) } as i64),
                 );
-                let folded = _mm_xor_si128(
-                    _mm_xor_si128(self.0, low),
-                    _mm_xor_si128(_mm_slli_si128::<1>(carry), overflow),
-                );
+                let folded =
+                    _mm_xor_si128(_mm_xor_si128(self.0, image), _mm_xor_si128(carry, overflow));
                 _mm_cvtsi128_si64(folded) as u64
             }
         }

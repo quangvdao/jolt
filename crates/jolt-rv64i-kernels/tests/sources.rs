@@ -372,6 +372,128 @@ fn preparation_reads_each_digit_once_for_repeated_group_columns() {
     }
 }
 
+struct LiteralRowSource {
+    digits: Vec<[Option<usize>; 3]>,
+    digit_reads: Vec<[AtomicUsize; 3]>,
+}
+
+impl CycleSource for LiteralRowSource {
+    fn cycles(&self) -> usize {
+        self.digits.len()
+    }
+    fn trace_words(&self) -> usize {
+        0
+    }
+    fn trace_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        2
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        [0, 1, 1, 0][cycle % 4]
+    }
+    fn digit_columns(&self) -> usize {
+        3
+    }
+    fn bits(&self, _: usize) -> usize {
+        2
+    }
+    fn by_row(&self, column: usize) -> bool {
+        column == 0 || column == 2
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        let _previous = self.digit_reads[cycle][column].fetch_add(1, Ordering::Relaxed);
+        self.digits[cycle][column]
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        [[Some(0), None, Some(2)], [Some(1), None, Some(3)]][row][column]
+    }
+}
+
+#[test]
+fn preparation_checks_distinct_row_columns_without_rereading_valid_digits() {
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let source = Arc::new(LiteralRowSource {
+                    digits: vec![
+                        [Some(0), Some(1), Some(2)],
+                        [Some(1), None, Some(3)],
+                        [Some(1), Some(2), Some(3)],
+                        [Some(0), Some(3), Some(2)],
+                    ],
+                    digit_reads: (0..4)
+                        .map(|_| std::array::from_fn(|_| AtomicUsize::new(0)))
+                        .collect(),
+                });
+                let (_, groups) = ValidatedTrace::prepare(
+                    Arc::clone(&source),
+                    PrepareRequest {
+                        present: vec![vec![2, 0, 2]],
+                        optional: vec![vec![1, 2, 0]],
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    groups.present[0].bytes(),
+                    &[2, 0, 2, 3, 1, 3, 3, 1, 3, 2, 0, 2]
+                );
+                assert_eq!(
+                    groups.optional[0].bytes(),
+                    &[2, 3, 1, 0, 4, 2, 3, 4, 2, 4, 3, 1]
+                );
+                for reads in source.digit_reads.iter().flatten() {
+                    assert_eq!(reads.load(Ordering::Relaxed), 1);
+                }
+            });
+    }
+}
+
+#[test]
+fn validation_reports_the_only_fault_at_the_final_partial_tile_cycle() {
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut digits = [
+                    [Some(0), Some(1), Some(2)],
+                    [Some(1), None, Some(3)],
+                    [Some(1), Some(2), Some(3)],
+                    [Some(0), Some(3), Some(2)],
+                ]
+                .repeat(2048);
+                digits[8191][1] = Some(4);
+                let source = Arc::new(LiteralRowSource {
+                    digits,
+                    digit_reads: (0..8192)
+                        .map(|_| std::array::from_fn(|_| AtomicUsize::new(0)))
+                        .collect(),
+                });
+                assert_eq!(
+                    ValidatedTrace::new(source).err(),
+                    Some(SourceError::Digit {
+                        column: 1,
+                        cycle: 8191,
+                        digit: 4,
+                        bound: 4,
+                    })
+                );
+            });
+    }
+}
+
 #[test]
 fn preparation_rejects_request_columns_and_widths_before_digit_reads() {
     for (request, expected) in [

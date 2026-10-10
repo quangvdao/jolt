@@ -3805,6 +3805,8 @@ dependencies = [
  "jolt-program",
  "jolt-riscv",
  "jolt-rv64i-arith",
+ "jolt-rv64i-prover",
+ "jolt-rv64i-verifier",
  "rayon",
  "thiserror 2.0.20",
  "tracer",

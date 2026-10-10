@@ -7,7 +7,7 @@
 //! calling the polynomial layer's infallible evaluators.
 
 use jolt_field::JoltField;
-use jolt_poly::{EqPlusOnePolynomial, EqPolynomial, LtPolynomial};
+use jolt_poly::{EqPlusOnePolynomial, EqPolynomial};
 use jolt_rv64i_arith::Chunk;
 use thiserror::Error;
 
@@ -69,9 +69,13 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    let x_high: Vec<F> = x.iter().rev().copied().collect();
-    let y_high: Vec<F> = y.iter().rev().copied().collect();
-    Ok(LtPolynomial::evaluate(&x_high, &y_high))
+    let mut result = F::zero();
+    let mut prefix = F::one();
+    for (&left, &right) in x.iter().zip(y).rev() {
+        result += prefix * (F::one() + left) * right;
+        prefix *= F::one() + left + right;
+    }
+    Ok(result)
 }
 
 pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
@@ -84,16 +88,33 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
-pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
-    if point.len() != 6 {
-        return Err(PointsError::Dimension {
-            expected: 6,
-            actual: point.len(),
-        });
+/// Reuses the 64 bit-equality weights for addition-only word evaluations.
+pub struct WordLift<F: JoltField> {
+    weights: Vec<F>,
+}
+impl<F: JoltField> WordLift<F> {
+    pub fn new(point: &[F]) -> Result<Self, PointsError> {
+        if point.len() != 6 {
+            return Err(PointsError::Dimension {
+                expected: 6,
+                actual: point.len(),
+            });
+        }
+        Ok(Self {
+            weights: eq_table(point)?,
+        })
     }
-    (0..64)
-        .filter(|bit| word & (1_u64 << bit) != 0)
-        .try_fold(F::zero(), |sum, bit| Ok(sum + eq_index(point, bit)?))
+    pub fn evaluate(&self, word: u64) -> F {
+        self.weights
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| word & (1_u64 << bit) != 0)
+            .map(|(_, weight)| *weight)
+            .sum()
+    }
+}
+pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
+    Ok(WordLift::new(point)?.evaluate(word))
 }
 
 pub fn chunk<F: JoltField>(

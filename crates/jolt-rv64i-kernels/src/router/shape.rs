@@ -59,11 +59,16 @@ pub enum RouterError {
     /// while holding the shared cycle state can poison its lock.
     #[error("router shared state is poisoned")]
     Poisoned,
-    #[error("factor column {column} has width {width}, exceeding the compact bound {bound}")]
-    FactorCapacity {
+    #[error("router group columns {actual:?} differ from expected {expected:?}")]
+    GroupColumns {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("router group column {column} has width {actual}, expected {expected} factor slots")]
+    GroupWidth {
         column: usize,
-        bound: usize,
-        width: usize,
+        expected: usize,
+        actual: usize,
     },
     #[error("trace word {word} has no retained lift")]
     MissingRetainedWord { word: usize },

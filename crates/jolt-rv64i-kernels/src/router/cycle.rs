@@ -4,46 +4,20 @@ use super::shape::{RouterError, RouterShape, SelectorFactor};
 use crate::par::CycleChunks;
 use crate::round::eq::{eq_table, split_eq};
 use crate::round::{coefficients_from_nodes, linear_at_nodes, quadratic, quadratic_at_nodes};
-use crate::source::{CycleSource, ValidatedTrace};
+use crate::source::OptionalGroup;
 use jolt_field::{Accumulator, F128Accumulator, Zero, F128};
-use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa};
+use jolt_kernels::optimized::lazy_ra::LazyFoldedRa;
 use jolt_poly::{GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::alloc::Layout;
-use std::num::NonZeroU8;
-use std::ops::{Add, BitXor};
+use std::ops::Add;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "test-utils")]
 use std::time::{Duration, Instant};
 
 const ZERO: F128 = F128::from_raw(0);
-
-// Option<NonZeroU8> has the all-zero representation None, the zero allocator's
-// required additive identity. The addition is only its Zero trait requirement.
-#[repr(transparent)]
-#[derive(Clone, Copy, Default)]
-struct CompactDigit(Option<NonZeroU8>);
-
-impl Add for CompactDigit {
-    type Output = Self;
-    fn add(self, other: Self) -> Self {
-        Self(NonZeroU8::new(
-            self.0
-                .map_or(0, NonZeroU8::get)
-                .bitxor(other.0.map_or(0, NonZeroU8::get)),
-        ))
-    }
-}
-impl Zero for CompactDigit {
-    fn zero() -> Self {
-        Self(None)
-    }
-    fn is_zero(&self) -> bool {
-        self.0.is_none()
-    }
-}
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Default)]
@@ -61,29 +35,6 @@ impl Zero for Partial {
     }
     fn is_zero(&self) -> bool {
         self.0.reduce() == ZERO
-    }
-}
-
-struct CompactColumns {
-    digits: Vec<CompactDigit>,
-    widths: Vec<usize>,
-    cycles: usize,
-}
-impl ChunkIndexSource for CompactColumns {
-    fn num_polys(&self) -> usize {
-        self.widths.len()
-    }
-    fn cycles(&self) -> usize {
-        self.cycles
-    }
-    #[inline]
-    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        self.digits[cycle * self.widths.len() + column]
-            .0
-            .map(|value| usize::from(value.get() - 1))
-    }
-    fn index_bound(&self, column: usize) -> Option<usize> {
-        Some(1 << self.widths[column])
     }
 }
 
@@ -142,7 +93,7 @@ struct ComputedRound {
 
 struct Shared {
     sources: Vec<SourceTable>,
-    columns: LazyFoldedRa<F128, CompactColumns>,
+    columns: LazyFoldedRa<F128, OptionalGroup>,
     eq: GruenSplitEqPolynomial<F128>,
     recipe: Recipe,
     log_t: usize,
@@ -168,19 +119,38 @@ pub struct RoutersCycleCore {
 }
 
 impl RoutersCycleCore {
-    /// Takes one `T`-element source table per shape and compiles all factor
-    /// references into one byte per cycle and distinct `(column, slots)`.
-    /// Checks point lengths, source references, table lengths, and the seven-bit
-    /// bound on each factor column needed for its one-byte digit plus absence.
-    pub fn new<S: CycleSource>(
-        source: &ValidatedTrace<S>,
+    /// Columns of distinct `(column, slots)` factors, in first-occurrence order.
+    /// A source column can appear more than once when its factors occupy
+    /// different slots. Prepare this list as one optional group for `new`.
+    pub fn columns(shapes: &[RouterShape]) -> Vec<usize> {
+        Self::factors(shapes)
+            .iter()
+            .map(|factor| factor.column)
+            .collect()
+    }
+
+    fn factors(shapes: &[RouterShape]) -> Vec<&SelectorFactor> {
+        let mut factors = Vec::new();
+        for factor in shapes.iter().flat_map(RouterShape::factors) {
+            if !factors.contains(&factor) {
+                factors.push(factor);
+            }
+        }
+        factors
+    }
+
+    /// Takes one prepared optional group and one `T`-element source table per
+    /// shape. Checks the group's column order, widths against factor slots,
+    /// points and table lengths. The group's byte buffer moves into the lazy
+    /// family without copying digits or reading the source.
+    pub fn new(
+        group: OptionalGroup,
         shapes: &[RouterShape],
         r_cycle: &[F128],
         x: &[F128],
         source_tables: Vec<Vec<F128>>,
     ) -> Result<Self, RouterError> {
-        let source = source.source();
-        let cycles = source.cycles();
+        let cycles = group.cycles();
         let log_t = cycles.ilog2() as usize;
         if r_cycle.len() != log_t {
             return Err(RouterError::PointLength {
@@ -192,7 +162,6 @@ impl RoutersCycleCore {
             return Err(RouterError::EmptyShapes);
         }
         for shape in shapes {
-            shape.check_source(source.as_ref())?;
             if x.len() != shape.slots() {
                 return Err(RouterError::PointLength {
                     expected: shape.slots(),
@@ -216,9 +185,24 @@ impl RoutersCycleCore {
                 });
             }
         }
-        let geometry = CycleChunks::new(log_t, 0)?;
+        let factors = Self::factors(shapes);
+        let expected: Vec<_> = factors.iter().map(|factor| factor.column).collect();
+        if group.columns() != expected {
+            return Err(RouterError::GroupColumns {
+                expected,
+                actual: group.columns().to_vec(),
+            });
+        }
+        for (factor, &width) in factors.iter().zip(group.widths()) {
+            if width != factor.slots.len() {
+                return Err(RouterError::GroupWidth {
+                    column: factor.column,
+                    expected: factor.slots.len(),
+                    actual: width,
+                });
+            }
+        }
         let eq = split_eq(r_cycle, None)?;
-        let mut factors: Vec<SelectorFactor> = Vec::new();
         let mut recipe = Recipe {
             columns: Vec::new(),
             degrees: Vec::new(),
@@ -227,21 +211,11 @@ impl RoutersCycleCore {
         for (shape, value) in shapes.iter().enumerate() {
             let mut columns = Vec::new();
             for factor in value.factors() {
-                let bits = source.bits(factor.column);
-                if bits >= 8 {
-                    return Err(RouterError::FactorCapacity {
-                        column: factor.column,
-                        bound: 7,
-                        width: bits,
-                    });
-                }
-                let index = factors
-                    .iter()
-                    .position(|other| other == factor)
-                    .unwrap_or_else(|| {
-                        factors.push(factor.clone());
-                        factors.len() - 1
-                    });
+                let index = factors.iter().position(|other| *other == factor).ok_or(
+                    RouterError::Factors {
+                        count: value.factors().len(),
+                    },
+                )?;
                 columns.push(index);
             }
             if shape.is_multiple_of(SHAPES_PER_BATCH) {
@@ -286,22 +260,6 @@ impl RoutersCycleCore {
             recipe.degrees.push(degree);
             recipe.columns.push(columns);
         }
-        let width = factors.len();
-        let digit_len = checked_len::<CompactDigit>(cycles.checked_mul(width), log_t)?;
-        let mut digits: Vec<CompactDigit> = unsafe_allocate_zero_vec(digit_len);
-        digits
-            .par_chunks_mut(geometry.chunk_len() * width)
-            .enumerate()
-            .for_each(|(chunk, output)| {
-                let start = chunk * geometry.chunk_len();
-                for (offset, row) in output.chunks_exact_mut(width).enumerate() {
-                    for (digit, factor) in row.iter_mut().zip(&factors) {
-                        digit.0 = source
-                            .digit(factor.column, start + offset)
-                            .and_then(|value| NonZeroU8::new((value + 1) as u8));
-                    }
-                }
-            });
         let tables = factors
             .iter()
             .map(|factor| {
@@ -311,12 +269,7 @@ impl RoutersCycleCore {
                 )
             })
             .collect();
-        let compact = CompactColumns {
-            digits,
-            widths: factors.iter().map(|factor| factor.slots.len()).collect(),
-            cycles,
-        };
-        let columns = LazyFoldedRa::try_new(tables, compact)?;
+        let columns = LazyFoldedRa::try_new(tables, group)?;
         let sources = source_tables
             .into_iter()
             .map(|table| SourceTable {

@@ -65,7 +65,7 @@ impl Zero for Partial {
 }
 
 struct CompactColumns {
-    digits: Arc<Vec<CompactDigit>>,
+    digits: Vec<CompactDigit>,
     widths: Vec<usize>,
     cycles: usize,
 }
@@ -151,7 +151,6 @@ struct Shared {
     partials: Vec<Partial>,
     finished: Option<F128>,
     failed: bool,
-    support: Option<Arc<Vec<CompactDigit>>>,
     final_sources: Vec<F128>,
     #[cfg(feature = "test-utils")]
     times: [Duration; 2],
@@ -159,9 +158,9 @@ struct Shared {
 
 /// Shared degree `2 + factors` cycle kernels for checked router shapes.
 /// Source tables must be `Source_ρ(x|src, ·)`: this is required of the caller,
-/// not checked, and detected by the verifier's final evaluation check.
+/// not checked. Detection rests on the verifier's final evaluation check against
+/// the committed source, with the sum-check's soundness error.
 /// Points and table indices have their low variable first.
-#[derive(Clone)]
 pub struct RoutersCycleCore {
     shared: Arc<Mutex<Shared>>,
     log_t: usize,
@@ -171,7 +170,8 @@ pub struct RoutersCycleCore {
 impl RoutersCycleCore {
     /// Takes one `T`-element source table per shape and compiles all factor
     /// references into one byte per cycle and distinct `(column, slots)`.
-    /// Checks point lengths, source references, table lengths and compact widths.
+    /// Checks point lengths, source references, table lengths, and the seven-bit
+    /// bound on each factor column needed for its one-byte digit plus absence.
     pub fn new<S: CycleSource>(
         source: &ValidatedTrace<S>,
         shapes: &[RouterShape],
@@ -189,7 +189,7 @@ impl RoutersCycleCore {
             });
         }
         if shapes.is_empty() {
-            return Err(RouterError::Factors { count: 0 });
+            return Err(RouterError::EmptyShapes);
         }
         for shape in shapes {
             shape.check_source(source.as_ref())?;
@@ -216,12 +216,8 @@ impl RoutersCycleCore {
                 });
             }
         }
-        let geometry =
-            CycleChunks::new(log_t, 0).map_err(|_| RouterError::Dimension { variables: log_t })?;
-        let eq = split_eq(r_cycle, None).map_err(|_| RouterError::PointLength {
-            expected: 1,
-            actual: r_cycle.len(),
-        })?;
+        let geometry = CycleChunks::new(log_t, 0)?;
+        let eq = split_eq(r_cycle, None)?;
         let mut factors: Vec<SelectorFactor> = Vec::new();
         let mut recipe = Recipe {
             columns: Vec::new(),
@@ -233,10 +229,10 @@ impl RoutersCycleCore {
             for factor in value.factors() {
                 let bits = source.bits(factor.column);
                 if bits >= 8 {
-                    return Err(RouterError::FactorWidth {
+                    return Err(RouterError::FactorCapacity {
                         column: factor.column,
-                        expected: 7,
-                        actual: bits,
+                        bound: 7,
+                        width: bits,
                     });
                 }
                 let index = factors
@@ -315,19 +311,12 @@ impl RoutersCycleCore {
                 )
             })
             .collect();
-        let digits = Arc::new(digits);
-        let support = Some(Arc::clone(&digits));
         let compact = CompactColumns {
             digits,
             widths: factors.iter().map(|factor| factor.slots.len()).collect(),
             cycles,
         };
-        let columns =
-            LazyFoldedRa::try_new(tables, compact).map_err(|_| RouterError::TableLength {
-                table: "router selector tables",
-                expected: width,
-                actual: width,
-            })?;
+        let columns = LazyFoldedRa::try_new(tables, compact)?;
         let sources = source_tables
             .into_iter()
             .map(|table| SourceTable {
@@ -335,8 +324,7 @@ impl RoutersCycleCore {
                 scratch: unsafe_allocate_zero_vec(cycles / 2),
             })
             .collect();
-        let pairs_geometry =
-            CycleChunks::new(log_t, 1).map_err(|_| RouterError::Dimension { variables: log_t })?;
+        let pairs_geometry = CycleChunks::new(log_t, 1)?;
         let partial_len = checked_len::<Partial>(
             (pairs_geometry.len() / pairs_geometry.chunk_len())
                 .checked_mul(shapes.len())
@@ -360,7 +348,6 @@ impl RoutersCycleCore {
             partials: unsafe_allocate_zero_vec(partial_len),
             finished: None,
             failed: false,
-            support,
             final_sources: Vec::with_capacity(shapes.len()),
             #[cfg(feature = "test-utils")]
             times: [Duration::ZERO; 2],
@@ -373,7 +360,9 @@ impl RoutersCycleCore {
     }
 
     /// One handle per shape, in shape order. Handles share source and selector
-    /// transitions; the batch may visit them in any order each round.
+    /// transitions. A member's messages and final values do not depend on which
+    /// other members are driven or on the order of the first call each round.
+    /// Driven members must use the same round challenges and finish challenge.
     pub fn members(&self) -> Vec<RouterCycleMember> {
         (0..self.shapes)
             .map(|shape| RouterCycleMember {
@@ -399,7 +388,8 @@ impl RoutersCycleCore {
 
 /// One equality-weighted shape member of a shared router cycle sumcheck.
 /// Honest input claims are required of the caller, not checked by division
-/// recovery, and detected by the verifier's final evaluation check.
+/// recovery. Detection rests on the verifier's final evaluation check against
+/// the committed source, with the sum-check's soundness error.
 pub struct RouterCycleMember {
     shared: Arc<Mutex<Shared>>,
     shape: usize,
@@ -409,20 +399,12 @@ pub struct RouterCycleMember {
 }
 impl RouterCycleMember {
     /// Returns source and factors at the cycle challenge point, in factor order.
-    /// This member must have finished; earlier reads return an error. Complete
-    /// every member's `finish_rounds` before reading the batch's final values.
+    /// This member must have finished; earlier reads return an error. Other
+    /// members need not be driven or finished before reading this member.
     pub fn final_values(&self) -> Result<(F128, Vec<F128>), RouterError> {
-        let shared = self.shared.lock().map_err(|_| RouterError::TableLength {
-            table: "router finished state",
-            expected: 1,
-            actual: 0,
-        })?;
+        let shared = self.shared.lock().map_err(|_| RouterError::Poisoned)?;
         if shared.finished.is_none() || !self.finished {
-            return Err(RouterError::TableLength {
-                table: "router final values",
-                expected: 1,
-                actual: 0,
-            });
+            return Err(RouterError::Unfinished);
         }
         Ok((
             shared.final_sources[self.shape],
@@ -468,9 +450,6 @@ impl Shared {
             #[cfg(feature = "test-utils")]
             let start = Instant::now();
             self.columns.bind(challenge);
-            if round == 4 {
-                self.support = None;
-            }
             #[cfg(feature = "test-utils")]
             {
                 self.times[1] += start.elapsed();
@@ -503,16 +482,33 @@ impl Shared {
         bind: Option<F128>,
         round: usize,
     ) -> Result<(), SumcheckError<F128>> {
-        // With a zero Gruen endpoint, division cannot recover q(1). Its
-        // exceptional node reuses the same pair products in this pass.
-        if self.eq.current_linear_evals().1 == ZERO {
-            self.accumulate_endpoint::<BIND, CACHE, true>(bind, round)
+        if matches!(self.columns, LazyFoldedRa::Lazy(_)) {
+            self.accumulate_support::<BIND, CACHE, true>(bind, round)
         } else {
-            self.accumulate_endpoint::<BIND, CACHE, false>(bind, round)
+            self.accumulate_support::<BIND, CACHE, false>(bind, round)
         }
     }
 
-    fn accumulate_endpoint<const BIND: bool, const CACHE: bool, const SINGULAR: bool>(
+    fn accumulate_support<const BIND: bool, const CACHE: bool, const SKIP: bool>(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+    ) -> Result<(), SumcheckError<F128>> {
+        // With a zero Gruen endpoint, division cannot recover q(1). Its
+        // exceptional node reuses the same pair products in this pass.
+        if self.eq.current_linear_evals().1 == ZERO {
+            self.accumulate_endpoint::<BIND, CACHE, true, SKIP>(bind, round)
+        } else {
+            self.accumulate_endpoint::<BIND, CACHE, false, SKIP>(bind, round)
+        }
+    }
+
+    fn accumulate_endpoint<
+        const BIND: bool,
+        const CACHE: bool,
+        const SINGULAR: bool,
+        const SKIP: bool,
+    >(
         &mut self,
         bind: Option<F128>,
         round: usize,
@@ -552,9 +548,7 @@ impl Shared {
         let partials = &mut self.partials[..partial_len];
         let columns = &self.columns;
         let recipe = &self.recipe;
-        let support = self.support.as_deref();
         let column_count = columns.num_polys();
-        let support_width = 2 << round;
         let inner_weights = self.eq.e_in_current();
         let outer_weights = self.eq.e_out_current();
         let challenge = bind.unwrap_or(ZERO);
@@ -581,39 +575,17 @@ impl Shared {
                             let pair = chunk * chunk_pairs + local_pair;
                             let mut cached = [(ZERO, ZERO); 8];
                             if CACHE {
-                                columns.lo_hi_all(pair, &mut cached[..columns.num_polys()]);
+                                columns.lo_hi_all(pair, &mut cached[..column_count]);
                             }
-                            let support_at = |column: usize| {
-                                support.is_none_or(|digits| {
-                                    digits[pair * support_width * column_count
-                                        ..(pair + 1) * support_width * column_count]
-                                        .chunks_exact(column_count)
-                                        .any(|row| row[column].0.is_some())
-                                })
-                            };
-                            let mut cached_support = [true; 8];
-                            if CACHE {
-                                for (column, value) in
-                                    cached_support[..column_count].iter_mut().enumerate()
-                                {
-                                    *value = support_at(column);
-                                }
-                            }
-                            let supported = |column: usize| {
+                            let sides = |column| {
                                 if CACHE {
-                                    cached_support[column]
-                                } else {
-                                    support_at(column)
-                                }
-                            };
-                            let factor = |column| {
-                                let (lo, hi) = if CACHE {
                                     cached[column]
                                 } else {
                                     columns.lo_hi(column, pair)
-                                };
-                                [lo, lo + hi]
+                                }
                             };
+                            let supported = |value| !SKIP || value != (ZERO, ZERO);
+                            let factor = |(lo, hi)| [lo, lo + hi];
                             let mut cached_sources = [[ZERO; 2]; SHAPES_PER_BATCH];
                             if BIND {
                                 for (shape, job) in jobs.iter_mut().enumerate() {
@@ -632,11 +604,12 @@ impl Shared {
                             }
                             let source = |shape: usize| cached_sources[shape];
                             for member in &recipe.singles {
-                                if !supported(member.column) {
+                                let right = sides(member.column);
+                                if !supported(right) {
                                     continue;
                                 }
                                 let left = source(member.shape);
-                                let right = factor(member.column);
+                                let right = factor(right);
                                 let sums = &mut stack_inner[member.shape];
                                 sums[0].0.fmadd(left[0] * right[0], weight);
                                 sums[1].0.fmadd(left[1] * right[1], weight);
@@ -647,12 +620,13 @@ impl Shared {
                                 }
                             }
                             for member in &recipe.doubles {
-                                if !supported(member.columns[0]) || !supported(member.columns[1]) {
+                                let first = sides(member.columns[0]);
+                                let last = sides(member.columns[1]);
+                                if !supported(first) || !supported(last) {
                                     continue;
                                 }
-                                let left =
-                                    quadratic(source(member.shape), factor(member.columns[1]));
-                                let right = factor(member.columns[0]);
+                                let left = quadratic(source(member.shape), factor(last));
+                                let right = factor(first);
                                 let node = quadratic_at_nodes(left)[0] * linear_at_nodes(right)[0];
                                 let values = [left[0] * right[0], left[2] * right[1], node];
                                 let sums = &mut stack_inner[member.shape];
@@ -667,18 +641,19 @@ impl Shared {
                                 }
                             }
                             for group in &recipe.triples {
-                                if !supported(group.columns[0]) || !supported(group.columns[1]) {
+                                let first = sides(group.columns[0]);
+                                let second = sides(group.columns[1]);
+                                if !supported(first) || !supported(second) {
                                     continue;
                                 }
-                                let left =
-                                    quadratic(factor(group.columns[0]), factor(group.columns[1]));
+                                let left = quadratic(factor(first), factor(second));
                                 let left_nodes = quadratic_at_nodes(left);
                                 for member in &group.members {
-                                    if !supported(member.column) {
+                                    let last = sides(member.column);
+                                    if !supported(last) {
                                         continue;
                                     }
-                                    let right =
-                                        quadratic(source(member.shape), factor(member.column));
+                                    let right = quadratic(source(member.shape), factor(last));
                                     let right_nodes = quadratic_at_nodes(right);
                                     let values = [
                                         left[0] * right[0],
@@ -777,7 +752,6 @@ impl Shared {
             self.final_sources.push(value);
         }
         self.sources.clear();
-        self.support = None;
         drop(std::mem::take(&mut self.partials));
         self.finished = Some(challenge);
         #[cfg(feature = "test-utils")]

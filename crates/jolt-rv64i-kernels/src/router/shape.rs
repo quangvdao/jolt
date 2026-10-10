@@ -1,12 +1,17 @@
 //! Checked router banks and low-first variable maps shared by every router phase.
 
-use crate::par::CycleChunks;
+use crate::packed::scatter::ScatterError;
+use crate::par::{CycleChunks, ParError};
+use crate::round::RoundError;
 use crate::source::{CycleSource, ValidatedTrace};
+use jolt_kernels::optimized::lazy_ra::LazyRaError;
 use rayon::prelude::*;
 #[cfg(feature = "test-utils")]
 use std::ops::Range;
 use std::sync::Mutex;
 use thiserror::Error;
+
+pub(crate) const BIT_VARIABLES: usize = 6;
 
 /// One source bit; absent digits contribute zero to both digit entry kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +49,39 @@ pub enum SlotVariable {
 /// Invalid router geometry, source references or pass storage.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RouterError {
+    #[error("at least one router shape is required")]
+    EmptyShapes,
+    #[error("shape has {actual} slots, expected the common slot count {expected}")]
+    SlotCount { expected: usize, actual: usize },
+    #[error("router final values require every last bind to finish")]
+    Unfinished,
+    /// No public rejecting input reaches this variant: only an internal panic
+    /// while holding the shared cycle state can poison its lock.
+    #[error("router shared state is poisoned")]
+    Poisoned,
+    #[error("factor column {column} has width {width}, exceeding the compact bound {bound}")]
+    FactorCapacity {
+        column: usize,
+        bound: usize,
+        width: usize,
+    },
+    #[error("trace word {word} has no retained lift")]
+    MissingRetainedWord { word: usize },
+    #[error(transparent)]
+    Round(#[from] RoundError),
+    /// No public rejecting input reaches this variant: construction validates
+    /// the compact source dimensions and index bounds before the lazy family.
+    #[error(transparent)]
+    LazyRa(#[from] LazyRaError),
+    /// No public rejecting input reaches this variant: claims_pass allocates
+    /// both scatter buffers at the checked plan dimensions.
+    #[error(transparent)]
+    Scatter(#[from] ScatterError),
+    /// No public rejecting input reaches this variant: router passes validate
+    /// point dimensions and use the validated nonzero power-of-two cycle count
+    /// before constructing cycle geometry.
+    #[error(transparent)]
+    Geometry(#[from] ParError),
     #[error("bank length {len} is not a nonzero power of two")]
     BankLength { len: usize },
     #[error("word slot {slot} has {entries} bit entries, exceeding 64")]
@@ -187,7 +225,7 @@ impl RouterShape {
         let _ = table_len(slots)?;
         let _ = table_len(log_outputs)?;
         let mut slot_map = Vec::new();
-        for bit in 0..6 {
+        for bit in 0..BIT_VARIABLES {
             slot_map.push((bit, SlotVariable::Bit(bit)));
         }
         slot_map.extend(
@@ -215,7 +253,7 @@ impl RouterShape {
             }
         }
         let selectors = table_len(factors.iter().map(|f| f.slots.len()).sum())?;
-        let sources = table_len(6 + expected)?;
+        let sources = table_len(BIT_VARIABLES + expected)?;
         for &entry in &route {
             for (axis, value, bound) in [
                 ("output", entry.output, 1 << log_outputs),
@@ -294,6 +332,22 @@ impl RouterShape {
     /// Complete Fold table length in increasing slot order.
     pub fn fold_len(&self) -> usize {
         1 << self.slot_map.len()
+    }
+
+    pub(crate) fn fold_index(&self, source: usize, selector: usize) -> usize {
+        self.slot_map
+            .iter()
+            .enumerate()
+            .fold(0, |index, (position, &(_, variable))| {
+                let value = match variable {
+                    SlotVariable::Bit(bit) => (source >> bit) & 1,
+                    SlotVariable::Word(bit) => (source >> (BIT_VARIABLES + bit)) & 1,
+                    SlotVariable::Selector { factor, bit } => {
+                        (selector >> (self.factor_indices[factor].1 + bit)) & 1
+                    }
+                };
+                index | (value << position)
+            })
     }
 
     pub(crate) fn check_source<S: CycleSource>(&self, source: &S) -> Result<(), RouterError> {

@@ -208,7 +208,8 @@ impl Pass<'_> {
 /// the plan's cycle and row dimensions. Each cycle equality is formed once and
 /// feeds the trace accumulators and scatter in the same parallel pass.
 /// Agreement of the plan, retained lifts and immutable source is required of
-/// the caller, not checked, and incorrect word claims are detected by the verifier.
+/// the caller, not checked. Detection rests on the verifier's final evaluation
+/// check against the committed source, with the sum-check's soundness error.
 pub fn claims_pass<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     lifts: &RetainedWordLifts,
@@ -248,11 +249,7 @@ pub fn claims_pass<S: CycleSource>(
         let index = lifts
             .words
             .binary_search(&word)
-            .map_err(|_| RouterError::WordIndex {
-                bank: "retained trace",
-                index: word,
-                words: source.trace_words(),
-            })?;
+            .map_err(|_| RouterError::MissingRetainedWord { word })?;
         let table = &lifts.tables[index];
         if table.len() != source.cycles() {
             return Err(RouterError::TableLength {
@@ -263,14 +260,8 @@ pub fn claims_pass<S: CycleSource>(
         }
         tables.push(table.as_slice());
     }
-    let geometry =
-        CycleChunks::new(log_t, 0).map_err(|_| RouterError::Dimension { variables: log_t })?;
-    let (low, high) = geometry
-        .split_point(r_prime)
-        .map_err(|_| RouterError::PointLength {
-            expected: log_t,
-            actual: r_prime.len(),
-        })?;
+    let geometry = CycleChunks::new(log_t, 0)?;
+    let (low, high) = geometry.split_point(r_prime)?;
     let pass = Pass {
         geometry,
         low: eq_table(low, None),
@@ -280,12 +271,8 @@ pub fn claims_pass<S: CycleSource>(
     let mut weights = unsafe_allocate_zero_vec(source.cycles());
     let trace_words = pass.trace(plan, &mut weights);
     let mut row_weights = unsafe_allocate_zero_vec(source.bytecode_rows());
-    plan.apply_buffer(&weights, &mut row_weights)
-        .map_err(|_| RouterError::TableLength {
-            table: "scatter weights",
-            expected: plan.cycles(),
-            actual: weights.len(),
-        })?;
+    plan.apply_buffer(&weights, &mut row_weights)?;
+    drop(weights);
     let bytecode_words = pass.bytecode(source, lifts, &row_weights);
     Ok(ClaimsOutput {
         trace_words,

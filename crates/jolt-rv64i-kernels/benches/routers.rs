@@ -13,7 +13,7 @@ use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::router::claims::claims_pass;
 use jolt_rv64i_kernels::router::cycle::RoutersCycleCore;
 use jolt_rv64i_kernels::router::fold::FoldLayout;
-use jolt_rv64i_kernels::router::lift::{source_lift, RetainedWordLifts};
+use jolt_rv64i_kernels::router::lift::{source_lift_timed, RetainedWordLifts};
 use jolt_rv64i_kernels::router::shape::{
     selector_counts, synthetic_router_shapes, RouterError, RouterShape,
 };
@@ -216,10 +216,11 @@ impl ProveRounds<F128> for RouterBench {
         self.short_point.push(bind);
         let x = &self.short_point;
         let prepared = &self.prepared;
-        let lifted = source_lift(&prepared.trace, &prepared.shapes, x)
-            .map_err(|_| missing("router source lift"))?;
-        self.times[2] = lifted.cycles_time.as_nanos();
-        self.times[3] = lifted.row_tables_time.as_nanos();
+        let (lifted, [rows_time, cycles_time]) =
+            source_lift_timed(&prepared.trace, &prepared.shapes, x)
+                .map_err(|_| missing("router source lift"))?;
+        self.times[2] = cycles_time.as_nanos();
+        self.times[3] = rows_time.as_nanos();
         let claims = self
             .short
             .final_values()

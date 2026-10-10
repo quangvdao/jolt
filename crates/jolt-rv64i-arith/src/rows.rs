@@ -1,13 +1,13 @@
 //! Structured equations `Az · Bz = Cz`, with the sparse matrices derived from
 //! the same lane and polynomial forms.
 
-use crate::layout::Layout;
+use crate::layout::{set_bit, Layout};
 use crate::words::column::{
     BITS as COLUMN_BITS, CONTROL_RESIDUAL as COLUMN_CONTROL_RESIDUAL,
     LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, LESS_THAN as COLUMN_LESS_THAN, ONE as COLUMN_ONE,
     RIGHT_KEY_BIT as COLUMN_RIGHT_KEY_BIT,
 };
-use crate::words::{F2Lane, F2Words, Lane, WitnessRow, WITNESS_COLUMNS};
+use crate::words::{F2Lane, F2Words, Lane, WitnessRow, Words, WITNESS_COLUMNS};
 use jolt_field::F128;
 use jolt_r1cs::{ConstraintMatrices, SparseRow};
 use thiserror::Error;
@@ -204,6 +204,60 @@ impl PackedTerm {
                 F128::from_raw(raw),
             ));
         }
+    }
+}
+
+/// A form in either packed binary row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailForm {
+    A,
+    B,
+    C,
+}
+
+/// A packed binary row cannot be represented by the four-input tail table.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum TailError {
+    #[error("row {row} form {form:?} term {term:?} reads unsupported column {column}")]
+    UnsupportedColumn {
+        row: usize,
+        form: TailForm,
+        term: PackedTerm,
+        column: usize,
+    },
+    #[error(
+        "row {row} form {form:?} term {term:?} has coefficient {coefficient:#x} at column {column}"
+    )]
+    NonBinaryCoefficient {
+        row: usize,
+        form: TailForm,
+        term: PackedTerm,
+        column: usize,
+        coefficient: u128,
+    },
+}
+
+/// Checked binary tail bytes derived by [`RowSystem::f2_tail`] from rows 128
+/// and 129, in `LaneSource` order: A, B, C, low row first in each pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct F2Tail {
+    table: [u8; 16],
+}
+
+impl F2Tail {
+    /// Tail of one cycle, indexed by `l | r << 1 | t << 2 | k << 3`.
+    #[inline]
+    pub fn value(&self, words: &F2Words, keys_differ: bool) -> u8 {
+        let index = (words.left_key_bit & 1)
+            | ((words.right_key_bit & 1) << 1)
+            | ((words.less_than & 1) << 2)
+            | (u64::from(keys_differ) << 3);
+        self.table.get(index as usize).copied().unwrap_or(0)
+    }
+
+    /// The sixteen tail bytes in the order used by [`Self::value`].
+    pub fn table(&self) -> &[u8; 16] {
+        &self.table
     }
 }
 
@@ -492,30 +546,76 @@ impl RowSystem {
         }
     }
 
-    /// Values of rows 0..130 on the compact evaluator, using the same lane
-    /// masks and packed forms as `values` on a canonical `WitnessRow`.
-    #[inline]
-    pub fn f2_values(&self, words: &F2Words, keys_differ: bool) -> ([[u64; 3]; 2], [[F128; 3]; 2]) {
-        let lanes = self
-            .f2_lanes
-            .map(|row| LaneRows::values_from(row.ab_mask, row.lanes, |lane| words.lane(lane)));
-        let word = |i| {
-            if i == 0 {
-                1 | ((words.left_key_bit & 1) << COLUMN_LEFT_KEY_BIT)
-                    | ((words.right_key_bit & 1) << COLUMN_RIGHT_KEY_BIT)
-                    | ((words.less_than & 1) << COLUMN_LESS_THAN)
-            } else if i == self.keys_differ_column / 64 {
-                u64::from(keys_differ) << (self.keys_differ_column % 64)
-            } else {
-                0
+    /// Checks every term of rows 128 and 129 before tabulating their six bits
+    /// in `LaneSource` order on the sixteen assignments of the four inputs.
+    pub fn f2_tail(&self) -> Result<F2Tail, TailError> {
+        let packed = &self.packed;
+        let keys_differ_column = self.keys_differ_column;
+        let columns = [
+            COLUMN_ONE,
+            COLUMN_LEFT_KEY_BIT,
+            COLUMN_RIGHT_KEY_BIT,
+            COLUMN_LESS_THAN,
+            keys_differ_column,
+        ];
+        for (offset, row) in packed.iter().take(2).enumerate() {
+            for (name, form) in [
+                (TailForm::A, &row.a),
+                (TailForm::B, &row.b),
+                (TailForm::C, &row.c),
+            ] {
+                for &term in &form.terms {
+                    let mut coefficients = Vec::new();
+                    term.append_coefficients(&mut coefficients);
+                    for (column, coefficient) in coefficients {
+                        if !columns.contains(&column) {
+                            return Err(TailError::UnsupportedColumn {
+                                row: 128 + offset,
+                                form: name,
+                                term,
+                                column,
+                            });
+                        }
+                        if coefficient.to_raw() > 1 {
+                            return Err(TailError::NonBinaryCoefficient {
+                                row: 128 + offset,
+                                form: name,
+                                term,
+                                column,
+                                coefficient: coefficient.to_raw(),
+                            });
+                        }
+                    }
+                }
             }
-        };
-        let tail = std::array::from_fn(|i| {
-            self.packed
-                .get(i)
-                .map_or([F128::from_raw(0); 3], |row| row.values_from(word))
-        });
-        (lanes, tail)
+        }
+        Ok(F2Tail {
+            table: std::array::from_fn(|index| {
+                let words = Words {
+                    left_key_bit: (index & 1) as u64,
+                    right_key_bit: ((index >> 1) & 1) as u64,
+                    less_than: ((index >> 2) & 1) as u64,
+                    ..Words::default()
+                };
+                let mut bits = [0; 4];
+                set_bit(&mut bits, keys_differ_column - COLUMN_BITS, index & 8 != 0);
+                let witness = WitnessRow::assemble(&words, &bits);
+                let mut byte = 0;
+                for (offset, row) in packed.iter().take(2).enumerate() {
+                    for (column, value) in row.values(&witness).into_iter().enumerate() {
+                        byte |= (value.to_raw() as u8) << (2 * column + offset);
+                    }
+                }
+                byte
+            }),
+        })
+    }
+
+    /// Word triples of rows 0..128, from the same lane definitions as full rows.
+    #[inline]
+    pub fn f2_lanes(&self, words: &F2Words) -> [[u64; 3]; 2] {
+        self.f2_lanes
+            .map(|row| LaneRows::values_from(row.ab_mask, row.lanes, |lane| words.lane(lane)))
     }
 
     /// The two 64-row lane families, starting at rows 0 and 64.
@@ -618,15 +718,52 @@ impl RowSystem {
     reason = "test assertions use checked fixtures and panic on failure"
 )]
 mod tests {
-    use super::{PackedForm, PackedTerm, PackedTermError, RowGroup, RowSystem};
+    use super::{
+        PackedForm, PackedTerm, PackedTermError, RowGroup, RowSystem, TailError, TailForm,
+    };
     use crate::layout::Layout;
     use crate::layout::MAX_LOG_K_BYTECODE;
-    use crate::words::column::ONE as COLUMN_ONE;
+    use crate::words::column::{LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, ONE as COLUMN_ONE};
     use crate::words::{WitnessRow, WITNESS_COLUMNS};
     use jolt_field::F128;
     use jolt_r1cs::{ConstraintMatrices, SparseRow};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn tail_rejects_an_unsupported_term_even_with_zero_coefficient() {
+        let layout = Layout::new(4, 4, 0).unwrap();
+        let mut rows = RowSystem::new(&layout);
+        let term = PackedTerm::new(64, 1, 0, 0, true).unwrap();
+        rows.packed[0].a.terms.push(term);
+        assert_eq!(
+            rows.f2_tail(),
+            Err(TailError::UnsupportedColumn {
+                row: 128,
+                form: TailForm::A,
+                term,
+                column: 64,
+            })
+        );
+    }
+
+    #[test]
+    fn tail_rejects_a_nonbinary_coefficient() {
+        let layout = Layout::new(4, 4, 0).unwrap();
+        let mut rows = RowSystem::new(&layout);
+        let term = PackedTerm::new(COLUMN_LEFT_KEY_BIT as u16, 1, 0, 1, false).unwrap();
+        rows.packed[1].c.terms.push(term);
+        assert_eq!(
+            rows.f2_tail(),
+            Err(TailError::NonBinaryCoefficient {
+                row: 129,
+                form: TailForm::C,
+                term,
+                column: COLUMN_LEFT_KEY_BIT,
+                coefficient: 2,
+            })
+        );
+    }
 
     #[test]
     fn packed_descriptor_domains_and_table_entries() {

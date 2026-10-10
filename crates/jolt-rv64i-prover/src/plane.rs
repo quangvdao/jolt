@@ -238,7 +238,7 @@ impl<'w> WitnessCycles<'w> {
         let decoded = witness
             .decoded
             .get(cycle)
-            .ok_or(Rv64iProverError::CycleIndex {
+            .ok_or_else(|| Rv64iProverError::CycleIndex {
                 cycle,
                 rows: witness.decoded.len(),
             })?;
@@ -246,14 +246,14 @@ impl<'w> WitnessCycles<'w> {
         let fetched = usize::try_from(index)
             .ok()
             .and_then(|i| witness.bytecode.rows().get(i))
-            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+            .ok_or_else(|| Rv64iProverError::InvalidBytecode { cycle, index })?;
         let variant = fetched
             .variant
-            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+            .ok_or_else(|| Rv64iProverError::InvalidBytecode { cycle, index })?;
         let words = witness
             .words
             .get(cycle)
-            .ok_or(Rv64iProverError::CycleIndex {
+            .ok_or_else(|| Rv64iProverError::CycleIndex {
                 cycle,
                 rows: witness.words.len(),
             })?;

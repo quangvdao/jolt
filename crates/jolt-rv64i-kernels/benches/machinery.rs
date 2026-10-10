@@ -13,7 +13,8 @@ use jolt_rv64i_kernels::packed::buckets::{BucketError, NibbleBuckets};
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
-use jolt_rv64i_kernels::router::fold::FoldLayout;
+use jolt_rv64i_kernels::router::fold::FoldCalibration;
+use jolt_rv64i_kernels::router::shape::RouterError;
 use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
@@ -26,8 +27,6 @@ use support::allocator::CountingAllocator;
 use support::{run_machinery, MachineryKernel, RunnerError};
 use thiserror::Error;
 
-static FOLD: FoldLayout = FoldLayout::calibration(0);
-const LAYOUT: usize = FOLD.entries();
 const CHUNK: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -42,6 +41,8 @@ enum MachineryError {
     Source(#[from] SourceError),
     #[error(transparent)]
     Synth(#[from] SynthError),
+    #[error(transparent)]
+    Router(#[from] RouterError),
     #[error("unknown machinery case {name}")]
     Case { name: String },
 }
@@ -108,6 +109,7 @@ struct Inputs {
     trace: Arc<ValidatedTrace<MachinerySource>>,
     permuted: Arc<ValidatedTrace<MachinerySource>>,
     words: Vec<u64>,
+    calibration: FoldCalibration,
 }
 
 impl Inputs {
@@ -140,6 +142,7 @@ impl Inputs {
             trace,
             permuted,
             words,
+            calibration: FoldCalibration::new(0)?,
         }))
     }
     fn weight(&self, cycle: usize) -> F128 {
@@ -171,13 +174,15 @@ enum Machinery {
     Merge {
         pool: ScratchPool,
         threads: usize,
+        layout_entries: usize,
     },
 }
 
 impl Machinery {
     fn new(name: &str, inputs: Arc<Inputs>, threads: usize) -> Result<Self, MachineryError> {
+        let layout_entries = inputs.calibration.entries();
         let populated = || -> Result<ScratchPool, PoolError> {
-            let pool = ScratchPool::new(LAYOUT)?;
+            let pool = ScratchPool::new(layout_entries)?;
             let mut guards: Vec<_> = (0..threads)
                 .map(|_| pool.take())
                 .collect::<Result<_, _>>()?;
@@ -240,6 +245,7 @@ impl Machinery {
             "merge" => Ok(Self::Merge {
                 pool: populated()?,
                 threads,
+                layout_entries,
             }),
             _ => Err(MachineryError::Case {
                 name: name.to_owned(),
@@ -270,7 +276,11 @@ impl MachineryKernel for Machinery {
             Self::Lift { inputs, .. } => inputs.words.len(),
             Self::Bucket { operations, .. } => *operations,
             Self::Scatter { plan, .. } => plan.cycles(),
-            Self::Merge { threads, .. } => (2 * threads - 1) * LAYOUT,
+            Self::Merge {
+                threads,
+                layout_entries,
+                ..
+            } => (2 * threads - 1) * layout_entries,
         }
     }
     fn plan_construction_ns(&self) -> Option<f64> {
@@ -300,9 +310,15 @@ impl MachineryKernel for Machinery {
                     weights.capacity() * std::mem::size_of::<F128>(),
                 ))
             }
-            Self::Bucket { .. } | Self::Merge { .. } => Some((
+            Self::Bucket { inputs, .. } => Some((
                 0,
-                rayon::current_num_threads() * LAYOUT * std::mem::size_of::<F128>(),
+                rayon::current_num_threads()
+                    * inputs.calibration.entries()
+                    * std::mem::size_of::<F128>(),
+            )),
+            Self::Merge { layout_entries, .. } => Some((
+                0,
+                rayon::current_num_threads() * layout_entries * std::mem::size_of::<F128>(),
             )),
             Self::Lift { .. } => Some((std::mem::size_of::<WordLift>(), 0)),
         }
@@ -339,6 +355,7 @@ impl MachineryKernel for Machinery {
             }
             Self::Bucket { inputs, pool, .. } => {
                 let source = black_box(inputs.trace.source());
+                let calibration = black_box(&inputs.calibration);
                 let pool = black_box(&*pool);
                 (0..source.cycles().div_ceil(CHUNK))
                     .into_par_iter()
@@ -351,7 +368,7 @@ impl MachineryKernel for Machinery {
                             for (slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 Self::word(
                                     &mut buckets,
-                                    FOLD.variant_base(selector) / 16,
+                                    calibration.variant_base(selector)? / 16,
                                     slot,
                                     source.trace_word(word, cycle),
                                     e,
@@ -359,7 +376,7 @@ impl MachineryKernel for Machinery {
                             }
                             for (slot, column) in (5..12).enumerate() {
                                 buckets.xor(
-                                    FOLD.variant_metadata_base(selector) / 16 + slot,
+                                    calibration.variant_metadata_base(selector)? / 16 + slot,
                                     source.digit(column, cycle).unwrap_or(0),
                                     e,
                                 )?;
@@ -367,13 +384,17 @@ impl MachineryKernel for Machinery {
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets.xor(FOLD.variant_metadata_base(selector) / 16 + 7, flags, e)?;
+                            buckets.xor(
+                                calibration.variant_metadata_base(selector)? / 16 + 7,
+                                flags,
+                                e,
+                            )?;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
                                 Self::word(
                                     &mut buckets,
-                                    FOLD.shape_base(1, low + 8 * high + 64 * kind) / 16,
+                                    calibration.shape_base(1, low + 8 * high + 64 * kind)? / 16,
                                     0,
                                     source.trace_word(0, cycle),
                                     e,
@@ -383,7 +404,7 @@ impl MachineryKernel for Machinery {
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     Self::word(
                                         &mut buckets,
-                                        FOLD.shape_base(2, low + 8 * kind) / 16,
+                                        calibration.shape_base(2, low + 8 * kind)? / 16,
                                         slot,
                                         source.trace_word(word, cycle),
                                         e,
@@ -400,7 +421,7 @@ impl MachineryKernel for Machinery {
                                     };
                                     Self::word(
                                         &mut buckets,
-                                        FOLD.shape_base(3, low + 8 * high + 64 * kind) / 16,
+                                        calibration.shape_base(3, low + 8 * high + 64 * kind)? / 16,
                                         slot,
                                         word,
                                         e,
@@ -413,7 +434,7 @@ impl MachineryKernel for Machinery {
                                 for slot in 0..2 {
                                     Self::word(
                                         &mut buckets,
-                                        FOLD.shape_base(4, 0) / 16,
+                                        calibration.shape_base(4, 0)? / 16,
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         e,

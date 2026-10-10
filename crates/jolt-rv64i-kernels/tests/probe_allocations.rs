@@ -21,6 +21,7 @@ mod tests {
 
     #[test]
     fn prepared_scatter_and_bucket_passes_allocate_nothing() {
+        // Retain this pool across both measurements; Rayon worker teardown is asynchronous.
         let workers = ThreadPoolBuilder::new().num_threads(12).build().unwrap();
         let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * workers.current_num_threads();
         let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * workers.current_num_threads();

@@ -12,16 +12,17 @@ mod tests {
     use jolt_field::F128;
     use jolt_rv64i_kernels::oracle::mle_at;
     use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
-    use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout, FoldOutput};
+    use jolt_rv64i_kernels::par::CycleChunks;
+    use jolt_rv64i_kernels::router::fold::{fold_pass, FoldCalibration, FoldLayout, FoldOutput};
     use jolt_rv64i_kernels::router::shape::{
-        selector_counts, synthetic_router_shapes, BitEntry, RouterError, RouterShape,
-        SelectorFactor, SlotVariable, WordSlot,
+        selector_counts, synthetic_router_shapes, BitEntry, RouteEntry, RouterError, RouterShape,
+        RouterShapeRequest, SelectorFactor, SlotVariable, WordSlot,
     };
     use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
     use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
     use rand_chacha::rand_core::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
-    use rayon::ThreadPoolBuilder;
+    use rayon::{ThreadPool, ThreadPoolBuilder};
     use std::mem::size_of;
     use std::sync::Arc;
 
@@ -282,23 +283,20 @@ mod tests {
 
     fn with_routes(shape: &RouterShape, rng: &mut ChaCha20Rng) -> RouterShape {
         let route = (0..16)
-            .map(|_| {
-                (
-                    rng.next_u32() as usize & ((1 << shape.log_outputs()) - 1),
-                    rng.next_u32() as usize & (shape.bank().len() * 64 - 1),
-                    rng.next_u32() as usize & (shape.selectors() - 1),
-                )
+            .map(|_| RouteEntry {
+                output: rng.next_u32() as usize & ((1 << shape.log_outputs()) - 1),
+                source: rng.next_u32() as usize & (shape.bank().len() * 64 - 1),
+                selector: rng.next_u32() as usize & (shape.selectors() - 1),
             })
             .collect();
-        RouterShape::new(
-            shape.slots(),
-            shape.bank().to_vec(),
-            shape.factors().to_vec(),
-            [0, 1, 2, 3, 4, 5],
-            shape.word_slots().to_vec(),
-            shape.log_outputs(),
+        RouterShape::new(RouterShapeRequest {
+            slots: shape.slots(),
+            bank: shape.bank().to_vec(),
+            factors: shape.factors().to_vec(),
+            word_slots: shape.word_slots().to_vec(),
+            log_outputs: shape.log_outputs(),
             route,
-        )
+        })
         .unwrap()
     }
 
@@ -316,9 +314,9 @@ mod tests {
                     let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
                     let mut shapes = synthetic_router_shapes().unwrap();
                     shapes.push(
-                        RouterShape::new(
-                            9,
-                            vec![WordSlot::Bits(vec![
+                        RouterShape::new(RouterShapeRequest {
+                            slots: 9,
+                            bank: vec![WordSlot::Bits(vec![
                                 BitEntry::Indicator {
                                     column: 5,
                                     value: 0,
@@ -331,15 +329,14 @@ mod tests {
                                     value: 0,
                                 },
                             ])],
-                            vec![SelectorFactor {
+                            factors: vec![SelectorFactor {
                                 column: 10,
                                 slots: vec![6, 7, 8],
                             }],
-                            [0, 1, 2, 3, 4, 5],
-                            vec![],
-                            0,
-                            vec![],
-                        )
+                            word_slots: vec![],
+                            log_outputs: 0,
+                            route: vec![],
+                        })
                         .unwrap(),
                     );
                     let columns: Vec<_> = (0..source.digit_columns()).collect();
@@ -398,18 +395,21 @@ mod tests {
     }
 
     fn small_shape(word: WordSlot) -> RouterShape {
-        RouterShape::new(
-            6,
-            vec![word],
-            vec![SelectorFactor {
+        RouterShape::new(RouterShapeRequest {
+            slots: 6,
+            bank: vec![word],
+            factors: vec![SelectorFactor {
                 column: 0,
                 slots: vec![],
             }],
-            [0, 1, 2, 3, 4, 5],
-            vec![],
-            0,
-            vec![(0, 0, 0)],
-        )
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![RouteEntry {
+                output: 0,
+                source: 0,
+                selector: 0,
+            }],
+        })
         .unwrap()
     }
 
@@ -483,9 +483,9 @@ mod tests {
         let source = Arc::new(source);
         let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
         let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
-        let shapes = vec![RouterShape::new(
-            7,
-            vec![
+        let shapes = vec![RouterShape::new(RouterShapeRequest {
+            slots: 7,
+            bank: vec![
                 WordSlot::Bytecode(0),
                 WordSlot::Bits(vec![
                     BitEntry::One,
@@ -495,15 +495,14 @@ mod tests {
                     },
                 ]),
             ],
-            vec![SelectorFactor {
+            factors: vec![SelectorFactor {
                 column: 0,
                 slots: vec![],
             }],
-            [0, 1, 2, 3, 4, 5],
-            vec![6],
-            0,
-            vec![],
-        )
+            word_slots: vec![6],
+            log_outputs: 0,
+            route: vec![],
+        })
         .unwrap()];
         let mut rng = ChaCha20Rng::seed_from_u64(832);
         for point in [
@@ -551,6 +550,224 @@ mod tests {
         }
     }
 
+    #[test]
+    fn complete_fold_constant_prefix_preserves_unaligned_word_storage() {
+        let mut source = Trace::small(vec![
+            Some(0),
+            None,
+            Some(0),
+            Some(0),
+            None,
+            Some(0),
+            None,
+            Some(0),
+        ]);
+        let mut rng = ChaCha20Rng::seed_from_u64(837);
+        for words in &mut source.words {
+            words[0] = rng.next_u64();
+        }
+        source.bytecode[0][0] = 0x8123_4567_89ab_cdef;
+        source.widths.push(0);
+        source.by_row.push(true);
+        source.digits.push(vec![Some(0); source.cycles()]);
+        source.row_digits.push(vec![Some(0)]);
+        let source = Arc::new(source);
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let shapes = vec![
+            small_shape(WordSlot::Bits(vec![BitEntry::One])),
+            small_shape(WordSlot::Trace(0)),
+            RouterShape::new(RouterShapeRequest {
+                slots: 6,
+                bank: vec![WordSlot::Bytecode(0)],
+                factors: vec![SelectorFactor {
+                    column: 1,
+                    slots: vec![],
+                }],
+                word_slots: vec![],
+                log_outputs: 0,
+                route: vec![],
+            })
+            .unwrap(),
+            RouterShape::new(RouterShapeRequest {
+                slots: 7,
+                bank: vec![WordSlot::Trace(0), WordSlot::Bytecode(0)],
+                factors: vec![
+                    SelectorFactor {
+                        column: 0,
+                        slots: vec![],
+                    },
+                    SelectorFactor {
+                        column: 1,
+                        slots: vec![],
+                    },
+                ],
+                word_slots: vec![6],
+                log_outputs: 0,
+                route: vec![],
+            })
+            .unwrap(),
+        ];
+        let point: Vec<_> = (0..3).map(|_| random_field(&mut rng)).collect();
+        let columns = [0, 1];
+        let oracle = expected(source.as_ref(), &shapes, &point, &columns);
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+                    for choice in 0..3 {
+                        let values: Vec<_> = shapes
+                            .iter()
+                            .enumerate()
+                            .map(|(shape, geometry)| {
+                                if choice == 2 || choice == 1 && shape % 2 == 1 {
+                                    (0..geometry.selectors()).collect()
+                                } else {
+                                    vec![]
+                                }
+                            })
+                            .collect();
+                        let layout = FoldLayout::new(&trace, &shapes, &values).unwrap();
+                        check_output(
+                            &fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap(),
+                            &oracle,
+                        );
+                    }
+                });
+        }
+    }
+
+    #[test]
+    fn complete_fold_multiple_row_chunks_matches_one_oracle_on_one_and_twelve_threads() {
+        let source = Arc::new(Trace::synthetic(15, 833));
+        assert!(source.bytecode_rows() > 4096);
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let shapes = vec![RouterShape::new(RouterShapeRequest {
+            slots: 13,
+            bank: vec![WordSlot::Bytecode(0), WordSlot::Bits(vec![BitEntry::One])],
+            factors: vec![SelectorFactor {
+                column: 12,
+                slots: (7..13).collect(),
+            }],
+            word_slots: vec![6],
+            log_outputs: 0,
+            route: vec![],
+        })
+        .unwrap()];
+        let mut rng = ChaCha20Rng::seed_from_u64(834);
+        let point: Vec<_> = (0..15).map(|_| random_field(&mut rng)).collect();
+        let columns = [12, 18];
+        let oracle = expected(source.as_ref(), &shapes, &point, &columns);
+        let mut selector_oracle = vec![0; shapes[0].selectors()];
+        for cycle in 0..source.cycles() {
+            if let Some(value) = source.digit(12, cycle) {
+                selector_oracle[value] += 1;
+            }
+        }
+
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    assert_eq!(
+                        selector_counts(&trace, &shapes[0]).unwrap(),
+                        selector_oracle
+                    );
+                    let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+                    for values in [vec![], (0..8).collect(), (0..64).collect()] {
+                        let layout = FoldLayout::new(&trace, &shapes, &[values]).unwrap();
+                        check_output(
+                            &fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap(),
+                            &oracle,
+                        );
+                    }
+                });
+        }
+    }
+
+    #[test]
+    fn complete_fold_bits_wider_than_four_bits_matches_defining_sums() {
+        let mut source = Trace::small(vec![Some(0); 32]);
+        source.widths.push(5);
+        source.by_row.push(false);
+        source.digits.push(
+            (0..32)
+                .map(|j| if j == 7 { None } else { Some(j) })
+                .collect(),
+        );
+        source.row_digits.push(vec![None]);
+        let source = Arc::new(source);
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let shapes = vec![small_shape(WordSlot::Bits(vec![
+            BitEntry::Indicator {
+                column: 1,
+                value: 31,
+            },
+            BitEntry::DigitBit { column: 1, bit: 4 },
+            BitEntry::One,
+        ]))];
+        let mut rng = ChaCha20Rng::seed_from_u64(835);
+        let point: Vec<_> = (0..5).map(|_| random_field(&mut rng)).collect();
+        let oracle = expected(source.as_ref(), &shapes, &point, &[1]);
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+                    let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
+                    check_output(
+                        &fold_pass(&trace, &shapes, &point, &plan, &layout, &[1]).unwrap(),
+                        &oracle,
+                    );
+                });
+        }
+    }
+
+    #[test]
+    fn complete_fold_flag_factor_and_indicator_match_defining_sums() {
+        let source = Arc::new(Trace::small(vec![
+            Some(0),
+            None,
+            Some(0),
+            None,
+            None,
+            Some(0),
+            Some(0),
+            None,
+        ]));
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let shapes = vec![small_shape(WordSlot::Bits(vec![
+            BitEntry::Indicator {
+                column: 0,
+                value: 0,
+            },
+            BitEntry::One,
+        ]))];
+        let mut rng = ChaCha20Rng::seed_from_u64(836);
+        let point: Vec<_> = (0..3).map(|_| random_field(&mut rng)).collect();
+        let oracle = expected(source.as_ref(), &shapes, &point, &[0]);
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+                    let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
+                    check_output(
+                        &fold_pass(&trace, &shapes, &point, &plan, &layout, &[0]).unwrap(),
+                        &oracle,
+                    );
+                });
+        }
+    }
+
     fn output_bytes(output: &FoldOutput) -> usize {
         output.folds.capacity() * size_of::<Vec<F128>>()
             + output.histograms.capacity() * size_of::<Vec<F128>>()
@@ -560,57 +777,76 @@ mod tests {
                 * size_of::<F128>()
     }
 
+    fn measured_fold_allocations(log_t: usize, pool: &ThreadPool) -> usize {
+        let threads = pool.current_num_threads();
+        let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * threads;
+        let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * threads;
+        pool.install(|| {
+            let trace =
+                Arc::new(ValidatedTrace::new(Arc::new(Trace::synthetic(log_t, 830))).unwrap());
+            let shapes = synthetic_router_shapes().unwrap();
+            let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+            let values: Vec<_> = shapes.iter().map(|_| vec![]).collect();
+            let layout = FoldLayout::new(&trace, &shapes, &values).unwrap();
+            let point = vec![F128::from_raw(7); log_t];
+            let columns: Vec<_> = (0..trace.source().digit_columns()).collect();
+            drop(fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap());
+            let baseline = CountingAllocator::live_bytes();
+            let measurement = AllocationMeasurement::begin();
+            let result = fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap();
+            let stats = measurement.finish();
+            let returned = output_bytes(&result);
+            if threads == 1 {
+                assert!(
+                    stats.allocs <= 256 + runtime_allocs,
+                    "{} allocations",
+                    stats.allocs
+                );
+            }
+            assert!(
+                (returned..=returned + runtime_bytes).contains(&stats.final_bytes),
+                "log_t={log_t}, threads={threads}: live {} outside {returned}..={}",
+                stats.final_bytes,
+                returned + runtime_bytes
+            );
+            assert!((baseline + returned..=baseline + returned + runtime_bytes)
+                .contains(&CountingAllocator::live_bytes()));
+            let hist_entries = columns
+                .iter()
+                .map(|&c| 1 << trace.source().bits(c))
+                .sum::<usize>();
+            let buckets = (layout.entries() + hist_entries) * threads * size_of::<F128>();
+            let scatter = trace.source().cycles() * size_of::<F128>();
+            let chunk_weights =
+                CycleChunks::new(log_t, 0).unwrap().chunk_len() * threads * size_of::<F128>();
+            assert!(
+                stats.peak_bytes <= returned + buckets + scatter + chunk_weights + runtime_bytes,
+                "peak {} exceeds {}",
+                stats.peak_bytes,
+                returned + buckets + scatter + chunk_weights + runtime_bytes
+            );
+            drop(result);
+            assert!(
+                (baseline..=baseline + runtime_bytes).contains(&CountingAllocator::live_bytes())
+            );
+            stats.allocs
+        })
+    }
+
     #[test]
     fn fold_allocation_count_peak_and_returned_bytes_meet_pass_budget() {
-        for (log_t, threads) in [(8, 1), (14, 1), (14, 12)] {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * threads;
-            let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * threads;
-            pool.install(|| {
-                let trace =
-                    Arc::new(ValidatedTrace::new(Arc::new(Trace::synthetic(log_t, 830))).unwrap());
-                let shapes = synthetic_router_shapes().unwrap();
-                let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
-                let values: Vec<_> = shapes.iter().map(|_| vec![]).collect();
-                let layout = FoldLayout::new(&trace, &shapes, &values).unwrap();
-                let point = vec![F128::from_raw(7); log_t];
-                let columns: Vec<_> = (0..trace.source().digit_columns()).collect();
-                drop(fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap());
-                let baseline = CountingAllocator::live_bytes();
-                let measurement = AllocationMeasurement::begin();
-                let result = fold_pass(&trace, &shapes, &point, &plan, &layout, &columns).unwrap();
-                let stats = measurement.finish();
-                let returned = output_bytes(&result);
-                if threads == 1 {
-                    assert!(
-                        stats.allocs <= 256 + runtime_allocs,
-                        "{} allocations",
-                        stats.allocs
-                    );
-                }
-                assert!((returned..=returned + runtime_bytes).contains(&stats.final_bytes));
-                assert!((baseline + returned..=baseline + returned + runtime_bytes)
-                    .contains(&CountingAllocator::live_bytes()));
-                let hist_entries = columns
-                    .iter()
-                    .map(|&c| 1 << trace.source().bits(c))
-                    .sum::<usize>();
-                let buckets = (layout.entries() + hist_entries) * threads * size_of::<F128>();
-                let scatter = trace.source().cycles() * size_of::<F128>();
-                assert!(
-                    stats.peak_bytes <= returned + buckets + scatter + runtime_bytes,
-                    "peak {} exceeds {}",
-                    stats.peak_bytes,
-                    returned + buckets + scatter + runtime_bytes
-                );
-                drop(result);
-                assert!((baseline..=baseline + runtime_bytes)
-                    .contains(&CountingAllocator::live_bytes()));
-            });
-        }
+        // Reuse one pool through every measurement; Rayon worker teardown is asynchronous.
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let _ = measured_fold_allocations(8, &pool);
+        let first = measured_fold_allocations(14, &pool);
+        let later = measured_fold_allocations(17, &pool);
+        assert!(later <= first + RAYON_WORKER_ALLOWANCE.allocs);
+    }
+
+    #[test]
+    fn fold_twelve_thread_allocation_peak_and_returned_bytes_meet_pass_budget() {
+        let pool = ThreadPoolBuilder::new().num_threads(12).build().unwrap();
+        let _ = measured_fold_allocations(17, &pool);
     }
 
     #[test]
@@ -619,15 +855,21 @@ mod tests {
             column: 0,
             slots: vec![],
         };
-        let make = |slots, bank, factors, bit_slots, word_slots, outputs, route| {
-            RouterShape::new(slots, bank, factors, bit_slots, word_slots, outputs, route)
+        let make = |slots, bank, factors, word_slots, outputs, route| {
+            RouterShape::new(RouterShapeRequest {
+                slots,
+                bank,
+                factors,
+                word_slots,
+                log_outputs: outputs,
+                route,
+            })
         };
         assert_eq!(
             make(
                 8,
                 vec![WordSlot::Zero; 3],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![6],
                 0,
                 vec![]
@@ -639,7 +881,6 @@ mod tests {
                 6,
                 vec![WordSlot::Bits(vec![BitEntry::Zero; 65])],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![],
                 0,
                 vec![]
@@ -655,7 +896,6 @@ mod tests {
                     6,
                     vec![WordSlot::Zero],
                     vec![factor.clone(); count],
-                    [0, 1, 2, 3, 4, 5],
                     vec![],
                     0,
                     vec![]
@@ -668,7 +908,6 @@ mod tests {
                 8,
                 vec![WordSlot::Zero; 4],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![6],
                 0,
                 vec![]
@@ -683,7 +922,6 @@ mod tests {
                 7,
                 vec![WordSlot::Zero; 2],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![5],
                 0,
                 vec![]
@@ -695,24 +933,11 @@ mod tests {
                 7,
                 vec![WordSlot::Zero; 2],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![7],
                 0,
                 vec![]
             ),
             Err(RouterError::SlotRange { slot: 7, slots: 7 })
-        );
-        assert_eq!(
-            make(
-                7,
-                vec![WordSlot::Zero],
-                vec![factor.clone()],
-                [6, 1, 2, 3, 4, 5],
-                vec![],
-                0,
-                vec![]
-            ),
-            Err(RouterError::BitSlot { bit: 0, slot: 6 })
         );
         for (triple, axis, bound) in [
             ((1, 0, 0), "output", 1),
@@ -724,10 +949,13 @@ mod tests {
                     6,
                     vec![WordSlot::Zero],
                     vec![factor.clone()],
-                    [0, 1, 2, 3, 4, 5],
                     vec![],
                     0,
-                    vec![triple]
+                    vec![RouteEntry {
+                        output: triple.0,
+                        source: triple.1,
+                        selector: triple.2
+                    }]
                 ),
                 Err(RouterError::Route {
                     triple,
@@ -742,7 +970,6 @@ mod tests {
                 variables,
                 vec![WordSlot::Zero],
                 vec![factor.clone()],
-                [0, 1, 2, 3, 4, 5],
                 vec![],
                 0,
                 vec![]
@@ -754,7 +981,6 @@ mod tests {
                 6,
                 vec![WordSlot::Zero],
                 vec![factor],
-                [0, 1, 2, 3, 4, 5],
                 vec![],
                 variables,
                 vec![]
@@ -822,33 +1048,31 @@ mod tests {
                 },
             ),
         ] {
-            let shape = RouterShape::new(
-                6,
-                vec![word],
-                vec![SelectorFactor {
+            let shape = RouterShape::new(RouterShapeRequest {
+                slots: 6,
+                bank: vec![word],
+                factors: vec![SelectorFactor {
                     column: 18,
                     slots: vec![],
                 }],
-                [0, 1, 2, 3, 4, 5],
-                vec![],
-                0,
-                vec![],
-            )
+                word_slots: vec![],
+                log_outputs: 0,
+                route: vec![],
+            })
             .unwrap();
             assert_eq!(selector_counts(&trace, &shape), Err(error));
         }
-        let column = RouterShape::new(
-            6,
-            vec![WordSlot::Zero],
-            vec![SelectorFactor {
+        let column = RouterShape::new(RouterShapeRequest {
+            slots: 6,
+            bank: vec![WordSlot::Zero],
+            factors: vec![SelectorFactor {
                 column: 21,
                 slots: vec![],
             }],
-            [0, 1, 2, 3, 4, 5],
-            vec![],
-            0,
-            vec![],
-        )
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![],
+        })
         .unwrap();
         assert_eq!(
             selector_counts(&trace, &column),
@@ -857,18 +1081,17 @@ mod tests {
                 columns: 21
             })
         );
-        let width = RouterShape::new(
-            9,
-            vec![WordSlot::Zero],
-            vec![SelectorFactor {
+        let width = RouterShape::new(RouterShapeRequest {
+            slots: 9,
+            bank: vec![WordSlot::Zero],
+            factors: vec![SelectorFactor {
                 column: 5,
                 slots: vec![6, 7, 8],
             }],
-            [0, 1, 2, 3, 4, 5],
-            vec![],
-            0,
-            vec![],
-        )
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![],
+        })
         .unwrap();
         assert_eq!(
             selector_counts(&trace, &width),
@@ -878,6 +1101,48 @@ mod tests {
                 actual: 3
             })
         );
+    }
+
+    #[test]
+    fn fold_calibration_checks_shape_and_selector_bounds() {
+        let shapes = synthetic_router_shapes().unwrap();
+        for byte_selectors in [0, 8, shapes[0].selectors()] {
+            let calibration = FoldCalibration::new(byte_selectors).unwrap();
+            assert!(calibration.entries() > 0);
+            assert!(calibration.row_entries() > 0);
+            for (shape, geometry) in shapes.iter().enumerate() {
+                assert!(calibration.shape_base(shape, 0).is_ok());
+                assert!(calibration
+                    .shape_base(shape, geometry.selectors() - 1)
+                    .is_ok());
+                assert_eq!(
+                    calibration.shape_base(shape, geometry.selectors()),
+                    Err(RouterError::Layout {
+                        shape,
+                        selector: geometry.selectors(),
+                        bound: geometry.selectors()
+                    }),
+                );
+            }
+            for shape in [shapes.len(), usize::MAX] {
+                assert_eq!(
+                    calibration.shape_base(shape, 0),
+                    Err(RouterError::SlotRange {
+                        slot: shape,
+                        slots: shapes.len()
+                    }),
+                );
+            }
+            for selector in [shapes[0].selectors(), usize::MAX] {
+                let error = RouterError::Layout {
+                    shape: 0,
+                    selector,
+                    bound: shapes[0].selectors(),
+                };
+                assert_eq!(calibration.variant_base(selector), Err(error.clone()));
+                assert_eq!(calibration.variant_metadata_base(selector), Err(error));
+            }
+        }
     }
 
     #[test]
@@ -973,21 +1238,20 @@ mod tests {
         source.digits.extend([vec![None; 8], vec![Some(0); 8]]);
         source.row_digits.extend([vec![None], vec![None]]);
         let trace = Arc::new(ValidatedTrace::new(Arc::new(source)).unwrap());
-        let shape = RouterShape::new(
-            7,
-            vec![WordSlot::Bits(vec![BitEntry::Indicator {
+        let shape = RouterShape::new(RouterShapeRequest {
+            slots: 7,
+            bank: vec![WordSlot::Bits(vec![BitEntry::Indicator {
                 column: 1,
                 value: 0,
             }])],
-            vec![SelectorFactor {
+            factors: vec![SelectorFactor {
                 column: 2,
                 slots: vec![6],
             }],
-            [0, 1, 2, 3, 4, 5],
-            vec![],
-            0,
-            vec![],
-        )
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![],
+        })
         .unwrap();
         assert_eq!(
             FoldLayout::new(&trace, &[shape], &[vec![]]).unwrap_err(),

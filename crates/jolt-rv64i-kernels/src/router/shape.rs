@@ -1,8 +1,11 @@
 //! Checked router banks and low-first variable maps shared by every router phase.
 
+use crate::par::CycleChunks;
 use crate::source::{CycleSource, ValidatedTrace};
+use rayon::prelude::*;
 #[cfg(feature = "test-utils")]
 use std::ops::Range;
+use std::sync::Mutex;
 use thiserror::Error;
 
 /// One source bit; absent digits contribute zero to both digit entry kinds.
@@ -53,8 +56,6 @@ pub enum RouterError {
     SlotRepeated { slot: usize },
     #[error("slot {slot} is outside {slots} slots")]
     SlotRange { slot: usize, slots: usize },
-    #[error("bit variable {bit} occupies slot {slot}, expected {bit}")]
-    BitSlot { bit: usize, slot: usize },
     #[error("route {triple:?} has {axis} index outside {bound}")]
     Route {
         triple: (usize, usize, usize),
@@ -100,9 +101,31 @@ pub enum RouterError {
     },
 }
 
+/// A routing support entry in output, source-bit and selector coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RouteEntry {
+    pub output: usize,
+    pub source: usize,
+    pub selector: usize,
+}
+
+/// The bank, variable geometry and routing support checked by `RouterShape::new`.
+/// Word and factor slots list their index bits low first; bit variables occupy
+/// slots 0 through 5 by definition. Source references are checked by each pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterShapeRequest {
+    pub slots: usize,
+    pub bank: Vec<WordSlot>,
+    pub factors: Vec<SelectorFactor>,
+    pub word_slots: Vec<usize>,
+    pub log_outputs: usize,
+    pub route: Vec<RouteEntry>,
+}
+
 /// Immutable bank, factors and routing tensor geometry.
-/// `new` checks every source-independent bound. Source references are checked
-/// by the passes. No additional honest-input condition is required of the caller.
+/// `new` checks source-independent bounds; the passes check source references.
+/// Association with the intended public relation is required of the caller,
+/// not checked here, and detected by the verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterShape {
     slots: usize,
@@ -113,7 +136,7 @@ pub struct RouterShape {
     slot_map: Vec<(usize, SlotVariable)>,
     idle: Vec<usize>,
     log_outputs: usize,
-    route: Vec<(usize, usize, usize)>,
+    route: Vec<RouteEntry>,
 }
 
 pub(crate) fn table_len(variables: usize) -> Result<usize, RouterError> {
@@ -125,17 +148,17 @@ pub(crate) fn table_len(variables: usize) -> Result<usize, RouterError> {
 
 impl RouterShape {
     /// Validates the complete bank, distinct slots, bit slots 0–5, and every
-    /// route triple. Factor slots and word slots list their index bits low first.
-    /// `route` is a set: repeated triples are removed.
-    pub fn new(
-        slots: usize,
-        bank: Vec<WordSlot>,
-        factors: Vec<SelectorFactor>,
-        bit_slots: [usize; 6],
-        word_slots: Vec<usize>,
-        log_outputs: usize,
-        mut route: Vec<(usize, usize, usize)>,
-    ) -> Result<Self, RouterError> {
+    /// route entry. Factor slots and word slots list their index bits low first.
+    /// `route` is a set: repeated entries are removed.
+    pub fn new(request: RouterShapeRequest) -> Result<Self, RouterError> {
+        let RouterShapeRequest {
+            slots,
+            bank,
+            factors,
+            word_slots,
+            log_outputs,
+            mut route,
+        } = request;
         if !bank.len().is_power_of_two() {
             return Err(RouterError::BankLength { len: bank.len() });
         }
@@ -164,11 +187,8 @@ impl RouterShape {
         let _ = table_len(slots)?;
         let _ = table_len(log_outputs)?;
         let mut slot_map = Vec::new();
-        for (bit, slot) in bit_slots.into_iter().enumerate() {
-            if slot != bit {
-                return Err(RouterError::BitSlot { bit, slot });
-            }
-            slot_map.push((slot, SlotVariable::Bit(bit)));
+        for bit in 0..6 {
+            slot_map.push((bit, SlotVariable::Bit(bit)));
         }
         slot_map.extend(
             word_slots
@@ -196,15 +216,15 @@ impl RouterShape {
         }
         let selectors = table_len(factors.iter().map(|f| f.slots.len()).sum())?;
         let sources = table_len(6 + expected)?;
-        for &triple in &route {
+        for &entry in &route {
             for (axis, value, bound) in [
-                ("output", triple.0, 1 << log_outputs),
-                ("source", triple.1, sources),
-                ("selector", triple.2, selectors),
+                ("output", entry.output, 1 << log_outputs),
+                ("source", entry.source, sources),
+                ("selector", entry.selector, selectors),
             ] {
                 if value >= bound {
                     return Err(RouterError::Route {
-                        triple,
+                        triple: (entry.output, entry.source, entry.selector),
                         axis,
                         bound,
                     });
@@ -264,7 +284,7 @@ impl RouterShape {
         self.log_outputs
     }
     /// The checked, sorted routing support; fold construction never reads it.
-    pub fn route(&self) -> &[(usize, usize, usize)] {
+    pub fn route(&self) -> &[RouteEntry] {
         &self.route
     }
     /// Number of mixed-radix selector values, including unreachable values.
@@ -384,10 +404,33 @@ pub fn selector_counts<S: CycleSource>(
 ) -> Result<Vec<usize>, RouterError> {
     let source = source.source();
     shape.check_source(source.as_ref())?;
+    let geometry = CycleChunks::new(source.cycles().ilog2() as usize, 0).map_err(|_| {
+        RouterError::Dimension {
+            variables: source.cycles().ilog2() as usize,
+        }
+    })?;
+    let workers: Vec<_> = (0..rayon::current_num_threads())
+        .map(|_| Mutex::new(vec![0; shape.selectors()]))
+        .collect();
+    (0..geometry.len() / geometry.chunk_len())
+        .into_par_iter()
+        .for_each(|chunk| {
+            let worker = rayon::current_thread_index().unwrap_or(0);
+            let mut counts = workers[worker]
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let start = chunk * geometry.chunk_len();
+            for cycle in start..start + geometry.chunk_len() {
+                if let Some(h) = shape.selector(source.as_ref(), cycle, false) {
+                    counts[h] += 1;
+                }
+            }
+        });
     let mut counts = vec![0; shape.selectors()];
-    for cycle in 0..source.cycles() {
-        if let Some(h) = shape.selector(source.as_ref(), cycle, false) {
-            counts[h] += 1;
+    for worker in workers {
+        let partial = worker.into_inner().unwrap_or_else(|err| err.into_inner());
+        for (count, partial) in counts.iter_mut().zip(partial) {
+            *count += partial;
         }
     }
     Ok(counts)
@@ -430,55 +473,50 @@ pub fn synthetic_router_shapes() -> Result<Vec<RouterShape>, RouterError> {
         slots: slots.collect(),
     };
     Ok(vec![
-        RouterShape::new(
-            17,
-            variant,
-            vec![factor(12, 11..17)],
-            [0, 1, 2, 3, 4, 5],
-            vec![6, 7, 8, 9],
-            10,
-            vec![],
-        )?,
-        RouterShape::new(
-            17,
-            vec![WordSlot::Trace(0)],
-            vec![factor(10, 6..9), factor(11, 9..12), factor(13, 12..15)],
-            [0, 1, 2, 3, 4, 5],
-            vec![],
-            10,
-            vec![],
-        )?,
-        RouterShape::new(
-            17,
-            vec![WordSlot::Trace(3), WordSlot::Trace(1)],
-            vec![factor(10, 6..9), factor(14, 13..17)],
-            [0, 1, 2, 3, 4, 5],
-            vec![12],
-            10,
-            vec![],
-        )?,
-        RouterShape::new(
-            17,
-            vec![
+        RouterShape::new(RouterShapeRequest {
+            slots: 17,
+            bank: variant,
+            factors: vec![factor(12, 11..17)],
+            word_slots: vec![6, 7, 8, 9],
+            log_outputs: 10,
+            route: vec![],
+        })?,
+        RouterShape::new(RouterShapeRequest {
+            slots: 17,
+            bank: vec![WordSlot::Trace(0)],
+            factors: vec![factor(10, 6..9), factor(11, 9..12), factor(13, 12..15)],
+            word_slots: vec![],
+            log_outputs: 10,
+            route: vec![],
+        })?,
+        RouterShape::new(RouterShapeRequest {
+            slots: 17,
+            bank: vec![WordSlot::Trace(3), WordSlot::Trace(1)],
+            factors: vec![factor(10, 6..9), factor(14, 13..17)],
+            word_slots: vec![12],
+            log_outputs: 10,
+            route: vec![],
+        })?,
+        RouterShape::new(RouterShapeRequest {
+            slots: 17,
+            bank: vec![
                 WordSlot::Trace(0),
                 WordSlot::Trace(1),
                 WordSlot::Bytecode(0),
                 WordSlot::Bits(vec![BitEntry::One]),
             ],
-            vec![factor(10, 6..9), factor(11, 9..12), factor(15, 14..17)],
-            [0, 1, 2, 3, 4, 5],
-            vec![12, 13],
-            10,
-            vec![],
-        )?,
-        RouterShape::new(
-            17,
-            vec![WordSlot::Bytecode(1), WordSlot::Bytecode(2)],
-            vec![factor(16, 6..6), factor(19, 6..6)],
-            [0, 1, 2, 3, 4, 5],
-            vec![12],
-            10,
-            vec![],
-        )?,
+            factors: vec![factor(10, 6..9), factor(11, 9..12), factor(15, 14..17)],
+            word_slots: vec![12, 13],
+            log_outputs: 10,
+            route: vec![],
+        })?,
+        RouterShape::new(RouterShapeRequest {
+            slots: 17,
+            bank: vec![WordSlot::Bytecode(1), WordSlot::Bytecode(2)],
+            factors: vec![factor(16, 6..6), factor(19, 6..6)],
+            word_slots: vec![12],
+            log_outputs: 10,
+            route: vec![],
+        })?,
     ])
 }

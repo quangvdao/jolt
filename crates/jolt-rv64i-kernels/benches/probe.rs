@@ -38,9 +38,12 @@
 //! worker: the cycle-id and weight arrays occupy 20 bytes per cycle. This safe
 //! read reordering substitutes for writing pairs through a ScatterPlan.
 //!
-//! `fmadd` writes one unreduced chain per cycle, using two seeded masks per term
-//! to vary its trace-derived operands. `reduce_ns` reads and reduces those chains
-//! separately. Those stream writes/reads and the operand XORs are included.
+//! `fmadd` prepares the same twenty masked operand pairs at every chain length,
+//! accumulates zero, one, two, four, eight or twenty terms on the chunk stack,
+//! reduces nonempty chains there, and XORs each result into the chunk total.
+//! The runner fits per-cycle medians at nonzero lengths by least squares: A is
+//! the slope, R is the intercept minus the zero-length preparation/XOR baseline.
+//! The maximum absolute residual reports departures from this affine model.
 //! `merge` reports time per zero-filled or merged F128 element; its two variants
 //! count W*N and (2W-1)*N operations on N=10 MiB/16, respectively. All chunk sizes
 //! are fixed at 4096 cycles and no unit allocates during an individual chunk.
@@ -50,8 +53,8 @@
 //! | lookup ns | L per lookup | index decoding and XOR |
 //! | bucket ns | Bk per F128 update | byte/nibble decoding |
 //! | scatter ns | sct per cycle | updates and worker merge; setup excluded |
-//! | fmadd ns | A per term | operand XORs and unreduced-chain stores |
-//! | fmadd reduce_ns | R per chain | chain reads and final XOR accumulation |
+//! | fmadd fit slope_ns | A per term | fused stack chains, fixed preparation removed by fit |
+//! | fmadd fit reduction_ns | R per chain | fit intercept minus zero-length baseline |
 //! | merge ns | mrg per element | zero-fill, or zero-fill plus tree merge |
 //!
 //! This probe does not measure M. Its table-layout, stream-storage and atomic
@@ -720,57 +723,52 @@ impl Scatter {
 
 struct Fmadd {
     source: Arc<SyntheticTrace>,
-    masks: Vec<(F128, F128)>,
-    chains: Vec<F128Accumulator>,
+    masks: [(F128, F128); 20],
+    terms: usize,
 }
 
 impl Fmadd {
     fn new(source: Arc<SyntheticTrace>, terms: usize) -> Self {
         let mut rng = ChaCha20Rng::seed_from_u64(0x0066_6d61_6464);
         Self {
-            chains: vec![F128Accumulator::default(); CycleSource::cycles(source.as_ref())],
             source,
-            masks: (0..terms)
-                .map(|_| (F128::random(&mut rng), F128::random(&mut rng)))
-                .collect(),
+            masks: std::array::from_fn(|_| (F128::random(&mut rng), F128::random(&mut rng))),
+            terms,
         }
     }
 
-    fn run(&mut self) -> F128 {
+    fn run(&self) -> F128 {
         let source = black_box(&self.source);
         let masks = black_box(&self.masks);
-        self.chains
-            .par_chunks_mut(CHUNK)
-            .enumerate()
-            .for_each(|(chunk, chains)| {
-                for (offset, chain) in chains.iter_mut().enumerate() {
-                    let cycle = chunk * CHUNK + offset;
+        (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
+            .into_par_iter()
+            .map(|chunk| {
+                let start = chunk * CHUNK;
+                let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
+                let mut total = F128::from_raw(0);
+                for cycle in start..end {
                     let a = black_box(trace_value(source, cycle));
                     let b = black_box(F128::from_raw(
                         u128::from(source.trace_word(2, cycle))
                             | (u128::from(source.trace_word(3, cycle)) << 64),
                     ));
-                    let mut accumulator = F128Accumulator::default();
-                    for &(mask_a, mask_b) in masks {
-                        accumulator.fmadd(a + mask_a, b + mask_b);
-                    }
-                    *chain = accumulator;
+                    // Every length, including zero, prepares the same twenty pairs.
+                    let operands: [(F128, F128); 20] =
+                        black_box(std::array::from_fn(|i| (a + masks[i].0, b + masks[i].1)));
+                    let result = if self.terms == 0 {
+                        operands[0].0 + operands[0].1
+                    } else {
+                        let mut accumulator = F128Accumulator::default();
+                        for &(a, b) in &operands[..self.terms] {
+                            accumulator.fmadd(a, b);
+                        }
+                        accumulator.reduce()
+                    };
+                    total += result;
                 }
-            });
-        let _ = black_box(&self.chains);
-        F128::from_raw(0)
-    }
-
-    fn finish(&self) -> F128 {
-        let chains = black_box(&self.chains);
-        chains
-            .par_chunks(CHUNK)
-            .map(|chains| {
-                chains
-                    .iter()
-                    .fold(F128::from_raw(0), |sum, &chain| sum + chain.reduce())
+                black_box(total)
             })
-            .reduce(|| F128::from_raw(0), |left, right| left + right)
+            .reduce(|| F128::from_raw(0), |a, b| a + b)
     }
 }
 
@@ -834,7 +832,7 @@ enum Unit {
     Lookup(Box<Lookup>),
     Bucket(Bucket),
     Scatter(Scatter),
-    Fmadd(Fmadd),
+    Fmadd(Box<Fmadd>),
     Merge(Merge),
 }
 
@@ -909,9 +907,9 @@ impl Unit {
                     .variant
                     .strip_prefix("chain_")
                     .and_then(|terms| terms.parse::<usize>().ok())
-                    .filter(|terms| [1, 2, 4, 8, 20].contains(terms))
+                    .filter(|terms| [0, 1, 2, 4, 8, 20].contains(terms))
                     .ok_or_else(invalid)?;
-                Ok(Self::Fmadd(Fmadd::new(source, terms)))
+                Ok(Self::Fmadd(Box::new(Fmadd::new(source, terms))))
             }
             "merge" => {
                 let tree = match case.variant.as_str() {
@@ -935,10 +933,7 @@ impl ProbeKernel for Unit {
             ],
             Self::Bucket(unit) => [unit.operations, 0],
             Self::Scatter(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
-            Self::Fmadd(unit) => [
-                CycleSource::cycles(unit.source.as_ref()) * unit.masks.len(),
-                CycleSource::cycles(unit.source.as_ref()),
-            ],
+            Self::Fmadd(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
             Self::Merge(unit) => [unit.operations(), 0],
         }
     }
@@ -953,10 +948,10 @@ impl ProbeKernel for Unit {
         }
     }
 
-    fn finish(&mut self) -> F128 {
+    fn chain_terms(&self) -> Option<usize> {
         match self {
-            Self::Fmadd(unit) => unit.finish(),
-            _ => F128::from_raw(0),
+            Self::Fmadd(unit) => Some(unit.terms),
+            _ => None,
         }
     }
 }
@@ -1007,7 +1002,7 @@ fn main() -> Result<(), RunnerError> {
             });
         }
     }
-    for terms in [1, 2, 4, 8, 20] {
+    for terms in [0, 1, 2, 4, 8, 20] {
         cases.push(ProbeCase {
             unit: "fmadd",
             variant: format!("chain_{terms}"),

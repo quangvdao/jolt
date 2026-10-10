@@ -329,6 +329,51 @@ pub trait ProbeKernel: Send {
     fn finish(&mut self) -> F128 {
         F128::from_raw(0)
     }
+    fn chain_terms(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// Affine fit of fused-chain medians, with the zero-length control kept separate.
+pub struct ChainFit {
+    pub slope: f64,
+    pub intercept: f64,
+    pub baseline: f64,
+    pub reduction: f64,
+    pub residual: f64,
+}
+
+impl ChainFit {
+    fn new(points: &[(usize, f64)]) -> Option<Self> {
+        let baseline = points.iter().find(|p| p.0 == 0)?.1;
+        let fitted: Vec<_> = points.iter().filter(|p| p.0 != 0).collect();
+        if fitted.len() != 5 {
+            return None;
+        }
+        let mean_x = fitted.iter().map(|p| p.0 as f64).sum::<f64>() / 5.0;
+        let mean_y = fitted.iter().map(|p| p.1).sum::<f64>() / 5.0;
+        let variance = fitted
+            .iter()
+            .map(|p| (p.0 as f64 - mean_x).powi(2))
+            .sum::<f64>();
+        let slope = fitted
+            .iter()
+            .map(|p| (p.0 as f64 - mean_x) * (p.1 - mean_y))
+            .sum::<f64>()
+            / variance;
+        let intercept = mean_y - slope * mean_x;
+        let residual = fitted
+            .iter()
+            .map(|p| (p.1 - (intercept + slope * p.0 as f64)).abs())
+            .fold(0.0, f64::max);
+        Some(Self {
+            slope,
+            intercept,
+            baseline,
+            reduction: intercept - baseline,
+            residual,
+        })
+    }
 }
 
 /// Runs unit probes with warmed pools and resident sources excluded from timing.
@@ -369,6 +414,7 @@ where
                             message: error.to_string(),
                         })?,
                 );
+                let mut chain_points = Vec::new();
                 for case in cases.iter().filter(|case| {
                     case.profiles.contains(&profile)
                         && (options.units.is_empty()
@@ -376,8 +422,9 @@ where
                 }) {
                     let mut samples = Vec::with_capacity(options.samples);
                     let mut operations = [0; 2];
+                    let mut chain_terms = None;
                     for _ in 0..options.samples {
-                        let (sample, counts) = pool.install(|| {
+                        let (sample, (counts, terms)) = pool.install(|| {
                             let measurement = AllocationMeasurement::begin();
                             let start = Instant::now();
                             let mut kernel = construct(case, Arc::clone(&source), *threads)
@@ -386,6 +433,7 @@ where
                                 })?;
                             let construct_ns = start.elapsed().as_nanos() as f64;
                             let counts = kernel.operations();
+                            let terms = kernel.chain_terms();
                             if counts[0] == 0 {
                                 return Err(RunnerError::WorkCount {
                                     variant: case.variant.clone(),
@@ -407,13 +455,17 @@ where
                                     times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
                                     allocation,
                                 },
-                                counts,
+                                (counts, terms),
                             ))
                         })?;
                         samples.push(sample);
                         operations = counts;
+                        chain_terms = terms;
                     }
                     let primary = Sample::phase(&samples, 1, operations[0] as f64);
+                    if let Some(terms) = chain_terms {
+                        chain_points.push((terms, primary.median));
+                    }
                     let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
                     print!(
                         "probe/{}/{}/{}/{log_t}/{threads} ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={} final_bytes={} allocs={}",
@@ -436,6 +488,9 @@ where
                         );
                     }
                     println!();
+                }
+                if let Some(fit) = ChainFit::new(&chain_points) {
+                    println!("probe/fmadd/fit/{}/{log_t}/{threads} slope_ns={:.6} intercept_ns={:.6} baseline_ns={:.6} reduction_ns={:.6} residual_ns={:.6}", profile.name(), fit.slope, fit.intercept, fit.baseline, fit.reduction, fit.residual);
                 }
             }
         }

@@ -2,11 +2,13 @@
 
 use crate::error::Rv64iProverError;
 use crate::plane::{Rv64iPlane, Rv64iWitness};
+use jolt_claims::{InputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
 use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_arith::{RowSystem, WitnessRow, WITNESS_COLUMNS};
+use jolt_rv64i_verifier::claims::spartan_inner::{SpartanInnerInputClaims, SpartanInnerSymbolic};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, InnerDerived, OpeningId, OuterDerived, RelationId, RowBlock,
     VirtualPolynomial,
@@ -16,6 +18,7 @@ use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::{SpartanOuterF128, SpartanOuterF2};
 use jolt_rv64i_verifier::stages::stage2::SpartanInner;
 use std::collections::BTreeMap;
+use std::fmt::Display;
 
 fn row(witness: &Rv64iWitness, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
     let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
@@ -53,7 +56,7 @@ pub fn witness_column(
     ))
 }
 
-fn geometry(error: impl std::fmt::Display) -> KernelError<F128> {
+fn geometry(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
         reason: error.to_string(),
     }
@@ -170,18 +173,51 @@ impl PrepareKernel<F128, SpartanInner<F128>, Rv64iPlane> for SpartanInnerPrepare
         *routed
             .get_mut(16)
             .ok_or_else(|| geometry("routed column exceeds the witness domain"))? += F128::one();
-        let mut matrix = Vec::with_capacity(WITNESS_COLUMNS);
-        for c in 0..WITNESS_COLUMNS {
-            let w: Vec<_> = (0..10)
-                .map(|i| F128::from_u64(((c >> i) & 1) as u64))
-                .collect();
-            matrix.push(
-                inputs
-                    .relation
-                    .matrix_weight(&w, inputs.challenges)
-                    .map_err(geometry)?,
-            );
-        }
+        let matrices = RowMatrices::new(&witness.layout);
+        let rho_f2 = inputs
+            .points
+            .az_f2
+            .get(..8)
+            .ok_or_else(|| geometry("binary row point is missing its row coordinates"))?;
+        let rho_f128 = inputs
+            .points
+            .az_f128
+            .get(..matrices.f128_row_variables())
+            .ok_or_else(|| geometry("extension row point is missing its row coordinates"))?;
+        let expression = SpartanInnerSymbolic.input_expression::<F128>();
+        let matrix = matrices
+            .column_evaluations(rho_f2, rho_f128)
+            .map_err(geometry)?
+            .into_iter()
+            .map(|[[az_f2, bz_f2, cz_f2], [az_f128, bz_f128, cz_f128]]| {
+                let columns = SpartanInnerInputClaims {
+                    az_f2,
+                    bz_f2,
+                    cz_f2,
+                    az_f128,
+                    bz_f128,
+                    cz_f128,
+                };
+                expression.try_evaluate(
+                    |id| {
+                        columns
+                            .resolve_input(id)
+                            .ok_or_else(|| geometry("matrix fold references an absent row block"))
+                    },
+                    |id| {
+                        inputs
+                            .challenges
+                            .resolve_challenge(id)
+                            .ok_or_else(|| geometry("matrix fold references an absent challenge"))
+                    },
+                    |_| {
+                        Err(geometry(
+                            "matrix fold references an unsupported derived term",
+                        ))
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, KernelError<F128>>>()?;
         let public = (0..WITNESS_COLUMNS)
             .map(|c| F128::from_u64(u64::from(c == 0 || c == 16)))
             .collect();

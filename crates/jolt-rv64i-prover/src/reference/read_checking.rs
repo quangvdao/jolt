@@ -9,7 +9,7 @@ use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_verifier::ids::{
     DerivedId, OpeningId, OutputCheckDerived, ReadCheckingDerived, RelationId, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, equality_table, WordLift};
+use jolt_rv64i_verifier::points::{equality_table, WordLift};
 use jolt_rv64i_verifier::public::io::word_at;
 use jolt_rv64i_verifier::stages::stage4::{
     ram_output_check::RamOutputCheck, ram_read_checking::RamReadChecking,
@@ -62,9 +62,13 @@ impl PrepareKernel<F128, RegistersReadChecking<F128>, Rv64iPlane> for RegistersR
             )
         })
         .collect();
+        let weights = equality_table(inputs.relation.r_3()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
         let mut table = vec![F128::zero(); 32 * witness.bits.len()];
-        for (cycle, row) in table.chunks_exact_mut(32).enumerate() {
-            row.fill(eq_index(inputs.relation.r_3(), cycle).map_err(geometry)?);
+        for (row, weight) in table.chunks_exact_mut(32).zip(weights) {
+            row.fill(weight);
         }
         let derived = [(
             DerivedId::RegistersReadChecking(ReadCheckingDerived::EqCycle),
@@ -112,9 +116,13 @@ impl PrepareKernel<F128, RamReadChecking<F128>, Rv64iPlane> for RamReadCheckingP
             )
         })
         .collect();
+        let weights = equality_table(inputs.relation.r_3()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
         let mut table = vec![F128::zero(); count * witness.bits.len()];
-        for (cycle, row) in table.chunks_exact_mut(count).enumerate() {
-            row.fill(eq_index(inputs.relation.r_3(), cycle).map_err(geometry)?);
+        for (row, weight) in table.chunks_exact_mut(count).zip(weights) {
+            row.fill(weight);
         }
         let derived = [(
             DerivedId::RamReadChecking(ReadCheckingDerived::EqCycle),

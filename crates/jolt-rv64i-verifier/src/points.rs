@@ -172,11 +172,29 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
 /// order. Shifting the equality table omits the all-ones source and forbids wrap.
 pub fn next_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
     let mut weights = equality_table(point)?;
-    weights.rotate_right(1);
-    if let Some(first) = weights.first_mut() {
-        *first = F::zero();
+    for index in (0..weights.len()).rev() {
+        let value = shifted_next_weight(&weights, index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })?;
+        *weights.get_mut(index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })? = value;
     }
     Ok(weights)
+}
+
+/// Reads the nonwrapping successor weight from an existing equality table.
+/// Returns `None` for an index outside that table.
+pub fn shifted_next_weight<F: JoltField>(weights: &[F], index: usize) -> Option<F> {
+    if index >= weights.len() {
+        None
+    } else if let Some(previous) = index.checked_sub(1) {
+        weights.get(previous).copied()
+    } else {
+        Some(F::zero())
+    }
 }
 
 /// A word lift against one reusable 64-entry equality table of a six-coordinate
@@ -264,12 +282,14 @@ impl<F: JoltField> ChunkWeights<F> {
     /// multiple indicators set, without field multiplications.
     pub fn evaluate_packed(&self, row: &BitsRow) -> F {
         let stored = self.descriptor.stored(row);
-        self.weights
+        let Some((zero, differences)) = self.weights.split_first() else {
+            return F::zero();
+        };
+        differences
             .iter()
             .enumerate()
-            .filter(|(digit, _)| *digit == 0 || stored & (1_u16 << (digit - 1)) != 0)
-            .map(|(_, weight)| *weight)
-            .sum()
+            .filter(|(indicator, _)| stored & (1_u16 << indicator) != 0)
+            .fold(*zero, |value, (_, difference)| value + *difference)
     }
 
     /// Reconstructs digit zero from the stored indicators; missing columns return an error.

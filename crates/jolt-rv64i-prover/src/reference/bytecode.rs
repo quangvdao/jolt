@@ -145,17 +145,38 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadAddress<F>, Rv64iPlane>
         }
         let mut r: [Vec<F>; 5] = std::array::from_fn(|_| vec![F::zero(); count]);
         let p = relation.public_points();
-        let next = points::next_table(&p.r_3).map_err(|error| KernelError::InvalidGeometry {
-            reason: error.to_string(),
-        })?;
+        let cycle_weights = [&p.r_3, &p.r_4, &p.r_5].map(|point| {
+            points::equality_table(point).map_err(|error| KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            })
+        });
+        let [r3, r4, r5] = cycle_weights;
+        let [r3, r4, r5] = [r3?, r4?, r5?];
+        if [&r3, &r4, &r5]
+            .iter()
+            .any(|weights| weights.len() != witness.bits.len())
+        {
+            return Err(KernelError::InvalidGeometry {
+                reason: "cycle point does not match the witness length".to_owned(),
+            });
+        }
         for (j, row) in witness.bits.iter().enumerate() {
             let index = witness.layout.bytecode_index(row) as usize;
             let values = [
-                points::eq_index(&p.r_3, j),
-                points::eq_index(&p.r_4, j),
-                points::eq_index(&p.r_5, j),
+                r3.get(j).copied().ok_or(PointsError::Index {
+                    index: j,
+                    variables: p.r_3.len(),
+                }),
+                r4.get(j).copied().ok_or(PointsError::Index {
+                    index: j,
+                    variables: p.r_4.len(),
+                }),
+                r5.get(j).copied().ok_or(PointsError::Index {
+                    index: j,
+                    variables: p.r_5.len(),
+                }),
                 Ok(F::from_u64(u64::from(j == 0))),
-                next.get(j).copied().ok_or(PointsError::Index {
+                points::shifted_next_weight(&r3, j).ok_or(PointsError::Index {
                     index: j,
                     variables: p.r_3.len(),
                 }),
@@ -208,8 +229,32 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadCycle<F>, Rv64iPlane> for Byteco
                 table,
             );
         }
+        let router = points::equality_table(inputs.relation.r_3()).map_err(|error| {
+            KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            }
+        })?;
+        let next = (0..router.len())
+            .map(|index| {
+                points::shifted_next_weight(&router, index).ok_or(PointsError::Index {
+                    index,
+                    variables: inputs.relation.r_3().len(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let mut entry = vec![F::zero(); witness.bits.len()];
+        if let Some(first) = entry.first_mut() {
+            *first = F::one();
+        }
+        let tables = [
+            Ok(router),
+            points::equality_table(inputs.relation.r_4()),
+            points::equality_table(inputs.relation.r_5()),
+            Ok(entry),
+            next,
+        ];
         let mut derived = BTreeMap::new();
-        for (weight, h) in [
+        for ((weight, h), table) in [
             CycleWeight::Router,
             CycleWeight::Read,
             CycleWeight::Val,
@@ -218,25 +263,13 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadCycle<F>, Rv64iPlane> for Byteco
         ]
         .into_iter()
         .zip(inputs.relation.folds())
+        .zip(tables)
         {
             let _ = derived.insert(
                 DerivedId::BytecodeReadCycle(BytecodeCycleDerived::BytecodeFold(weight)),
                 Polynomial::new(vec![h; witness.bits.len()]),
             );
-            let table = match weight {
-                CycleWeight::Router => points::equality_table(inputs.relation.r_3()),
-                CycleWeight::Read => points::equality_table(inputs.relation.r_4()),
-                CycleWeight::Val => points::equality_table(inputs.relation.r_5()),
-                CycleWeight::Entry => {
-                    let mut values = vec![F::zero(); witness.bits.len()];
-                    if let Some(first) = values.first_mut() {
-                        *first = F::one();
-                    }
-                    Ok(values)
-                }
-                CycleWeight::Next => points::next_table(inputs.relation.r_3()),
-            }
-            .map_err(|error| KernelError::InvalidGeometry {
+            let table = table.map_err(|error| KernelError::InvalidGeometry {
                 reason: error.to_string(),
             })?;
             let _ = derived.insert(

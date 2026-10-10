@@ -5,7 +5,7 @@ use crate::{error::Rv64iProverError, plane::Rv64iWitness};
 use jolt_field::{JoltField, One, Zero, F128};
 use jolt_poly::Polynomial;
 use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk};
-use jolt_rv64i_verifier::points::{eq_index, ChunkWeights, WordLift};
+use jolt_rv64i_verifier::points::{eq_index, equality_table, ChunkWeights, PointsError, WordLift};
 
 /// One of the five replayed cycle words, extended over its 64 bit indices.
 #[derive(Clone, Copy, Debug)]
@@ -163,6 +163,7 @@ pub fn selector(
     selector: Selector,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    let weights = equality_table(point)?;
     let mut values = Vec::with_capacity(witness.bits.len());
     for cycle in 0..witness.bits.len() {
         let row = fetched(witness, cycle)?;
@@ -176,7 +177,10 @@ pub fn selector(
             Selector::KeyKind => variant.key_kind().map(|kind| kind as usize),
         });
         values.push(match value {
-            Some(index) => eq_index(point, index)?,
+            Some(index) => *weights.get(index).ok_or(PointsError::Index {
+                index,
+                variables: point.len(),
+            })?,
             None => F128::zero(),
         });
     }
@@ -251,12 +255,14 @@ pub fn register_selector_at(
     selector: RegisterSelector,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    let weights = equality_table(point)?;
     let mut values = Vec::with_capacity(witness.bits.len());
     for cycle in 0..witness.bits.len() {
-        values.push(eq_index(
-            point,
-            usize::from(register(fetched(witness, cycle)?, selector)),
-        )?);
+        let index = usize::from(register(fetched(witness, cycle)?, selector));
+        values.push(*weights.get(index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })?);
     }
     Ok(Polynomial::new(values))
 }

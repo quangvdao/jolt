@@ -1,7 +1,7 @@
 //! Sparse row-matrix evaluations for the binary-field RV64I protocol.
 
 use jolt_field::{JoltField, F128};
-use jolt_r1cs::{ConstraintMatrices, SparseRow};
+use jolt_r1cs::ConstraintMatrices;
 use jolt_rv64i_arith::{Layout, RowSystem, WITNESS_COLUMNS};
 
 use crate::points::{eq_table, PointsError};
@@ -68,30 +68,18 @@ impl RowMatrices {
         let f2_weights = eq_table(rho_f2)?;
         let f128_weights = eq_table(rho_f128)?;
         let column_weights = eq_table(column_point)?;
-        let mut f2 = [F::zero(); 3];
-        let mut f128 = [F::zero(); 3];
-        for ((f2_value, f128_value), matrix) in
-            f2.iter_mut()
-                .zip(&mut f128)
-                .zip([&self.matrices.a, &self.matrices.b, &self.matrices.c])
-        {
-            for (index, row) in matrix.iter().enumerate() {
-                let (weights, index, variables, value) = if index < RowSystem::F2_ROWS {
-                    (&f2_weights, index, rho_f2.len(), &mut *f2_value)
-                } else {
-                    (
-                        &f128_weights,
-                        index - RowSystem::F2_ROWS,
-                        rho_f128.len(),
-                        &mut *f128_value,
-                    )
-                };
-                let row_weight = weights
-                    .get(index)
-                    .ok_or(PointsError::Index { index, variables })?;
-                *value += evaluate_row(row, *row_weight, &column_weights)?;
-            }
-        }
+        let mut blocks = [[F::zero(); 3]; 2];
+        self.visit_entries(&f2_weights, &f128_weights, |block, side, column, value| {
+            let column_weight = column_weights
+                .get(column)
+                .ok_or(PointsError::MissingColumn { column })?;
+            let total = blocks
+                .get_mut(block)
+                .and_then(|values| values.get_mut(side))
+                .ok_or(PointsError::MissingColumn { column })?;
+            *total += value * *column_weight;
+            Ok(())
+        })?;
         let public_columns = column_weights
             .first()
             .copied()
@@ -101,28 +89,74 @@ impl RowMatrices {
                 .copied()
                 .ok_or(PointsError::MissingColumn { column: 16 })?;
         Ok(RowEvaluations {
-            blocks: [f2, f128],
+            blocks,
             public_columns,
         })
     }
-}
 
-fn evaluate_row<F: JoltField>(
-    row: &SparseRow<F128>,
-    row_weight: F,
-    column_weights: &[F],
-) -> Result<F, PointsError> {
-    row.iter()
-        .try_fold(F::zero(), |value, &(column, coefficient)| {
-            let column_weight = column_weights
-                .get(column)
+    /// Folds the sparse row blocks into their six column tables. This dense
+    /// public-domain table is consumed by the reference witness reduction.
+    pub fn column_evaluations<F: JoltField>(
+        &self,
+        rho_f2: &[F],
+        rho_f128: &[F],
+    ) -> Result<Vec<[[F; 3]; 2]>, PointsError> {
+        for (point, expected) in [(rho_f2, 8), (rho_f128, self.f128_row_variables)] {
+            if point.len() != expected {
+                return Err(PointsError::Dimension {
+                    expected,
+                    actual: point.len(),
+                });
+            }
+        }
+        let f2_weights = eq_table(rho_f2)?;
+        let f128_weights = eq_table(rho_f128)?;
+        let mut columns = vec![[[F::zero(); 3]; 2]; WITNESS_COLUMNS];
+        self.visit_entries(&f2_weights, &f128_weights, |block, side, column, value| {
+            let total = columns
+                .get_mut(column)
+                .and_then(|values| values.get_mut(block))
+                .and_then(|values| values.get_mut(side))
                 .ok_or(PointsError::MissingColumn { column })?;
-            let weight = row_weight * *column_weight;
-            Ok(value
-                + if coefficient.to_raw() == 1 {
-                    weight
+            *total += value;
+            Ok(())
+        })?;
+        Ok(columns)
+    }
+
+    fn visit_entries<F: JoltField>(
+        &self,
+        f2_weights: &[F],
+        f128_weights: &[F],
+        mut visit: impl FnMut(usize, usize, usize, F) -> Result<(), PointsError>,
+    ) -> Result<(), PointsError> {
+        for (side, matrix) in [&self.matrices.a, &self.matrices.b, &self.matrices.c]
+            .into_iter()
+            .enumerate()
+        {
+            for (index, row) in matrix.iter().enumerate() {
+                let (block, weights, index) = if index < RowSystem::F2_ROWS {
+                    (0, f2_weights, index)
                 } else {
-                    F::from_u128_reduced(coefficient.to_raw()) * weight
-                })
-        })
+                    (1, f128_weights, index - RowSystem::F2_ROWS)
+                };
+                let row_weight = weights.get(index).copied().ok_or(PointsError::Index {
+                    index,
+                    variables: weights.len().ilog2() as usize,
+                })?;
+                for &(column, coefficient) in row {
+                    if column >= WITNESS_COLUMNS {
+                        return Err(PointsError::MissingColumn { column });
+                    }
+                    let value = if coefficient.to_raw() == 1 {
+                        row_weight
+                    } else {
+                        F::from_u128_reduced(coefficient.to_raw()) * row_weight
+                    };
+                    visit(block, side, column, value)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }

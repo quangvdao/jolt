@@ -13,6 +13,7 @@ use jolt_rv64i_kernels::source::{
     CycleSource, OptionalGroup, PrepareRequest, PresentGroup, ValidatedTrace,
 };
 use std::fmt::Display;
+use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +52,120 @@ impl KindTable {
                 .map(|kind| kind.index() as u8),
             Self::Key => variant.key_kind().map(|kind| kind.index() as u8),
             Self::Branch => variant.branch().map(|_| 0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct EncodedField {
+    shift: usize,
+    mask: u64,
+    add: u16,
+}
+impl EncodedField {
+    fn new(field: DigitField, add: u16) -> Self {
+        Self {
+            shift: field.shift(),
+            mask: field.mask(),
+            add,
+        }
+    }
+
+    // WitnessColumns::new supplies fields of at most six bits, including malformed rows.
+    #[inline]
+    fn read(self, digits: u64) -> u16 {
+        ((digits >> self.shift) & self.mask) as u16 + self.add
+    }
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct DigitDecoder {
+    fields: Vec<EncodedField>,
+    kinds: [[u16; KindTable::ALL.len()]; 64],
+    flags: [EncodedField; 3],
+    variant: EncodedField,
+}
+impl DigitDecoder {
+    fn new(columns: &WitnessColumns) -> Self {
+        let mut fields = Vec::new();
+        let mut kinds = [[0; KindTable::ALL.len()]; 64];
+        let mut flags = [EncodedField::default(); 3];
+        let mut flag = 0;
+        let mut kind = 0;
+        for read in &columns.reads {
+            match *read {
+                DigitRead::Field(field) => fields.push(EncodedField::new(field, 1)),
+                DigitRead::Flag(field) => {
+                    flags[flag] = EncodedField::new(field, 0);
+                    flag += 1;
+                }
+                DigitRead::Kind(table) => {
+                    for variant in Variant::ALL {
+                        kinds[variant.index()][kind] =
+                            table.digit(variant).map_or(0, |digit| u16::from(digit) + 1);
+                    }
+                    kind += 1;
+                }
+            }
+        }
+        Self {
+            variant: fields[columns.variant()],
+            fields,
+            kinds,
+            flags,
+        }
+    }
+
+    #[inline]
+    fn variant(&self, digits: u64) -> usize {
+        // The table's mask also exposes the six-bit index bound to the compiler.
+        usize::from(self.variant.read(digits).wrapping_sub(1)) & (self.kinds.len() - 1)
+    }
+
+    #[inline]
+    fn digit(&self, column: usize, digits: u64) -> Option<usize> {
+        let encoded = if let Some(field) = self.fields.get(column) {
+            field.read(digits)
+        } else {
+            let column = column - self.fields.len();
+            if let Some(&kind) = self.kinds[self.variant(digits)].get(column) {
+                kind
+            } else {
+                self.flags.get(column - KindTable::ALL.len())?.read(digits)
+            }
+        };
+        (encoded != 0).then(|| usize::from(encoded - 1))
+    }
+
+    #[inline]
+    fn cycles<const FIELDS: usize, const COLUMNS: usize>(
+        &self,
+        cycles: &[DecodedCycle],
+        out: &mut [u16],
+    ) {
+        let Ok(fields): Result<&[EncodedField; FIELDS], _> = self.fields.as_slice().try_into()
+        else {
+            out.fill(0);
+            return;
+        };
+        for (row, output) in cycles.iter().zip(out.as_chunks_mut::<COLUMNS>().0) {
+            let digits = row.digits;
+            for (column, slot) in output[..FIELDS - 1].iter_mut().enumerate() {
+                *slot = fields[column].read(digits);
+            }
+            // WitnessColumns::new terminates the field run with Variant.
+            let variant = fields[FIELDS - 1].read(digits);
+            output[FIELDS - 1] = variant;
+            let variant = usize::from(variant.wrapping_sub(1)) & (self.kinds.len() - 1);
+            output[FIELDS..FIELDS + KindTable::ALL.len()].copy_from_slice(&self.kinds[variant]);
+            for (slot, field) in output[FIELDS + KindTable::ALL.len()..]
+                .iter_mut()
+                .zip(self.flags)
+            {
+                *slot = field.read(digits);
+            }
         }
     }
 }
@@ -282,7 +397,7 @@ pub struct WitnessSource {
     bytecode: Arc<Bytecode>,
     fields: DigitFields,
     columns: WitnessColumns,
-    kinds: [[Option<u8>; 64]; KindTable::ALL.len()],
+    decoder: DigitDecoder,
 }
 impl WitnessSource {
     pub fn new(witness: &Rv64iWitness) -> Result<Self, Rv64iProverError> {
@@ -299,19 +414,15 @@ impl WitnessSource {
                 words: witness.words.len(),
             });
         }
-        let mut kinds = [[None; 64]; KindTable::ALL.len()];
-        for kind in KindTable::ALL {
-            for variant in Variant::ALL {
-                kinds[kind as usize][variant.index()] = kind.digit(variant);
-            }
-        }
+        let columns = WitnessColumns::new(&witness.layout);
+        let decoder = DigitDecoder::new(&columns);
         Ok(Self {
             words: Arc::clone(&witness.words),
             decoded: Arc::clone(&witness.decoded),
             bytecode: Arc::clone(&witness.bytecode),
             fields: DigitFields::new(&witness.layout),
-            columns: WitnessColumns::new(&witness.layout),
-            kinds,
+            columns,
+            decoder,
         })
     }
     pub fn columns(&self) -> &WitnessColumns {
@@ -367,17 +478,27 @@ impl CycleSource for WitnessSource {
     #[inline]
     fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
         let row = self.decoded.get(cycle)?;
-        match *self.columns.reads.get(column)? {
-            DigitRead::Field(field) => Some(field.read(row) as usize),
-            DigitRead::Flag(field) => (field.read(row) != 0).then_some(0),
-            DigitRead::Kind(kind) => self
-                .kinds
-                .get(kind as usize)?
-                .get(self.fields.variant().read(row) as usize)
-                .copied()
-                .flatten()
-                .map(usize::from),
+        self.decoder.digit(column, row.digits)
+    }
+    fn digits(&self, cycles: Range<usize>, out: &mut [u16]) {
+        if cycles.len().checked_mul(self.digit_columns()) != Some(out.len()) {
+            out.fill(0);
+            return;
         }
+        let Some(rows) = self.decoded.get(cycles) else {
+            out.fill(0);
+            return;
+        };
+        // Layout::new admits five through sixteen fields; specialise once per tile.
+        macro_rules! decode {
+            ($($fields:literal),*) => {
+                match self.decoder.fields.len() {
+                    $($fields => self.decoder.cycles::<$fields, { $fields + KindTable::ALL.len() + 3 }>(rows, out),)*
+                    _ => out.fill(0),
+                }
+            };
+        }
+        decode!(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
     }
     #[inline]
     fn row_digit(&self, column: usize, row: usize) -> Option<usize> {

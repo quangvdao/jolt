@@ -56,6 +56,9 @@ impl DigitField {
     pub fn bits(self) -> usize {
         self.bits
     }
+    pub fn mask(self) -> u64 {
+        self.mask
+    }
     #[inline]
     fn pack(self, value: u64) -> u64 {
         (value & self.mask) << self.shift

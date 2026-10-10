@@ -5,8 +5,22 @@ use jolt_prover::ProverError;
 use jolt_rv64i_arith::{BytecodeError, CycleError, LayoutError, WitnessError};
 use jolt_rv64i_verifier::error::Rv64iVerifierError;
 use jolt_rv64i_verifier::points::PointsError;
+use std::collections::TryReserveError;
 use std::error::Error as StdError;
 use thiserror::Error;
+
+/// The pre-state fact that disagrees with the witness replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactField {
+    /// First source-register read.
+    Rs1Value,
+    /// Second source-register read.
+    Rs2Value,
+    /// Destination-register pre-value.
+    RdPreValue,
+    /// RAM pre-word on a cycle with an access.
+    RamPreValue,
+}
 
 #[derive(Debug, Error)]
 pub enum Rv64iProverError {
@@ -44,4 +58,30 @@ pub enum Rv64iProverError {
     TraceDimension { log_T: usize },
     #[error("commitment scheme failed: {0}")]
     Scheme(Box<dyn StdError + Send + Sync>),
+    #[error("RAM allocation for exponent {log_K_ram} failed: {source}")]
+    RamAllocation {
+        log_K_ram: usize,
+        source: TryReserveError,
+    },
+    #[error("cycle {cycle} fact {field:?} differs: expected {expected}, found {found}")]
+    FactMismatch {
+        cycle: usize,
+        field: FactField,
+        expected: u64,
+        found: u64,
+    },
+    #[error("witness layout differs from the checked layout")]
+    OutputLayoutMismatch,
+    #[error("public I/O word {index} differs: expected {expected}, found {found}")]
+    OutputMismatch {
+        index: u64,
+        expected: u64,
+        found: u64,
+    },
+    #[error("final RAM has {found} words, expected {expected}")]
+    FinalRamLength { expected: usize, found: usize },
+    #[error("a constructor's new witness buffer is already shared")]
+    SharedBuffer,
+    #[error("RAM exponent {log_K_ram} cannot be represented on this host")]
+    RamDimension { log_K_ram: usize },
 }

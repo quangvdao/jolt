@@ -2,23 +2,31 @@
 //! initial RAM. `from_bits` and `from_facts` establish the pre-state reads and
 //! fetched-row successors; direct construction owes that same contract.
 
-use crate::error::Rv64iProverError;
+use crate::error::{FactField, Rv64iProverError};
 #[cfg(feature = "test-utils")]
 use common::{constants::RAM_START_ADDRESS, jolt_device::MemoryLayout};
 use jolt_field::JoltField;
 use jolt_kernels::WitnessPlane;
-use jolt_rv64i_arith::{BaseWords, BitsBuilder, BitsRow, Bytecode, CycleFacts, Layout};
+use jolt_rv64i_arith::{
+    BaseWords, BitsBuilder, BitsRow, Bytecode, CycleError, CycleFacts, Layout, Variant,
+};
+use jolt_rv64i_verifier::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 #[cfg(feature = "test-utils")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Replayed pre-state reads and successor PC for one committed cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CycleWords {
+    /// Value selected by the fetched row's first register selector.
     pub rs1_value: u64,
+    /// Value selected by the fetched row's second register selector.
     pub rs2_value: u64,
+    /// Destination value before its XOR update.
     pub rd_pre_value: u64,
+    /// Word at the committed RAM index, including index zero without an access.
     pub ram_read_value: u64,
+    /// Next fetched PC, or the supplied final PC on the last cycle.
     pub next_pc: u64,
 }
 impl CycleWords {
@@ -33,16 +41,31 @@ impl CycleWords {
         }
     }
 }
+/// Shared committed rows and replayed words, with retained dense final RAM.
+/// Direct construction owes nonzero power-of-two equal row lengths, matching layout and bytecode,
+/// canonical initial RAM, and the same replay contract as the constructors; execution constraints
+/// and a real fixed-point stall suffix remain obligations of the host and protocol relations.
 #[derive(Clone, Debug)]
 pub struct Rv64iWitness {
+    /// Committed-column and address geometry.
     pub layout: Layout,
+    /// Public fetched table shared with preprocessing.
     pub bytecode: Arc<Bytecode>,
+    /// Nonzero power-of-two committed rows, shared without copying by proving and commitment.
     pub bits: Arc<[BitsRow]>,
+    /// One pre-state record per committed cycle.
     pub words: Arc<[CycleWords]>,
+    /// Increasing nonzero initial RAM words; all omitted words start at zero.
     pub initial_ram: Vec<(u64, u64)>,
+    /// Dense RAM after the final XOR update, with exactly `2^log_K_ram` words.
+    pub final_ram: Vec<u64>,
+    /// Successor after the final cycle; it must name a valid bytecode row.
     pub final_pc: u64,
 }
 impl Rv64iWitness {
+    /// Replays shared committed rows from zero registers and canonical initial RAM without copying them.
+    /// Rejects invalid geometry, fetches, chunk indicators, initial words or RAM allocation; it does
+    /// not authenticate instruction transitions or check public outputs.
     pub fn from_bits(
         layout: Layout,
         bytecode: Arc<Bytecode>,
@@ -50,80 +73,15 @@ impl Rv64iWitness {
         initial_ram: Vec<(u64, u64)>,
         final_pc: u64,
     ) -> Result<Self, Rv64iProverError> {
-        if !bits.len().is_power_of_two() {
-            return Err(Rv64iProverError::RowCount { rows: bits.len() });
-        }
-        let _ = BitsBuilder::new(&layout, &bytecode)?;
-        let _ = bytecode.final_pc_index(final_pc)?;
-        let mut previous = None;
-        for &(index, value) in &initial_ram {
-            if value == 0
-                || index >= 1_u64 << layout.log_K_ram()
-                || previous.is_some_and(|p| p >= index)
-            {
-                return Err(Rv64iProverError::InitialRam { index });
-            }
-            previous = Some(index);
-        }
-        let mut ram: BTreeMap<_, _> = initial_ram.iter().copied().collect();
-        let mut registers = [0_u64; 32];
-        let mut words: Vec<CycleWords> = Vec::with_capacity(bits.len());
-        for (cycle, committed) in bits.iter().enumerate() {
-            for chunk in layout.chunks() {
-                if chunk.stored(committed).count_ones() > 1 {
-                    return Err(Rv64iProverError::MultipleIndicators {
-                        cycle,
-                        start: chunk.start(),
-                    });
-                }
-            }
-            let index = layout.bytecode_index(committed);
-            let row = usize::try_from(index)
-                .ok()
-                .and_then(|i| bytecode.rows().get(i))
-                .filter(|r| r.variant.is_some())
-                .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-            if let Some(previous) = words.last_mut() {
-                previous.next_pc = row.pc;
-            }
-            let read = |register: u8| {
-                registers
-                    .get(usize::from(register))
-                    .copied()
-                    .ok_or(Rv64iProverError::Register { register })
-            };
-            let ram_index = layout.ram_index(committed);
-            words.push(CycleWords {
-                rs1_value: read(row.rs1)?,
-                rs2_value: read(row.rs2)?,
-                rd_pre_value: read(row.rd)?,
-                ram_read_value: ram.get(&ram_index).copied().unwrap_or(0),
-                next_pc: final_pc,
-            });
-            let inc = layout.inc(committed);
-            if row.variant.is_some_and(|v| v.is_store()) {
-                let value = ram.get(&ram_index).copied().unwrap_or(0) ^ inc;
-                if value == 0 {
-                    let _ = ram.remove(&ram_index);
-                } else {
-                    let _ = ram.insert(ram_index, value);
-                }
-            } else {
-                *registers
-                    .get_mut(usize::from(row.rd))
-                    .ok_or(Rv64iProverError::Register { register: row.rd })? ^= inc;
-            }
-        }
-        Ok(Self {
-            layout,
-            bytecode,
-            bits,
-            words: words.into(),
-            initial_ram,
-            final_pc,
-        })
+        let mut witness = Self::prepare(layout, bytecode, bits, initial_ram, final_pc)?;
+        witness.replay(None)?;
+        Ok(witness)
     }
-    /// Derives all value words by replay rather than copying reads from facts.
+
+    /// Generates committed rows and checks present operands in one forward replay; normalized `NOOP`
+    /// selector reads include index zero because original operand presence is erased, and RAM facts
+    /// are read only on accesses. Returns the first difference before generating that row or a geometry,
+    /// fetch, row-generation or allocation error; outputs and instruction transitions remain unchecked.
     pub fn from_facts(
         layout: Layout,
         bytecode: Arc<Bytecode>,
@@ -134,10 +92,322 @@ impl Rv64iWitness {
             .last()
             .ok_or(Rv64iProverError::RowCount { rows: 0 })?
             .next_pc;
-        let mut bits = vec![[0; 4]; facts.len()];
-        BitsBuilder::new(&layout, &bytecode)?.fill(facts, &mut bits)?;
-        Self::from_bits(layout, bytecode, bits.into(), initial_ram, final_pc)
+        let final_ram = Self::initial_state(&layout, &initial_ram)?;
+        let bits = (0..facts.len()).map(|_| [0; 4]).collect();
+        let mut witness =
+            Self::prepare_with_ram(layout, bytecode, bits, initial_ram, final_ram, final_pc)?;
+        witness.replay(Some(facts))?;
+        Ok(witness)
     }
+
+    fn initial_state(
+        layout: &Layout,
+        initial_ram: &[(u64, u64)],
+    ) -> Result<Vec<u64>, Rv64iProverError> {
+        let count = Self::ram_words(layout)?;
+        let mut previous = None;
+        for &(index, value) in initial_ram {
+            if value == 0 || index >= count as u64 || previous.is_some_and(|p| p >= index) {
+                return Err(Rv64iProverError::InitialRam { index });
+            }
+            previous = Some(index);
+        }
+        let mut ram = Vec::new();
+        ram.try_reserve_exact(count)
+            .map_err(|source| Rv64iProverError::RamAllocation {
+                log_K_ram: layout.log_K_ram(),
+                source,
+            })?;
+        ram.resize(count, 0);
+        for &(index, value) in initial_ram {
+            *ram.get_mut(index as usize)
+                .ok_or(Rv64iProverError::InitialRam { index })? = value;
+        }
+        Ok(ram)
+    }
+
+    fn prepare(
+        layout: Layout,
+        bytecode: Arc<Bytecode>,
+        bits: Arc<[BitsRow]>,
+        initial_ram: Vec<(u64, u64)>,
+        final_pc: u64,
+    ) -> Result<Self, Rv64iProverError> {
+        let final_ram = Self::initial_state(&layout, &initial_ram)?;
+        Self::prepare_with_ram(layout, bytecode, bits, initial_ram, final_ram, final_pc)
+    }
+
+    fn prepare_with_ram(
+        layout: Layout,
+        bytecode: Arc<Bytecode>,
+        bits: Arc<[BitsRow]>,
+        initial_ram: Vec<(u64, u64)>,
+        final_ram: Vec<u64>,
+        final_pc: u64,
+    ) -> Result<Self, Rv64iProverError> {
+        if !bits.len().is_power_of_two() {
+            return Err(Rv64iProverError::RowCount { rows: bits.len() });
+        }
+        let _ = BitsBuilder::new(&layout, &bytecode)?;
+        let _ = bytecode.final_pc_index(final_pc)?;
+        let words = (0..bits.len()).map(|_| CycleWords::default()).collect();
+        Ok(Self {
+            layout,
+            bytecode,
+            bits,
+            words,
+            initial_ram,
+            final_ram,
+            final_pc,
+        })
+    }
+
+    fn replay(&mut self, facts: Option<&[CycleFacts]>) -> Result<(), Rv64iProverError> {
+        let builder = BitsBuilder::new(&self.layout, &self.bytecode)?;
+        let mut rows = match facts {
+            Some(facts) => ReplayRows::Facts {
+                bits: Arc::get_mut(&mut self.bits).ok_or(Rv64iProverError::SharedBuffer)?,
+                facts,
+            },
+            None => ReplayRows::Bits(&self.bits),
+        };
+        let words = Arc::get_mut(&mut self.words).ok_or(Rv64iProverError::SharedBuffer)?;
+        let mut registers = [0_u64; 32];
+        for cycle in 0..words.len() {
+            let (index, fact) = match &rows {
+                ReplayRows::Bits(bits) => (self.layout.bytecode_index(&bits[cycle]), None),
+                ReplayRows::Facts { facts, .. } => {
+                    (u64::from(facts[cycle].bytecode_index), Some(&facts[cycle]))
+                }
+            };
+            let row = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.bytecode.rows().get(i))
+                .filter(|r| r.variant.is_some())
+                .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+            let variant = row
+                .variant
+                .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+            let access = variant.access().is_some();
+            let ram_index = match (&rows, fact) {
+                (_, Some(fact)) => {
+                    if access {
+                        fact.ram_word_index
+                    } else {
+                        0
+                    }
+                }
+                (ReplayRows::Bits(bits), None) => self.layout.ram_index(&bits[cycle]),
+                (ReplayRows::Facts { .. }, None) => {
+                    return Err(Rv64iProverError::RowCount { rows: cycle })
+                }
+            };
+            let read = |register: u8| {
+                registers
+                    .get(usize::from(register))
+                    .copied()
+                    .ok_or(Rv64iProverError::Register { register })
+            };
+            let mut word = CycleWords {
+                rs1_value: read(row.rs1)?,
+                rs2_value: read(row.rs2)?,
+                rd_pre_value: read(row.rd)?,
+                ram_read_value: 0,
+                next_pc: self.final_pc,
+            };
+            if let Some(fact) = fact {
+                for ((field, expected, found), present) in [
+                    (FactField::Rs1Value, word.rs1_value, fact.rs1_value),
+                    (FactField::Rs2Value, word.rs2_value, fact.rs2_value),
+                    (FactField::RdPreValue, word.rd_pre_value, fact.rd_pre_value),
+                ]
+                .into_iter()
+                .zip(Self::register_operands(variant))
+                {
+                    if present && expected != found {
+                        return Err(Rv64iProverError::FactMismatch {
+                            cycle,
+                            field,
+                            expected,
+                            found,
+                        });
+                    }
+                }
+            }
+            word.ram_read_value = self
+                .final_ram
+                .get(ram_index as usize)
+                .copied()
+                .ok_or(Rv64iProverError::InitialRam { index: ram_index })?;
+            if let Some(fact) = fact {
+                if access && word.ram_read_value != fact.ram_pre_value {
+                    return Err(Rv64iProverError::FactMismatch {
+                        cycle,
+                        field: FactField::RamPreValue,
+                        expected: word.ram_read_value,
+                        found: fact.ram_pre_value,
+                    });
+                }
+            }
+            let committed = match &mut rows {
+                ReplayRows::Bits(bits) => bits[cycle],
+                ReplayRows::Facts { bits, facts } => {
+                    let committed = &mut bits[cycle];
+                    builder
+                        .fill(
+                            std::slice::from_ref(&facts[cycle]),
+                            std::slice::from_mut(committed),
+                        )
+                        .map_err(|error| CycleError {
+                            cycle,
+                            error: error.error,
+                        })?;
+                    *committed
+                }
+            };
+            for chunk in self.layout.chunks() {
+                if chunk.stored(&committed).count_ones() > 1 {
+                    return Err(Rv64iProverError::MultipleIndicators {
+                        cycle,
+                        start: chunk.start(),
+                    });
+                }
+            }
+            if let Some(previous) = cycle.checked_sub(1).and_then(|i| words.get_mut(i)) {
+                previous.next_pc = row.pc;
+            }
+            let inc = self.layout.inc(&committed);
+            if row.variant.is_some_and(|v| v.is_store()) {
+                *self
+                    .final_ram
+                    .get_mut(ram_index as usize)
+                    .ok_or(Rv64iProverError::InitialRam { index: ram_index })? ^= inc;
+            } else {
+                *registers
+                    .get_mut(usize::from(row.rd))
+                    .ok_or(Rv64iProverError::Register { register: row.rd })? ^= inc;
+            }
+            words[cycle] = word;
+        }
+        Ok(())
+    }
+
+    fn register_operands(variant: Variant) -> [bool; 3] {
+        match variant {
+            Variant::ECALL | Variant::EBREAK => [false; 3],
+            Variant::JAL | Variant::JAL_X0 | Variant::LUI | Variant::AUIPC => [false, false, true],
+            Variant::SB
+            | Variant::SH
+            | Variant::SW
+            | Variant::SD
+            | Variant::BEQ
+            | Variant::BNE
+            | Variant::BLT
+            | Variant::BGE
+            | Variant::BLTU
+            | Variant::BGEU => [true, true, false],
+            Variant::ADD
+            | Variant::SUB
+            | Variant::ADDW
+            | Variant::SUBW
+            | Variant::AND
+            | Variant::OR
+            | Variant::XOR
+            | Variant::SLT
+            | Variant::SLTU
+            | Variant::SLL
+            | Variant::SRL
+            | Variant::SRA
+            | Variant::SLLW
+            | Variant::SRLW
+            | Variant::SRAW => [true; 3],
+            // NOOP preserves selectors but merges operand shapes; index-zero selectors also read the replayed register state.
+            Variant::NOOP => [true; 3],
+            Variant::ADDI
+            | Variant::ADDIW
+            | Variant::ANDI
+            | Variant::ORI
+            | Variant::XORI
+            | Variant::SLTI
+            | Variant::SLTIU
+            | Variant::SLLI
+            | Variant::SRLI
+            | Variant::SRAI
+            | Variant::SLLIW
+            | Variant::SRLIW
+            | Variant::SRAIW
+            | Variant::LB
+            | Variant::LH
+            | Variant::LW
+            | Variant::LD
+            | Variant::LBU
+            | Variant::LHU
+            | Variant::LWU
+            | Variant::JALR
+            | Variant::JALR_X0
+            | Variant::LOAD1_X0
+            | Variant::LOAD2_X0
+            | Variant::LOAD4_X0
+            | Variant::LOAD8_X0 => [true, false, true],
+        }
+    }
+
+    pub(crate) fn ram_words(layout: &Layout) -> Result<usize, Rv64iProverError> {
+        1_usize
+            .checked_shl(layout.log_K_ram() as u32)
+            .ok_or(Rv64iProverError::RamDimension {
+                log_K_ram: layout.log_K_ram(),
+            })
+    }
+
+    /// Checks the retained final RAM against every public I/O-mask word in ascending order.
+    /// Returns a layout or RAM-length error first, otherwise the first differing word; omitted
+    /// public segments contribute zero, including termination on a panic statement.
+    pub fn check_outputs<S: BitsCommitmentScheme>(
+        &self,
+        checked: &CheckedInputs<'_, S>,
+    ) -> Result<(), Rv64iProverError> {
+        let layout = checked.layout();
+        if self.layout.log_K_bytecode() != layout.log_K_bytecode()
+            || self.layout.log_K_ram() != layout.log_K_ram()
+            || self.layout.lowest_address() != layout.lowest_address()
+        {
+            return Err(Rv64iProverError::OutputLayoutMismatch);
+        }
+        let expected = Self::ram_words(layout)?;
+        if self.final_ram.len() != expected {
+            return Err(Rv64iProverError::FinalRamLength {
+                expected,
+                found: self.final_ram.len(),
+            });
+        }
+        let io = checked.io();
+        for index in io.io_mask_start..io.io_mask_end {
+            let expected = io
+                .segments
+                .iter()
+                .find_map(|segment| {
+                    index
+                        .checked_sub(segment.start_index)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .and_then(|offset| segment.words.get(offset))
+                        .copied()
+                })
+                .unwrap_or(0);
+            let found = self.final_ram[index as usize];
+            if expected != found {
+                return Err(Rv64iProverError::OutputMismatch {
+                    index: index as u64,
+                    expected,
+                    found,
+                });
+            }
+        }
+        Ok(())
+    }
+    /// Generates unconstrained seeded rows and replays their XOR updates for protocol fixtures.
+    /// The final cycle sets the termination word to one; geometry, missing stores, inadmissible
+    /// store addresses and RAM-allocation failures are typed errors.
     #[cfg(feature = "test-utils")]
     pub fn synthetic(
         seed: u64,
@@ -177,8 +447,10 @@ impl Rv64iWitness {
             .find(|(i, _)| *i == termination)
             .map_or(0, |(_, v)| *v);
         let mut rng = StdRng::seed_from_u64(seed);
-        let mut bits = Vec::with_capacity(count);
-        for cycle in 0..count {
+        let final_ram = Self::initial_state(&layout, &initial_ram)?;
+        let mut bits: Arc<[BitsRow]> = (0..count).map(|_| [0; 4]).collect();
+        let rows = Arc::get_mut(&mut bits).ok_or(Rv64iProverError::SharedBuffer)?;
+        for (cycle, output) in rows.iter_mut().enumerate() {
             let (index, row) = if cycle + 1 == count {
                 (
                     store,
@@ -208,16 +480,28 @@ impl Rv64iWitness {
             if cycle + 1 == count {
                 committed[0] = termination_value ^ 1;
             }
-            bits.push(committed);
+            *output = committed;
         }
         let final_pc = valid
             .get(rng.gen_range(0..valid.len()))
             .ok_or(Rv64iProverError::MissingStore)?
             .1
             .pc;
-        Self::from_bits(layout, bytecode, bits.into(), initial_ram, final_pc)
+        let mut witness =
+            Self::prepare_with_ram(layout, bytecode, bits, initial_ram, final_ram, final_pc)?;
+        witness.replay(None)?;
+        Ok(witness)
     }
 }
+enum ReplayRows<'a> {
+    Bits(&'a [BitsRow]),
+    Facts {
+        bits: &'a mut [BitsRow],
+        facts: &'a [CycleFacts],
+    },
+}
+
+/// Borrowed witness plane used by the RV64I stage kernels without cloning trace storage.
 pub struct Rv64iPlane;
 impl<F: JoltField> WitnessPlane<F> for Rv64iPlane {
     type Ref<'w>

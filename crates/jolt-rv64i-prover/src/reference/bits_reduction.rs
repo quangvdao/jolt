@@ -11,6 +11,8 @@ use jolt_rv64i_verifier::ids::{
 use jolt_rv64i_verifier::stages::stage6b::bits_reduction::BitsReduction;
 use std::collections::BTreeMap;
 
+/// Prepares dense committed-column and canonical weight tables for low-to-high cycle binding.
+/// Invalid weight geometry is reported by the kernel preparation interface.
 #[derive(Default)]
 pub struct BitsReductionPrepare;
 impl<F: JoltField> PrepareKernel<F, BitsReduction<F>, Rv64iPlane> for BitsReductionPrepare {
@@ -22,14 +24,17 @@ impl<F: JoltField> PrepareKernel<F, BitsReduction<F>, Rv64iPlane> for BitsReduct
     ) -> Result<Box<dyn SumcheckKernel<F, Relation = BitsReduction<F>>>, KernelError<F>> {
         let mut openings = BTreeMap::new();
         let mut derived = BTreeMap::new();
+        let mut point = vec![F::zero(); inputs.relation.r_1().len()];
         for y in 0..BITS_COLUMNS {
             let bits = witness
                 .bits
                 .iter()
                 .map(|r| {
-                    F::from_u64(u64::from(
-                        r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0),
-                    ))
+                    if r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0) {
+                        F::one()
+                    } else {
+                        F::zero()
+                    }
                 })
                 .collect();
             let _ = openings.insert(
@@ -38,9 +43,13 @@ impl<F: JoltField> PrepareKernel<F, BitsReduction<F>, Rv64iPlane> for BitsReduct
             );
             let weights = (0..witness.bits.len())
                 .map(|j| {
-                    let point: Vec<_> = (0..inputs.relation.r_1().len())
-                        .map(|i| F::from_u64(((j >> i) & 1) as u64))
-                        .collect();
+                    for (i, coordinate) in point.iter_mut().enumerate() {
+                        *coordinate = if (j >> i) & 1 != 0 {
+                            F::one()
+                        } else {
+                            F::zero()
+                        };
+                    }
                     inputs
                         .relation
                         .column_weight(y, &point, inputs.challenges)

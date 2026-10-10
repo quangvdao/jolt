@@ -1,50 +1,70 @@
 //! Dense test-oracle views in low-variable-first table order. State tables
-//! replay the same XOR update contract as the witness and never read fact values.
+//! replay the witness's XOR update contract, except final RAM, which reads its retained state.
 
 use crate::{error::Rv64iProverError, plane::Rv64iWitness};
-use jolt_field::{Ring, Zero, F128};
+use jolt_field::{One, Zero, F128};
 use jolt_poly::Polynomial;
-use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk};
+use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk, BITS_COLUMNS};
 use jolt_rv64i_verifier::points::{chunk as evaluate_chunk, eq_index, lift};
 use std::collections::BTreeMap;
 
+/// One of the five replayed cycle words, extended over its 64 bit indices.
 #[derive(Clone, Copy, Debug)]
 pub enum BaseWord {
+    /// First source-register value before the cycle.
     Rs1Value,
+    /// Second source-register value before the cycle.
     Rs2Value,
+    /// Destination-register value before the cycle.
     RdPreValue,
+    /// RAM word selected by the committed address, including word zero without an access.
     RamReadValue,
+    /// Successor PC, including the supplied final PC on the last cycle.
     NextPC,
 }
+/// A fetched instruction's one-hot kind selector; absent kinds contribute zero.
 #[derive(Clone, Copy, Debug)]
 pub enum Selector {
+    /// Instruction variant in the 64-entry domain.
     Variant,
+    /// Shift kind in the eight-entry domain.
     ShiftKind,
+    /// Memory access kind in the sixteen-entry domain.
     AccessKind,
+    /// Comparison key kind in the eight-entry domain.
     KeyKind,
 }
+/// A fetched row's register selector in the 32-entry domain; absent operands select zero.
 #[derive(Clone, Copy, Debug)]
 pub enum RegisterSelector {
+    /// First source-register selector.
     Rs1,
+    /// Second source-register selector.
     Rs2,
+    /// Destination-register selector.
     Rd,
 }
 
-/// A column is extended only in the cycle variables.
+/// Extends one committed column in low-variable-first cycle order; columns outside the packed row are zero.
 pub fn bits_column(witness: &Rv64iWitness, column: usize) -> Polynomial<F128> {
     Polynomial::new(
         witness
             .bits
             .iter()
             .map(|r| {
-                F128::from_u64(u64::from(
-                    r.get(column / 64)
-                        .is_some_and(|w| (w >> (column % 64)) & 1 != 0),
-                ))
+                if r.get(column / 64)
+                    .is_some_and(|w| (w >> (column % 64)) & 1 != 0)
+                {
+                    F128::one()
+                } else {
+                    F128::zero()
+                }
             })
             .collect(),
     )
 }
+/// Extends the increment at a six-coordinate low-variable-first bit point over cycle variables.
+/// Returns a point-dimension error unless the bit point has six coordinates.
 pub fn inc(witness: &Rv64iWitness, point: &[F128]) -> Result<Polynomial<F128>, Rv64iProverError> {
     Ok(Polynomial::new(
         witness
@@ -54,28 +74,33 @@ pub fn inc(witness: &Rv64iWitness, point: &[F128]) -> Result<Polynomial<F128>, R
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
+/// Extends a chunk at its low-variable-first digit point over cycle variables.
+/// Returns a point-dimension or missing-column error from the canonical chunk evaluator.
 pub fn chunk(
     witness: &Rv64iWitness,
     chunk: Chunk,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    let mut columns = [F128::zero(); BITS_COLUMNS];
     Ok(Polynomial::new(
         witness
             .bits
             .iter()
             .map(|r| {
-                let columns: Vec<_> = (0..256)
-                    .map(|y| {
-                        F128::from_u64(u64::from(
-                            r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0),
-                        ))
-                    })
-                    .collect();
+                for (y, value) in columns.iter_mut().enumerate() {
+                    *value = if r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0) {
+                        F128::one()
+                    } else {
+                        F128::zero()
+                    };
+                }
                 evaluate_chunk(chunk, point, &columns)
             })
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
+/// Extends a replayed word at a six-coordinate low-variable-first bit point over cycle variables.
+/// Returns a point-dimension error unless the bit point has six coordinates.
 pub fn base_word(
     witness: &Rv64iWitness,
     word: BaseWord,
@@ -111,7 +136,8 @@ fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iPr
         .filter(|r| r.variant.is_some())
         .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })
 }
-/// The column must be one of the fetched row's four 64-bit words.
+/// Extends a fetched row's 64-bit column at a six-coordinate low-variable-first bit point over cycles.
+/// The caller selects one of its four word columns; invalid fetches and bit dimensions return errors.
 pub fn bytecode_word(
     witness: &Rv64iWitness,
     column: BytecodeColumn,
@@ -123,6 +149,8 @@ pub fn bytecode_word(
             .collect::<Result<Vec<_>, Rv64iProverError>>()?,
     ))
 }
+/// Extends a kind selector at a low-variable-first kind point over cycle variables.
+/// Returns an error for an invalid fetch or an index outside the point's domain.
 pub fn selector(
     witness: &Rv64iWitness,
     selector: Selector,
@@ -146,26 +174,39 @@ pub fn selector(
             .collect::<Result<Vec<_>, Rv64iProverError>>()?,
     ))
 }
+/// Extends the fetched instruction's branch flag over low-variable-first cycle variables.
+/// Returns an error when a cycle fetches an invalid bytecode row.
 pub fn branch(witness: &Rv64iWitness) -> Result<Polynomial<F128>, Rv64iProverError> {
     Ok(Polynomial::new(
         (0..witness.bits.len())
             .map(|j| {
-                Ok(F128::from_u64(u64::from(
-                    fetched(witness, j)?
+                Ok(
+                    if fetched(witness, j)?
                         .variant
-                        .is_some_and(|v| v.branch().is_some()),
-                )))
+                        .is_some_and(|v| v.branch().is_some())
+                    {
+                        F128::one()
+                    } else {
+                        F128::zero()
+                    },
+                )
             })
             .collect::<Result<Vec<_>, Rv64iProverError>>()?,
     ))
 }
+/// Extends the fetched instruction's store flag over low-variable-first cycle variables.
+/// Returns an error when a cycle fetches an invalid bytecode row.
 pub fn store(witness: &Rv64iWitness) -> Result<Polynomial<F128>, Rv64iProverError> {
     Ok(Polynomial::new(
         (0..witness.bits.len())
             .map(|j| {
-                Ok(F128::from_u64(u64::from(
-                    fetched(witness, j)?.variant.is_some_and(|v| v.is_store()),
-                )))
+                Ok(
+                    if fetched(witness, j)?.variant.is_some_and(|v| v.is_store()) {
+                        F128::one()
+                    } else {
+                        F128::zero()
+                    },
+                )
             })
             .collect::<Result<Vec<_>, Rv64iProverError>>()?,
     ))
@@ -177,6 +218,8 @@ fn register(row: &BytecodeRow, selector: RegisterSelector) -> u8 {
         RegisterSelector::Rd => row.rd,
     }
 }
+/// Builds the register selector table with five low-variable-first address variables before cycle variables.
+/// Returns an error when a cycle fetches an invalid bytecode row.
 pub fn register_selector(
     witness: &Rv64iWitness,
     selector: RegisterSelector,
@@ -184,10 +227,18 @@ pub fn register_selector(
     let mut values = Vec::with_capacity(32 * witness.bits.len());
     for j in 0..witness.bits.len() {
         let selected = usize::from(register(fetched(witness, j)?, selector));
-        values.extend((0..32).map(|k| F128::from_u64(u64::from(k == selected))));
+        values.extend((0..32).map(|k| {
+            if k == selected {
+                F128::one()
+            } else {
+                F128::zero()
+            }
+        }));
     }
     Ok(Polynomial::new(values))
 }
+/// Fixes a register selector's low-variable-first address point and leaves its cycle variables.
+/// Returns an error for an invalid fetch or an index outside the point's domain.
 pub fn register_selector_at(
     witness: &Rv64iWitness,
     selector: RegisterSelector,
@@ -204,15 +255,25 @@ pub fn register_selector_at(
             .collect::<Result<Vec<_>, Rv64iProverError>>()?,
     ))
 }
+/// Builds the RAM selector table with low-variable-first address variables before cycle variables.
+/// Returns an error if the RAM domain cannot be represented on this host.
 pub fn ram_ra(witness: &Rv64iWitness) -> Result<Polynomial<F128>, Rv64iProverError> {
     let count = domain(witness)?;
     let mut values = Vec::with_capacity(count * witness.bits.len());
     for bits in witness.bits.iter() {
         let index = witness.layout.ram_index(bits);
-        values.extend((0..count).map(|k| F128::from_u64(u64::from(k as u64 == index))));
+        values.extend((0..count).map(|k| {
+            if k as u64 == index {
+                F128::one()
+            } else {
+                F128::zero()
+            }
+        }));
     }
     Ok(Polynomial::new(values))
 }
+/// Fixes a RAM selector's low-variable-first address point and leaves its cycle variables.
+/// Returns an error for an address outside the point's domain.
 pub fn ram_ra_at(
     witness: &Rv64iWitness,
     point: &[F128],
@@ -226,13 +287,10 @@ pub fn ram_ra_at(
     ))
 }
 fn domain(witness: &Rv64iWitness) -> Result<usize, Rv64iProverError> {
-    1_usize
-        .checked_shl(u32::try_from(witness.layout.log_K_ram()).unwrap_or(u32::MAX))
-        .ok_or(Rv64iProverError::TraceDimension {
-            log_T: witness.layout.log_K_ram(),
-        })
+    Rv64iWitness::ram_words(&witness.layout)
 }
-/// Address variables precede the cycle variables; the bit point is fixed.
+/// Builds the replayed register pre-state at a fixed six-coordinate low-variable-first bit point.
+/// Address variables precede cycles; invalid fetches, register selectors or bit dimensions return errors.
 pub fn registers_val(
     witness: &Rv64iWitness,
     point: &[F128],
@@ -253,6 +311,8 @@ pub fn registers_val(
     }
     Ok(Polynomial::new(values))
 }
+/// Builds the replayed RAM pre-state at a fixed six-coordinate low-variable-first bit point.
+/// Address variables precede cycles; invalid fetches, RAM dimensions or bit dimensions return errors.
 pub fn ram_val(
     witness: &Rv64iWitness,
     point: &[F128],
@@ -271,21 +331,24 @@ pub fn ram_val(
     }
     Ok(Polynomial::new(values))
 }
+/// Extends retained final RAM over low-variable-first address variables at a fixed bit point.
+/// Returns an error for a final-RAM length inconsistent with the layout or a bit point without six coordinates.
 pub fn ram_val_final(
     witness: &Rv64iWitness,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    let count = domain(witness)?;
-    let mut ram: BTreeMap<_, _> = witness.initial_ram.iter().copied().collect();
-    for (j, bits) in witness.bits.iter().enumerate() {
-        if fetched(witness, j)?.variant.is_some_and(|v| v.is_store()) {
-            let index = witness.layout.ram_index(bits);
-            *ram.entry(index).or_default() ^= witness.layout.inc(bits);
-        }
+    let expected = domain(witness)?;
+    if witness.final_ram.len() != expected {
+        return Err(Rv64iProverError::FinalRamLength {
+            expected,
+            found: witness.final_ram.len(),
+        });
     }
     Ok(Polynomial::new(
-        (0..count)
-            .map(|k| lift(ram.get(&(k as u64)).copied().unwrap_or(0), point))
+        witness
+            .final_ram
+            .iter()
+            .map(|word| lift(*word, point))
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }

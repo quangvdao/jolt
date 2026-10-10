@@ -926,6 +926,13 @@ where
     let pools = warmed_pools(&options.threads)?;
     for (threads, pool) in &pools {
         for &log_t in &options.log_t {
+            if !options.units.is_empty()
+                && !cases
+                    .iter()
+                    .any(|(name, _)| options.units.iter().any(|unit| unit == name))
+            {
+                continue;
+            }
             let source = pool
                 .install(|| prepare(log_t))
                 .map_err(|error| RunnerError::Core {

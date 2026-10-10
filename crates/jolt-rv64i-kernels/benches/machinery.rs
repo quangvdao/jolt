@@ -8,8 +8,9 @@
 //! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels --features test-utils --bench machinery -- --units validate --log-t 20,22 --threads 1,12 --samples 5
 //! ```
 //! Lift prices one whole word. Bucket prices one nibble update in the
-//! complete no-byte-selector fold layout. Scatter prices one cycle, excluding
-//! plan construction and weight/output allocation. The requirement row uses
+//! complete no-byte-selector fold layout. `bucket_small_values` runs the same
+//! updates with the zero-heavy `small_values` profile, with no requirement.
+//! Scatter prices one cycle, excluding plan construction and weight/output allocation. The requirement row uses
 //! consecutive `all_rows` destinations; `scatter_permuted` uses a fixed seeded
 //! permutation of all bytecode rows, repeated over cycles, with no requirement. Merge prices each of the
 //! `(2W - 1) * layout_len` zero-fill and tree-merge element operations.
@@ -122,12 +123,10 @@ struct Inputs {
 
 impl Inputs {
     fn new(log_t: usize) -> Result<Arc<Self>, MachineryError> {
-        let base = Arc::new(SyntheticTrace::new(
-            SynthProfile::AllRows,
-            log_t,
-            1 << 20,
-            51,
-        )?);
+        Self::with_profile(log_t, SynthProfile::AllRows)
+    }
+    fn with_profile(log_t: usize, profile: SynthProfile) -> Result<Arc<Self>, MachineryError> {
+        let base = Arc::new(SyntheticTrace::new(profile, log_t, 1 << 20, 51)?);
         let trace = Arc::new(ValidatedTrace::new(Arc::new(MachinerySource {
             base: Arc::clone(&base),
             permutation: None,
@@ -219,7 +218,7 @@ impl Machinery {
                     lift: Box::new(WordLift::new(&weights)),
                 })
             }
-            "bucket" => {
+            "bucket" | "bucket_small_values" => {
                 let source = inputs.trace.source();
                 let operations = (0..source.cycles())
                     .map(|cycle| {
@@ -485,6 +484,11 @@ fn main() -> Result<(), RunnerError> {
             ("merge", Some(0.45)),
         ],
         Inputs::new,
+        Machinery::new,
+    )?;
+    run_machinery(
+        &[("bucket_small_values", None)],
+        |log_t| Inputs::with_profile(log_t, SynthProfile::SmallValues),
         Machinery::new,
     )
 }

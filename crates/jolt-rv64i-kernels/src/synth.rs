@@ -27,6 +27,7 @@
 //! Fixed chunks of 4,096 cycles use separate ChaCha20 streams indexed by the
 //! chunk, making generation independent of the rayon pool.
 
+use crate::reduction::ColumnMap;
 use crate::source::{CycleSource, LaneSource};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -40,6 +41,24 @@ const PRESENT: u8 = 0x80;
 const WIDTHS: [usize; DIGIT_COLUMNS] = [
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 6, 3, 4, 3, 0, 0, 0, 0, 0,
 ];
+
+const WORD_BITS: usize = 64;
+const INC_WORD: usize = 5;
+const INDICATOR_COLUMNS: usize = 12;
+const FLAG_FIRST: usize = 18;
+const INDICATOR_STARTS: [usize; INDICATOR_COLUMNS] = {
+    let mut starts = [0; INDICATOR_COLUMNS];
+    let mut start = WORD_BITS;
+    let mut column = 0;
+    while column < INDICATOR_COLUMNS {
+        starts[column] = start;
+        start += (1 << WIDTHS[column]) - 1;
+        column += 1;
+    }
+    starts
+};
+const FLAGS_START: usize =
+    INDICATOR_STARTS[INDICATOR_COLUMNS - 1] + (1 << WIDTHS[INDICATOR_COLUMNS - 1]) - 1;
 
 /// Synthetic instruction and locality distributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,21 +245,18 @@ impl SyntheticTrace {
                         let b = rng.next_u32() as u8 & 3;
                         cycle.tail = a | (b << 2) | ((a & b) << 4);
                     }
-                    for (column, &packed) in cycle.digits[..12].iter().enumerate() {
+                    for (column, &packed) in cycle.digits[..INDICATOR_COLUMNS].iter().enumerate() {
                         let digit = usize::from(packed & !PRESENT);
                         if digit != 0 {
-                            let start = if column < 10 {
-                                64 + 15 * column
-                            } else {
-                                214 + 7 * (column - 10)
-                            };
+                            let start = INDICATOR_STARTS[column];
                             let bit = start + digit - 1;
                             row[bit / 64] |= 1 << (bit % 64);
                         }
                     }
-                    for column in 18..21 {
+                    for column in FLAG_FIRST..DIGIT_COLUMNS {
                         if cycle.digits[column] != 0 {
-                            row[3] |= 1 << (228 + column - 18 - 192);
+                            let bit = FLAGS_START + column - FLAG_FIRST;
+                            row[bit / WORD_BITS] |= 1 << (bit % WORD_BITS);
                         }
                     }
                 }
@@ -251,6 +267,34 @@ impl SyntheticTrace {
             cycles,
             bytecode,
         })
+    }
+
+    /// Maps the encoded Inc word, nonzero digit indicators and flag presence
+    /// to their packed-row columns, for every synthetic profile. Padding and
+    /// bytecode-only selectors have no entry; the row encoder uses this layout.
+    pub fn column_map() -> Vec<ColumnMap> {
+        let mut map = vec![ColumnMap::Word {
+            start: 0,
+            trace_word: INC_WORD,
+        }];
+        map.extend(
+            INDICATOR_STARTS
+                .iter()
+                .enumerate()
+                .map(|(column, &start)| ColumnMap::Indicators { start, column }),
+        );
+        map.push(ColumnMap::Flags {
+            start: FLAGS_START,
+            columns: (FLAG_FIRST..DIGIT_COLUMNS).collect(),
+        });
+        map
+    }
+
+    /// First packed-row bit for a column's nonzero indicators, whose lengths
+    /// are `2^bits(column) - 1`. Returns `None` for flags, selectors and invalid
+    /// columns; digit zero has no stored indicator.
+    pub fn indicator_start(column: usize) -> Option<usize> {
+        INDICATOR_STARTS.get(column).copied()
     }
 
     pub fn rows(&self) -> &[[u64; 4]] {
@@ -289,7 +333,7 @@ impl CycleSource for SyntheticTrace {
     }
     #[inline]
     fn trace_word(&self, word: usize, cycle: usize) -> u64 {
-        if word == 5 {
+        if word == INC_WORD {
             self.rows.get(cycle).map_or(0, |row| row[0])
         } else {
             self.cycles

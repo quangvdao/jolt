@@ -17,7 +17,7 @@ use jolt_rv64i_kernels::chunk_product::{
 use jolt_rv64i_kernels::column_pass::column_pass;
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::par::CycleChunks;
-use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionLeg};
+use jolt_rv64i_kernels::reduction::{g_pass_digits, ReductionCore, ReductionLeg};
 use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
@@ -48,26 +48,6 @@ fn eq(point: &[F128], vertex: usize) -> F128 {
 
 fn point(length: usize, rng: &mut ChaCha20Rng) -> Vec<F128> {
     (0..length).map(|_| F128::random(rng)).collect()
-}
-
-fn map() -> Vec<ColumnMap> {
-    let mut map = vec![ColumnMap::Word {
-        start: 0,
-        trace_word: 5,
-    }];
-    map.extend((0..10).map(|column| ColumnMap::Indicators {
-        start: 64 + 15 * column,
-        column,
-    }));
-    map.extend((10..12).map(|column| ColumnMap::Indicators {
-        start: 214 + 7 * (column - 10),
-        column,
-    }));
-    map.push(ColumnMap::Flags {
-        start: 228,
-        columns: vec![18, 19, 20],
-    });
-    map
 }
 
 struct Definition {
@@ -239,7 +219,8 @@ impl Fixture {
     }
 
     fn cores(&self) -> (ChunkProductCore, ChunkProductCore, ReductionCore) {
-        let tables = g_pass_digits(&self.trace, &map(), &self.weights).unwrap();
+        let tables =
+            g_pass_digits(&self.trace, &SyntheticTrace::column_map(), &self.weights).unwrap();
         assert_eq!(tables, self.definition.leaves[12..15]);
         let weights = self
             .terms
@@ -297,7 +278,7 @@ impl Fixture {
         for (member, (_, values)) in chunks.iter().enumerate() {
             for (c, a) in self.points[member].iter().enumerate() {
                 let zero = eq(a, 0);
-                let start = 64 + 15 * (5 * member + c);
+                let start = SyntheticTrace::indicator_start(5 * member + c).unwrap();
                 let expected = zero
                     + (1..16)
                         .map(|k| (eq(a, k) + zero) * columns[start + k - 1])
@@ -585,6 +566,31 @@ fn tail_reverse_rounds_and_finishes_match_one_dense_oracle() {
 }
 
 #[test]
+fn next_weight_selects_the_successor_at_both_ends_and_inside() {
+    let values = [11, 13, 17, 19, 23, 29, 31, 37].map(F128::from_raw);
+    // Goal "Chunk products": a Boolean point selects f[p + 1], with no wrap.
+    for (point, selected) in [
+        ([ZERO, ZERO, ZERO], F128::from_raw(13)),
+        ([ONE, ONE, ZERO], F128::from_raw(23)),
+        ([ONE, ONE, ONE], ZERO),
+    ] {
+        let weight = combined_weight(
+            3,
+            &[ChunkWeightTerm::Next {
+                coefficient: ONE,
+                point: point.to_vec(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            weight.iter().zip(values).map(|(&w, f)| w * f).sum::<F128>(),
+            selected
+        );
+        assert_eq!(weight[0], ZERO);
+    }
+}
+
+#[test]
 fn tail_multichunk_rounds_and_passes_match_one_oracle_on_each_pool() {
     acceptance(13, &[1, 12], false, &[false]);
 }
@@ -641,7 +647,7 @@ fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
         let pool = &pools[pool_index];
         for &log_t in log_sizes {
             let fixture = pool.install(|| Fixture::new(log_t));
-            let map = map();
+            let map = SyntheticTrace::column_map();
             let challenges = vec![F128::from_raw(79); log_t];
             let allowance = threads * RAYON_WORKER_ALLOWANCE.bytes;
             let allocs = threads * RAYON_WORKER_ALLOWANCE.allocs;

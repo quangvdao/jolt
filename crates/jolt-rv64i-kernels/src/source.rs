@@ -1,6 +1,7 @@
 //! Shared packed inputs for sum-check kernels. Digits are absent or smaller than
 //! `2^bits(column)`; a row-based column is a function of the bytecode row alone.
 
+use std::mem::size_of;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
@@ -72,6 +73,27 @@ pub enum SourceError {
         cycle: usize,
         row: usize,
     },
+    #[error("validation scratch {name} with {len} elements of {element_size} bytes cannot be represented")]
+    ValidationScratchSize {
+        name: &'static str,
+        len: usize,
+        element_size: usize,
+    },
+}
+
+fn check_validation_size<T>(len: usize, name: &'static str) -> Result<(), SourceError> {
+    let element_size = size_of::<T>();
+    if len
+        .checked_mul(element_size)
+        .is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        return Err(SourceError::ValidationScratchSize {
+            name,
+            len,
+            element_size,
+        });
+    }
+    Ok(())
 }
 
 /// Shared source whose dimensions, indices and every digit column are checked.
@@ -95,15 +117,27 @@ impl<S: CycleSource> ValidatedTrace<S> {
         if !rows.is_power_of_two() {
             return Err(SourceError::BytecodeRows { rows });
         }
-        let mut widths = Vec::with_capacity(source.digit_columns());
-        let mut row_digits = Vec::with_capacity(source.digit_columns());
-        for column in 0..source.digit_columns() {
+        let columns = source.digit_columns();
+        check_validation_size::<usize>(columns, "digit widths")?;
+        check_validation_size::<Option<Vec<Option<NonZeroUsize>>>>(
+            columns,
+            "row digit cache metadata",
+        )?;
+        let mut widths = Vec::with_capacity(columns);
+        let mut row_digits = Vec::with_capacity(columns);
+        for column in 0..columns {
             let bits = source.bits(column);
             if bits >= usize::BITS as usize {
                 return Err(SourceError::Width { column, bits });
             }
             widths.push(bits);
-            row_digits.push(source.by_row(column).then(|| vec![None; rows]));
+            let cache = if source.by_row(column) {
+                check_validation_size::<Option<NonZeroUsize>>(rows, "row digit cache")?;
+                Some(vec![None; rows])
+            } else {
+                None
+            };
+            row_digits.push(cache);
         }
         for row in 0..rows {
             for (column, cache) in row_digits.iter_mut().enumerate() {

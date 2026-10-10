@@ -10,6 +10,7 @@ use jolt_rv64i_kernels::source::{
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rayon::ThreadPoolBuilder;
 use std::collections::BTreeSet;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -186,6 +187,7 @@ fn malformed_dimensions_columns_and_indices_are_total() {
 struct SourceFixture {
     cycles: usize,
     rows: usize,
+    columns: usize,
     widths: [usize; 2],
     indices: [usize; 4],
     digits: [[Option<usize>; 4]; 2],
@@ -199,6 +201,7 @@ impl SourceFixture {
         Self {
             cycles: 4,
             rows: 2,
+            columns: 2,
             widths: [2, 2],
             indices: [0, 1, 0, 1],
             digits: [
@@ -235,7 +238,7 @@ impl CycleSource for SourceFixture {
         self.indices.get(cycle).copied().unwrap_or(0)
     }
     fn digit_columns(&self) -> usize {
-        2
+        self.columns
     }
     fn bits(&self, column: usize) -> usize {
         self.widths.get(column).copied().unwrap_or(0)
@@ -355,4 +358,31 @@ fn validated_source_is_scanned_once_and_reused_by_column_selections() {
     assert_eq!(second.num_polys(), 3);
     assert_eq!(first.index_bound(0), Some(4));
     assert_eq!(second.index(0, 1), None);
+}
+
+#[test]
+fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
+    let mut source = SourceFixture::new();
+    source.columns = usize::MAX;
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::ValidationScratchSize {
+            len: usize::MAX,
+            ..
+        })
+    ));
+
+    let columns = isize::MAX as usize / size_of::<usize>();
+    let mut source = SourceFixture::new();
+    source.columns = columns;
+    assert!(matches!(ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::ValidationScratchSize { len, element_size, .. })
+        if len == columns && element_size > size_of::<usize>()));
+
+    let rows = 1_usize << (usize::BITS - 1);
+    let mut source = SourceFixture::new();
+    source.rows = rows;
+    assert!(matches!(ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::ValidationScratchSize { len, element_size, .. })
+        if len == rows && element_size == size_of::<usize>()));
 }

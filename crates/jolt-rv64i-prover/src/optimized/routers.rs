@@ -34,14 +34,16 @@ use jolt_rv64i_verifier::stages::stage3a::{
     RouterShort, RouterShortInputClaims, RouterShortOutputClaims,
 };
 use jolt_rv64i_verifier::stages::stage3b::{
-    RouterCycleBranch, RouterCycleBranchInputClaims, RouterCycleBranchOutputClaims,
-    RouterCycleCompare, RouterCycleCompareInputClaims, RouterCycleCompareOutputClaims,
-    RouterCycleMemory, RouterCycleMemoryInputClaims, RouterCycleMemoryOutputClaims,
-    RouterCycleShift, RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims,
-    RouterCycleVariant, RouterCycleVariantInputClaims, RouterCycleVariantOutputClaims,
+    RouterCycleBranch, RouterCycleBranchOutputClaims, RouterCycleCompare,
+    RouterCycleCompareOutputClaims, RouterCycleMemory, RouterCycleMemoryOutputClaims,
+    RouterCycleShift, RouterCycleShiftOutputClaims, RouterCycleVariant,
+    RouterCycleVariantInputClaims, RouterCycleVariantOutputClaims,
 };
 use jolt_sumcheck::{ProveRounds, SumcheckError};
-use jolt_verifier::stages::relations::ConcreteSumcheck;
+use jolt_verifier::stages::relations::{
+    ConcreteSumcheck, ConcreteSumcheckChallenges, SumcheckInputClaims, SumcheckInputPoints,
+    SumcheckOutputClaims, SumcheckOutputPoints,
+};
 use std::fmt::Display;
 use std::iter::Zip;
 use std::marker::PhantomData;
@@ -566,61 +568,119 @@ fn factor_value(
         .ok_or_else(|| output_error("factor claim is absent"))
 }
 
-macro_rules! cycle_adapter {
-    ($prepare:ident, $relation:ident, $inputs:ident, $outputs:ident, $router:ident, |$state:ident, $source:ident, $factors:ident, $terms:ident| $output:expr) => {
-        /// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
-        /// Variant coefficients alone are checked against the relation's derived terms.
-        #[derive(Default)]
-        pub struct $prepare;
-        impl PrepareKernel<F128, $relation<F128>, Rv64iPlane> for $prepare {
-            fn prepare(&self, session: &mut ProofSession, witness: &Rv64iWitness, inputs: ProverInputs<'_, F128, $relation<F128>>) -> Result<Box<dyn SumcheckKernel<F128, Relation = $relation<F128>>>, KernelError<F128>> {
-                let TakenMember { member, group } = CycleGroup::take_member(session, witness, Router::$router, inputs.relation.r_1(), inputs.relation.x())?;
-                Ok(Box::new(CycleKernel::<$relation<F128>> { member, group, factors: bank(Router::$router, &witness.layout).factors, r_3: Vec::with_capacity(inputs.relation.r_1().len()), relation: std::marker::PhantomData }))
-            }
-        }
-        impl SumcheckKernel<F128> for CycleKernel<$relation<F128>> {
-            type Relation = $relation<F128>;
-            fn output_claims(&mut self, _: &$inputs<F128>) -> Result<$outputs<F128>, SumcheckKernelError<F128>> {
-                let ($source, values) = self.factors()?;
-                let $factors = self.factors.iter().zip(&values);
-                let mut $state = self.group.lock().map_err(output_error)?;
-                $state.claims(&self.r_3)?;
-                let $terms = &$state.variant_terms;
-                $output
-            }
-            fn validate_derived_tables(&self, relation: &Self::Relation, input_points: &$inputs<Vec<F128>>, output_points: &$outputs<Vec<F128>>, challenges: &NoChallenges<F128>) -> Result<(), SumcheckKernelError<F128>> {
-                if Router::$router == Router::Variant {
-                    let state = self.group.lock().map_err(output_error)?;
-                    let terms = &state.variant_terms;
-                    for (term, got) in terms.words.iter().map(|term| (RouterCycleDerived::WordSlot(term.slot), term.coefficient)).chain(std::iter::once((RouterCycleDerived::OneSlot, terms.one))) {
-                        let id = DerivedId::RouterCycle(Router::Variant, term);
-                        let expected = relation.derive_output_term(&id, input_points, output_points, challenges)?;
-                        if got != expected { return Err(SumcheckKernelError::DerivedTableDrift { id: id.into(), expected, got }); }
-                    }
-                }
-                Ok(())
-            }
-            fn park_residue(self: Box<Self>, session: &mut ProofSession) {
-                if let Some(state) = session.state::<CycleState>() {
-                    if state.group.is_some() {
-                        session.state_or_insert_with(CycleState::default).group = None;
-                        // plan() in the group's successful prepare pins a held session plan.
-                        let _ = session.state_or_insert_with(SharedSource::default).release_plan();
-                    }
-                }
-                drop_in_background_thread(self);
-            }
-        }
-    };
+trait CycleAdapter: Send + Sync + 'static {
+    type Relation: ConcreteSumcheck<F128>;
+    const ROUTER: Router;
+    const VALIDATES_DERIVED: bool = false;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]);
+    fn output(
+        state: &CycleGroup,
+        source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<SumcheckOutputClaims<F128, Self::Relation>, SumcheckKernelError<F128>>;
+    fn validate(
+        _state: &CycleGroup,
+        _relation: &Self::Relation,
+        _input_points: &SumcheckInputPoints<F128, Self::Relation>,
+        _output_points: &SumcheckOutputPoints<F128, Self::Relation>,
+        _challenges: &ConcreteSumcheckChallenges<F128, Self::Relation>,
+    ) -> Result<(), SumcheckKernelError<F128>> {
+        Ok(())
+    }
 }
 
-cycle_adapter!(
-    RouterCycleVariantPrepare,
-    RouterCycleVariant,
-    RouterCycleVariantInputClaims,
-    RouterCycleVariantOutputClaims,
-    Variant,
-    |state, source, factors, terms| {
+fn prepare_cycle<A: CycleAdapter>(
+    session: &mut ProofSession,
+    witness: &Rv64iWitness,
+    inputs: ProverInputs<'_, F128, A::Relation>,
+) -> Result<Box<dyn SumcheckKernel<F128, Relation = A::Relation>>, KernelError<F128>> {
+    let (r_1, x) = A::points(inputs.relation);
+    let TakenMember { member, group } =
+        CycleGroup::take_member(session, witness, A::ROUTER, r_1, x)?;
+    Ok(Box::new(CycleKernel::<A> {
+        member,
+        group,
+        factors: bank(A::ROUTER, &witness.layout).factors,
+        r_3: Vec::with_capacity(r_1.len()),
+        relation: PhantomData,
+    }))
+}
+
+impl<A: CycleAdapter> SumcheckKernel<F128> for CycleKernel<A> {
+    type Relation = A::Relation;
+
+    fn output_claims(
+        &mut self,
+        _: &SumcheckInputClaims<F128, Self::Relation>,
+    ) -> Result<SumcheckOutputClaims<F128, Self::Relation>, SumcheckKernelError<F128>> {
+        let (source, values) = self.factors()?;
+        let factors = self.factors.iter().zip(&values);
+        let mut state = self.group.lock().map_err(output_error)?;
+        state.claims(&self.r_3)?;
+        A::output(&state, source, &factors)
+    }
+
+    fn validate_derived_tables(
+        &self,
+        relation: &Self::Relation,
+        input_points: &SumcheckInputPoints<F128, Self::Relation>,
+        output_points: &SumcheckOutputPoints<F128, Self::Relation>,
+        challenges: &ConcreteSumcheckChallenges<F128, Self::Relation>,
+    ) -> Result<(), SumcheckKernelError<F128>> {
+        if !A::VALIDATES_DERIVED {
+            return Ok(());
+        }
+        let state = self.group.lock().map_err(output_error)?;
+        A::validate(&state, relation, input_points, output_points, challenges)
+    }
+
+    fn park_residue(self: Box<Self>, session: &mut ProofSession) {
+        if let Some(state) = session.state::<CycleState>() {
+            if state.group.is_some() {
+                session.state_or_insert_with(CycleState::default).group = None;
+                // plan() in the group's successful prepare pins a held session plan.
+                let _ = session
+                    .state_or_insert_with(SharedSource::default)
+                    .release_plan();
+            }
+        }
+        drop_in_background_thread(self);
+    }
+}
+
+/// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+/// Variant coefficients alone are checked against the relation's derived terms.
+#[derive(Default)]
+pub struct RouterCycleVariantPrepare;
+
+impl PrepareKernel<F128, RouterCycleVariant<F128>, Rv64iPlane> for RouterCycleVariantPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterCycleVariant<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterCycleVariant<F128>>>, KernelError<F128>>
+    {
+        prepare_cycle::<Self>(session, witness, inputs)
+    }
+}
+
+impl CycleAdapter for RouterCycleVariantPrepare {
+    type Relation = RouterCycleVariant<F128>;
+    const ROUTER: Router = Router::Variant;
+    const VALIDATES_DERIVED: bool = true;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]) {
+        (relation.r_1(), relation.x())
+    }
+
+    fn output(
+        state: &CycleGroup,
+        source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<RouterCycleVariantOutputClaims<F128>, SumcheckKernelError<F128>> {
+        let terms = &state.variant_terms;
         let rs1_value = state.word(BankWord::Rs1Value)?;
         let rs2_value = state.word(BankWord::Rs2Value)?;
         let rd_pre_value = state.word(BankWord::RdPreValue)?;
@@ -645,69 +705,193 @@ cycle_adapter!(
             pc,
             next_pc,
             variant_bits,
-            variant: factor_value(&factors, Factor::Variant)?,
+            variant: factor_value(factors, Factor::Variant)?,
         })
     }
-);
-cycle_adapter!(
-    RouterCycleShiftPrepare,
-    RouterCycleShift,
-    RouterCycleShiftInputClaims,
-    RouterCycleShiftOutputClaims,
-    Shift,
-    |state, _source, factors, _terms| {
+
+    fn validate(
+        state: &CycleGroup,
+        relation: &Self::Relation,
+        input_points: &RouterCycleVariantInputClaims<Vec<F128>>,
+        output_points: &RouterCycleVariantOutputClaims<Vec<F128>>,
+        challenges: &NoChallenges<F128>,
+    ) -> Result<(), SumcheckKernelError<F128>> {
+        let terms = &state.variant_terms;
+        for (term, got) in terms
+            .words
+            .iter()
+            .map(|term| (RouterCycleDerived::WordSlot(term.slot), term.coefficient))
+            .chain(std::iter::once((RouterCycleDerived::OneSlot, terms.one)))
+        {
+            let id = DerivedId::RouterCycle(Router::Variant, term);
+            let expected =
+                relation.derive_output_term(&id, input_points, output_points, challenges)?;
+            if got != expected {
+                return Err(SumcheckKernelError::DerivedTableDrift {
+                    id: id.into(),
+                    expected,
+                    got,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+/// Variant coefficients alone are checked against the relation's derived terms.
+#[derive(Default)]
+pub struct RouterCycleShiftPrepare;
+
+impl PrepareKernel<F128, RouterCycleShift<F128>, Rv64iPlane> for RouterCycleShiftPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterCycleShift<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterCycleShift<F128>>>, KernelError<F128>>
+    {
+        prepare_cycle::<Self>(session, witness, inputs)
+    }
+}
+
+impl CycleAdapter for RouterCycleShiftPrepare {
+    type Relation = RouterCycleShift<F128>;
+    const ROUTER: Router = Router::Shift;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]) {
+        (relation.r_1(), relation.x())
+    }
+
+    fn output(
+        state: &CycleGroup,
+        _source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<RouterCycleShiftOutputClaims<F128>, SumcheckKernelError<F128>> {
         Ok(RouterCycleShiftOutputClaims {
             rs1_value: state.word(BankWord::Rs1Value)?,
-            shift_kind: factor_value(&factors, Factor::ShiftKind)?,
-            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
-            pos_ra_1: factor_value(&factors, Factor::Pos(1))?,
+            shift_kind: factor_value(factors, Factor::ShiftKind)?,
+            pos_ra_0: factor_value(factors, Factor::Pos(0))?,
+            pos_ra_1: factor_value(factors, Factor::Pos(1))?,
         })
     }
-);
-cycle_adapter!(
-    RouterCycleMemoryPrepare,
-    RouterCycleMemory,
-    RouterCycleMemoryInputClaims,
-    RouterCycleMemoryOutputClaims,
-    Memory,
-    |state, _source, factors, _terms| {
+}
+
+/// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+/// Variant coefficients alone are checked against the relation's derived terms.
+#[derive(Default)]
+pub struct RouterCycleMemoryPrepare;
+
+impl PrepareKernel<F128, RouterCycleMemory<F128>, Rv64iPlane> for RouterCycleMemoryPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterCycleMemory<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterCycleMemory<F128>>>, KernelError<F128>>
+    {
+        prepare_cycle::<Self>(session, witness, inputs)
+    }
+}
+
+impl CycleAdapter for RouterCycleMemoryPrepare {
+    type Relation = RouterCycleMemory<F128>;
+    const ROUTER: Router = Router::Memory;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]) {
+        (relation.r_1(), relation.x())
+    }
+
+    fn output(
+        state: &CycleGroup,
+        _source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<RouterCycleMemoryOutputClaims<F128>, SumcheckKernelError<F128>> {
         Ok(RouterCycleMemoryOutputClaims {
             ram_read_value: state.word(BankWord::RamReadValue)?,
             rs2_value: state.word(BankWord::Rs2Value)?,
-            access_kind: factor_value(&factors, Factor::AccessKind)?,
-            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
+            access_kind: factor_value(factors, Factor::AccessKind)?,
+            pos_ra_0: factor_value(factors, Factor::Pos(0))?,
         })
     }
-);
-cycle_adapter!(
-    RouterCycleComparePrepare,
-    RouterCycleCompare,
-    RouterCycleCompareInputClaims,
-    RouterCycleCompareOutputClaims,
-    Compare,
-    |state, _source, factors, _terms| {
+}
+
+/// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+/// Variant coefficients alone are checked against the relation's derived terms.
+#[derive(Default)]
+pub struct RouterCycleComparePrepare;
+
+impl PrepareKernel<F128, RouterCycleCompare<F128>, Rv64iPlane> for RouterCycleComparePrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterCycleCompare<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterCycleCompare<F128>>>, KernelError<F128>>
+    {
+        prepare_cycle::<Self>(session, witness, inputs)
+    }
+}
+
+impl CycleAdapter for RouterCycleComparePrepare {
+    type Relation = RouterCycleCompare<F128>;
+    const ROUTER: Router = Router::Compare;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]) {
+        (relation.r_1(), relation.x())
+    }
+
+    fn output(
+        state: &CycleGroup,
+        _source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<RouterCycleCompareOutputClaims<F128>, SumcheckKernelError<F128>> {
         Ok(RouterCycleCompareOutputClaims {
             rs1_value: state.word(BankWord::Rs1Value)?,
             rs2_value: state.word(BankWord::Rs2Value)?,
             imm: state.word(BankWord::Imm)?,
-            key_kind: factor_value(&factors, Factor::KeyKind)?,
-            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
-            pos_ra_1: factor_value(&factors, Factor::Pos(1))?,
+            key_kind: factor_value(factors, Factor::KeyKind)?,
+            pos_ra_0: factor_value(factors, Factor::Pos(0))?,
+            pos_ra_1: factor_value(factors, Factor::Pos(1))?,
         })
     }
-);
-cycle_adapter!(
-    RouterCycleBranchPrepare,
-    RouterCycleBranch,
-    RouterCycleBranchInputClaims,
-    RouterCycleBranchOutputClaims,
-    Branch,
-    |state, _source, factors, _terms| {
+}
+
+/// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+/// Variant coefficients alone are checked against the relation's derived terms.
+#[derive(Default)]
+pub struct RouterCycleBranchPrepare;
+
+impl PrepareKernel<F128, RouterCycleBranch<F128>, Rv64iPlane> for RouterCycleBranchPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterCycleBranch<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterCycleBranch<F128>>>, KernelError<F128>>
+    {
+        prepare_cycle::<Self>(session, witness, inputs)
+    }
+}
+
+impl CycleAdapter for RouterCycleBranchPrepare {
+    type Relation = RouterCycleBranch<F128>;
+    const ROUTER: Router = Router::Branch;
+
+    fn points(relation: &Self::Relation) -> (&[F128], &[F128]) {
+        (relation.r_1(), relation.x())
+    }
+
+    fn output(
+        state: &CycleGroup,
+        _source: F128,
+        factors: &FactorValues<'_>,
+    ) -> Result<RouterCycleBranchOutputClaims<F128>, SumcheckKernelError<F128>> {
         Ok(RouterCycleBranchOutputClaims {
             fall_through_pc: state.word(BankWord::FallThroughPC)?,
             pc_plus_imm: state.word(BankWord::PCPlusImm)?,
-            branch: factor_value(&factors, Factor::Branch)?,
-            should_branch: factor_value(&factors, Factor::ShouldBranch)?,
+            branch: factor_value(factors, Factor::Branch)?,
+            should_branch: factor_value(factors, Factor::ShouldBranch)?,
         })
     }
-);
+}

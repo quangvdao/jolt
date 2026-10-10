@@ -3,7 +3,10 @@
     reason = "exhaustive contract tests fail on invalid setup or an unexpected oracle result"
 )]
 
-use super::common::{asm, harness, replay};
+use super::common::{
+    asm, harness,
+    replay::{self, State},
+};
 use jolt_rv64i_arith::{BitsBuilder, BitsRow, Layout, RowSystem, Variant, WitnessRow};
 
 fn instruction(variant: Variant, extreme: i32) -> Option<u32> {
@@ -156,7 +159,7 @@ fn boundary_candidates(extreme: i32) {
         let row = &bytecode.rows()[0];
         assert_eq!(row.variant, Some(variant));
         for &(a, b) in &operands {
-            let mut initial = replay::State::new(0);
+            let mut initial = State::new(0);
             initial.registers[1] = a;
             initial.registers[2] = b;
             initial.registers[3] = 0xc3b2_a190_7865_4fed;

@@ -72,7 +72,7 @@ struct Prepared {
 }
 
 struct TimedCore {
-    inner: ChunkProductCore<SyntheticTrace>,
+    inner: ChunkProductCore,
     log_t: usize,
     setup_ns: [u128; 3],
     round_ns: [u128; 2],
@@ -330,7 +330,7 @@ impl TimedCore {
 
 fn nine_term_allocation_core(
     source: Arc<SyntheticTrace>,
-) -> Result<(ChunkProductCore<SyntheticTrace>, F128), BenchError> {
+) -> Result<(ChunkProductCore, F128), BenchError> {
     let log_t = source.cycles().ilog2() as usize;
     let columns = DigitColumns::new(source, (0..5).collect())?;
     let points = digit_points();

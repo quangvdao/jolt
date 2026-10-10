@@ -8,10 +8,12 @@ use crate::round::{
 };
 use crate::source::{CycleSource, DigitColumns};
 use jolt_field::{Accumulator, F128Accumulator, F128};
-use jolt_kernels::optimized::lazy_ra::{LazyFoldedRa, LazyRaError};
+use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
 use jolt_poly::{GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
+use std::alloc::Layout;
 use thiserror::Error;
 
 const ZERO: F128 = F128::from_raw(0);
@@ -41,6 +43,10 @@ pub enum ChunkWeight {
 pub enum ChunkProductError {
     #[error("{columns} columns supplied; expected 1..=7")]
     Columns { columns: usize },
+    #[error("column {column} has {bits} bits; at most 8 are supported")]
+    ColumnWidth { column: usize, bits: usize },
+    #[error("{buffer} allocation has an unrepresentable element count or byte size")]
+    AllocationSize { buffer: &'static str },
     #[error("expected {expected} chunk points, got {actual}")]
     PointCount { expected: usize, actual: usize },
     #[error("column {column} point has {actual} coordinates, expected {expected}")]
@@ -173,24 +179,95 @@ enum State {
     Failed,
 }
 
+fn checked_len<T>(
+    elements: Option<usize>,
+    buffer: &'static str,
+) -> Result<usize, ChunkProductError> {
+    let elements = elements.ok_or(ChunkProductError::AllocationSize { buffer })?;
+    let _layout =
+        Layout::array::<T>(elements).map_err(|_| ChunkProductError::AllocationSize { buffer })?;
+    Ok(elements)
+}
+
+struct PresentDigits {
+    digits: Vec<u8>,
+    bits: [usize; 7],
+    d: usize,
+    cycles: usize,
+}
+
+impl PresentDigits {
+    fn new<S: CycleSource>(
+        columns: &DigitColumns<S>,
+        bits: [usize; 7],
+        geometry: CycleChunks,
+    ) -> Result<Self, ChunkProductError> {
+        let d = columns.num_polys();
+        let cycles = columns.cycles();
+        let len = checked_len::<u8>(cycles.checked_mul(d), "present digits")?;
+        let mut digits = unsafe_allocate_zero_vec(len);
+        let missing = digits
+            .par_chunks_mut(geometry.chunk_len() * d)
+            .enumerate()
+            .find_map_first(|(chunk, output)| {
+                let start = chunk * geometry.chunk_len();
+                for (offset, row) in output.chunks_exact_mut(d).enumerate() {
+                    let cycle = start + offset;
+                    for (column, digit) in row.iter_mut().enumerate() {
+                        match columns.index(column, cycle) {
+                            Some(index) => *digit = index as u8,
+                            None => return Some(ChunkProductError::MissingDigit { column, cycle }),
+                        }
+                    }
+                }
+                None
+            });
+        if let Some(error) = missing {
+            return Err(error);
+        }
+        Ok(Self {
+            digits,
+            bits,
+            d,
+            cycles,
+        })
+    }
+}
+
+impl ChunkIndexSource for PresentDigits {
+    fn num_polys(&self) -> usize {
+        self.d
+    }
+    fn cycles(&self) -> usize {
+        self.cycles
+    }
+    #[inline]
+    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
+        Some(self.digits[cycle * self.d + column] as usize)
+    }
+    fn index_bound(&self, column: usize) -> Option<usize> {
+        Some(1 << self.bits[column])
+    }
+}
+
 /// Degree `d+1` cycle sum-check for one through seven digit columns.
 /// The source must remain immutable under the `CycleSource` contract. All
 /// digits are checked present at construction; range validation is owned by
 /// `DigitColumns`. With `EqTerms`, honest individual weighted claims are
 /// required of the caller, not checked, and detected by the verifier.
-pub struct ChunkProductCore<S: CycleSource> {
-    columns: LazyFoldedRa<F128, DigitColumns<S>>,
+pub struct ChunkProductCore {
+    columns: LazyFoldedRa<F128, PresentDigits>,
     weight: WeightState,
     log_t: usize,
     d: usize,
     state: State,
 }
 
-impl<S: CycleSource> ChunkProductCore<S> {
+impl ChunkProductCore {
     /// Validates column/point counts, point dimensions, weight lengths and term
     /// dimensions before constructing the lazy family. `Eq` and `Next` are
     /// construction terms and are rejected here; first call `combined_weight`.
-    pub fn new(
+    pub fn new<S: CycleSource>(
         columns: DigitColumns<S>,
         points: Vec<Vec<F128>>,
         weight: ChunkWeight,
@@ -205,8 +282,16 @@ impl<S: CycleSource> ChunkProductCore<S> {
                 actual: points.len(),
             });
         }
+        let mut bits = [0; 7];
         for (column, point) in points.iter().enumerate() {
             let expected = columns.source().bits(columns.columns()[column]);
+            if expected > 8 {
+                return Err(ChunkProductError::ColumnWidth {
+                    column,
+                    bits: expected,
+                });
+            }
+            bits[column] = expected;
             if point.len() != expected {
                 return Err(ChunkProductError::PointLength {
                     column,
@@ -253,7 +338,14 @@ impl<S: CycleSource> ChunkProductCore<S> {
                 } else {
                     vec![
                         F128Accumulator::default();
-                        geometry.len().div_ceil(geometry.chunk_len()) * terms.len() * 8
+                        checked_len::<F128Accumulator>(
+                            geometry
+                                .len()
+                                .div_ceil(geometry.chunk_len())
+                                .checked_mul(terms.len())
+                                .and_then(|len| len.checked_mul(8)),
+                            "equality term scratch",
+                        )?
                     ]
                 };
                 WeightState::Terms { terms, scratch }
@@ -264,25 +356,10 @@ impl<S: CycleSource> ChunkProductCore<S> {
         };
         let geometry =
             CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
-        let missing = (0..geometry.len() / geometry.chunk_len())
-            .into_par_iter()
-            .find_map_first(|chunk| {
-                let start = chunk * geometry.chunk_len();
-                for cycle in start..start + geometry.chunk_len() {
-                    for column in 0..d {
-                        if columns.index(column, cycle).is_none() {
-                            return Some(ChunkProductError::MissingDigit { column, cycle });
-                        }
-                    }
-                }
-                None
-            });
-        if let Some(error) = missing {
-            return Err(error);
-        }
+        let present = PresentDigits::new(&columns, bits, geometry)?;
         let columns = LazyFoldedRa::try_new(
             points.iter().map(|point| eq_table(point, None)).collect(),
-            columns,
+            present,
         )?;
         let state = if log_t == 0 {
             let w = match &weight {
@@ -405,9 +482,9 @@ impl<S: CycleSource> ChunkProductCore<S> {
         let columns = &self.columns;
         let stride = terms.len() * 8;
         let reduced = match terms.len() {
-            1 => stack_term_sums::<S, D, N, 1>(&self.columns, terms, geometry),
-            2 => stack_term_sums::<S, D, N, 2>(&self.columns, terms, geometry),
-            5 => stack_term_sums::<S, D, N, 5>(&self.columns, terms, geometry),
+            1 => stack_term_sums::<D, N, 1>(&self.columns, terms, geometry),
+            2 => stack_term_sums::<D, N, 2>(&self.columns, terms, geometry),
+            5 => stack_term_sums::<D, N, 5>(&self.columns, terms, geometry),
             _ => {
                 scratch.truncate(geometry.len().div_ceil(chunk_pairs) * stride);
                 scratch
@@ -533,8 +610,8 @@ impl<S: CycleSource> ChunkProductCore<S> {
     }
 }
 
-fn stack_term_sums<S: CycleSource, const D: usize, const N: usize, const M: usize>(
-    columns: &LazyFoldedRa<F128, DigitColumns<S>>,
+fn stack_term_sums<const D: usize, const N: usize, const M: usize>(
+    columns: &LazyFoldedRa<F128, PresentDigits>,
     terms: &[EqTerm],
     geometry: CycleChunks,
 ) -> Vec<[F128; 8]> {
@@ -669,7 +746,7 @@ fn accumulate_product<const D: usize, const N: usize>(
     }
 }
 
-impl<S: CycleSource> ProveRounds<F128> for ChunkProductCore<S> {
+impl ProveRounds<F128> for ChunkProductCore {
     fn num_rounds(&self) -> usize {
         self.log_t
     }
@@ -764,5 +841,23 @@ impl<S: CycleSource> ProveRounds<F128> for ChunkProductCore<S> {
         };
         self.state = State::Finished((weight, self.columns.final_values()));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::{checked_len, ChunkProductError};
+    use jolt_field::F128Accumulator;
+
+    #[test]
+    fn overflowing_scratch_count_and_byte_size_are_typed_errors() {
+        for elements in [None, Some(usize::MAX)] {
+            assert!(matches!(
+                checked_len::<F128Accumulator>(elements, "equality term scratch"),
+                Err(ChunkProductError::AllocationSize {
+                    buffer: "equality term scratch"
+                })
+            ));
+        }
     }
 }

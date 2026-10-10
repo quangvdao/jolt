@@ -75,6 +75,8 @@ impl CycleSource for UniformColumns {
     fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
         if column >= self.columns || (self.missing && column == 0 && cycle == 3) {
             None
+        } else if self.cycles_override == Some(1) && cycle == 0 {
+            Some(0)
         } else {
             self.trace
                 .digit(column, cycle)
@@ -149,7 +151,7 @@ fn defining_weight(log_t: usize, terms: &[ChunkWeight]) -> Vec<F128> {
 }
 
 struct RecordingCore {
-    inner: ChunkProductCore<UniformColumns>,
+    inner: ChunkProductCore,
     messages: Vec<UnivariatePoly<F128>>,
 }
 
@@ -595,6 +597,30 @@ fn log_size_rejects_an_unrepresentable_table() {
         assert!(matches!(
             combined_weight(exponent, &[]),
             Err(ChunkProductError::LogSize { log_t }) if log_t == exponent
+        ));
+    }
+}
+
+#[test]
+fn column_width_rejects_oversized_tables_on_one_cycle() {
+    for bits in [9, 59] {
+        let source = Arc::new(UniformColumns {
+            trace: SyntheticTrace::new(SynthProfile::UniformDigits, 1, 1, 0xc8_0011).unwrap(),
+            columns: 1,
+            top_bits: bits,
+            missing: false,
+            cycles_override: Some(1),
+        });
+        let validated = Arc::new(ValidatedTrace::new(source).unwrap());
+        let selected = DigitColumns::from_validated(validated, vec![0]).unwrap();
+        assert_eq!(selected.index(0, 0), Some(0));
+        assert!(matches!(
+            ChunkProductCore::new(
+                selected,
+                vec![vec![ZERO; bits]],
+                ChunkWeight::Dense(vec![ONE])
+            ),
+            Err(ChunkProductError::ColumnWidth { column: 0, bits: rejected }) if rejected == bits
         ));
     }
 }

@@ -67,7 +67,7 @@ fn mul_node(mut value: F128, mut node: u8) -> F128 {
 /// are not const. Its first use builds all seven matrices with the shared
 /// interpolator; later calls allocate nothing and perform no inversion.
 /// Multiplications by zero and one are skipped. Excluding initialization,
-/// degrees 2, 3, 4, 5, 6, 7, 8 cost respectively 0, 4, 9, 16, 25, 36, 49
+/// degrees 2, 3, 4, 5, 6, 7, 8 cost respectively 0, 4, 8, 15, 23, 36, 48
 /// field multiplications; subtracting the leading term uses shifts and XORs.
 pub fn coefficients_from_nodes(
     degree: usize,

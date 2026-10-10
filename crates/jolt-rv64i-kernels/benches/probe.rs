@@ -20,13 +20,12 @@
 //! | X | arithmetic/mul_x_raw_shift_substitute/local | raw shift and conditional modulus XOR |
 //! | w | arithmetic/word_monomial_mix/local | representative outer monomial word operations |
 //!
-//! Fused chains have lengths 0,1,2,4,8,20. Every cycle prepares the same twenty
-//! masked operand pairs at every length. Nonempty chains accumulate and reduce
-//! on the stack, then XOR the result into the chunk total; zero uses one prepared
-//! operand and the same total XOR, with no multiplication/reduction. Fits use
-//! nonzero-length per-cycle medians and print slope, intercept, the zero control,
-//! their difference and the largest absolute residual. Reduction estimates may
-//! be negative on a noisy run; no estimate is clamped or represented as latency.
+//! Hot product and runtime-length chain records use a prepared 32 KiB operand
+//! block. Chain times are per chain and per term; only the incremental long-chain
+//! cost is an A candidate after inspecting both loops. Reduction uses a prepared
+//! accumulator bank and an opaque no-reduction control; their checksum widths
+//! differ, so their signed difference remains context. Fused trace chains retain
+//! their preparation and short-chain totals; no affine law is fitted.
 //!
 //! mul_x is absent from this branch's field API. Its substitute implements the
 //! specified polynomial-basis shift/reduction using modulus mask 0x87. The word
@@ -107,7 +106,8 @@ use thiserror::Error;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
-use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
+use support::arithmetic::HotArithmetic;
+use support::{run_probe, ProbeCase, ProbeKernel, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
 
@@ -1301,6 +1301,7 @@ enum Unit {
     Fmadd(Box<Fmadd>),
     Merge(Merge),
     Arithmetic(Arithmetic),
+    Hot(HotArithmetic),
     Readout(Readout),
 }
 
@@ -1387,6 +1388,26 @@ impl Unit {
                     .ok_or_else(invalid)?;
                 Ok(Self::Fmadd(Box::new(Fmadd::new(trace()?, terms))))
             }
+            "arithmetic" if case.variant == "product_hot" => {
+                Ok(Self::Hot(HotArithmetic::product()))
+            }
+            "arithmetic" if case.variant.starts_with("chain_hot/") => {
+                let terms = case
+                    .variant
+                    .strip_prefix("chain_hot/")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .filter(|n| [1, 2, 4, 8, 20, 256, 1024].contains(n))
+                    .ok_or_else(invalid)?;
+                Ok(Self::Hot(HotArithmetic::chain(terms)))
+            }
+            "arithmetic" if case.variant.starts_with("reduce_hot") => {
+                if !["reduce_hot", "reduce_hot_control"].contains(&case.variant.as_str()) {
+                    return Err(invalid());
+                }
+                Ok(Self::Hot(HotArithmetic::reduction(
+                    case.variant == "reduce_hot_control",
+                )))
+            }
             "arithmetic" => {
                 let kind = match case.variant.as_str() {
                     "products" => ArithmeticKind::Product,
@@ -1454,6 +1475,7 @@ impl ProbeKernel for Unit {
                 0,
             ],
             Self::Readout(unit) => [unit.operations, 0],
+            Self::Hot(unit) => [unit.operations(), 0],
         }
     }
 
@@ -1467,6 +1489,7 @@ impl ProbeKernel for Unit {
             Self::Merge(unit) => unit.run(),
             Self::Arithmetic(unit) => unit.run(),
             Self::Readout(unit) => unit.run(),
+            Self::Hot(unit) => unit.run(),
         }
     }
 
@@ -1482,7 +1505,7 @@ impl ProbeKernel for Unit {
 
     fn chain_terms(&self) -> Option<usize> {
         match self {
-            Self::Fmadd(unit) => Some(unit.terms),
+            Self::Hot(unit) => unit.terms(),
             _ => None,
         }
     }
@@ -1498,113 +1521,6 @@ fn trace_value(source: &SyntheticTrace, cycle: usize) -> F128 {
 fn field_values(entries: usize) -> Vec<F128> {
     let mut rng = ChaCha20Rng::seed_from_u64(0x0074_6162_6c65);
     (0..entries).map(|_| F128::random(&mut rng)).collect()
-}
-
-#[derive(Clone, Copy)]
-enum PriceMetric {
-    Time,
-    Slope,
-    Reduction,
-}
-
-struct UnitPrice {
-    unit: &'static str,
-    record: &'static str,
-    estimates: [f64; 2],
-    metric: PriceMetric,
-}
-
-const UNIT_PRICES: [UnitPrice; 9] = [
-    UnitPrice {
-        unit: "M",
-        record: "probe/arithmetic/products/local/",
-        estimates: [1.83, 0.9],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "A",
-        record: "probe/fmadd/fit/local/",
-        estimates: [1.10, 0.7],
-        metric: PriceMetric::Slope,
-    },
-    UnitPrice {
-        unit: "R",
-        record: "probe/fmadd/fit/local/",
-        estimates: [0.7, 0.2],
-        metric: PriceMetric::Reduction,
-    },
-    UnitPrice {
-        unit: "L",
-        record: "probe/lookup/g_digits_69kib/local/",
-        estimates: [0.4, 0.4],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "Bk",
-        record: "probe/bucket/fold_none_share_0/all_rows/",
-        estimates: [0.6, 0.6],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "sct",
-        record: "probe/sct/partitioned_emit_rows_20/all_rows/",
-        estimates: [1.4, 1.4],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "mrg",
-        record: "probe/readout/column_128kib/independent/",
-        estimates: [0.3, 0.3],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "X",
-        record: "probe/arithmetic/mul_x_raw_shift_substitute/local/",
-        estimates: [0.2, 0.2],
-        metric: PriceMetric::Time,
-    },
-    UnitPrice {
-        unit: "w",
-        record: "probe/arithmetic/word_monomial_mix/local/",
-        estimates: [0.05, 0.05],
-        metric: PriceMetric::Time,
-    },
-];
-
-impl UnitPrice {
-    #[expect(
-        clippy::print_stdout,
-        reason = "unit-table is the probe's calibration summary contract"
-    )]
-    fn print_table(records: &[ProbeRecord]) {
-        println!("unit-table");
-        for price in &UNIT_PRICES {
-            let record = records
-                .iter()
-                .filter(|record| record.id.starts_with(price.record) && record.id.ends_with("/1"))
-                .max_by_key(|record| {
-                    record
-                        .id
-                        .split('/')
-                        .nth(4)
-                        .and_then(|log_t| log_t.parse::<usize>().ok())
-                        .unwrap_or(0)
-                });
-            let value = record.and_then(|record| match price.metric {
-                PriceMetric::Time => Some(record.median),
-                PriceMetric::Slope => record.fit.as_ref().map(|fit| fit.slope),
-                PriceMetric::Reduction => record.fit.as_ref().map(|fit| fit.reduction),
-            });
-            if let Some((record, value)) = record.zip(value) {
-                println!(
-                    "unit-table {} record={} median_ns={value:.6} spec_1_ns={:.6} spec_2_ns={:.6}",
-                    price.unit, record.id, price.estimates[0], price.estimates[1]
-                );
-            } else {
-                println!("unit-table {} record={} median_ns=not_measured spec_1_ns={:.6} spec_2_ns={:.6} reason=matching_single_thread_record_not_requested", price.unit, price.record, price.estimates[0], price.estimates[1]);
-            }
-        }
-    }
 }
 
 fn main() -> Result<(), RunnerError> {
@@ -1682,6 +1598,22 @@ fn main() -> Result<(), RunnerError> {
             minimum_threads: if variant == "tree_only_10mib" { 2 } else { 1 },
         });
     }
+    for variant in ["product_hot", "reduce_hot", "reduce_hot_control"] {
+        cases.push(ProbeCase {
+            unit: "arithmetic",
+            variant: variant.to_owned(),
+            profiles: &[],
+            minimum_threads: 1,
+        });
+    }
+    for n in [1, 2, 4, 8, 20, 256, 1024] {
+        cases.push(ProbeCase {
+            unit: "arithmetic",
+            variant: format!("chain_hot/{n}"),
+            profiles: &[],
+            minimum_threads: 1,
+        });
+    }
     for variant in [
         "products",
         "mul_x_raw_shift_substitute",
@@ -1702,7 +1634,5 @@ fn main() -> Result<(), RunnerError> {
             minimum_threads: 1,
         });
     }
-    let records = run_probe(&cases, Unit::new)?;
-    UnitPrice::print_table(&records);
-    Ok(())
+    run_probe(&cases, Unit::new).map(|_| ())
 }

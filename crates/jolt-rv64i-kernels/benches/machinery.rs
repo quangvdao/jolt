@@ -4,7 +4,7 @@
 //! `validate_tail` adds the two present five-column groups; `validate_all`
 //! adds the routers' optional group too. All three run with `--units validate`.
 //! Each cycle checks one bytecode index and all 21 digits, 11 of them compared with
-//! a one-byte row cache; each bytecode row reads those 11 digits once. It has no
+//! one row-major u16 cache; each bytecode row reads those 11 digits once. It has no
 //! requirement. To run it alone:
 //! ```sh
 //! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels --features test-utils --bench machinery -- --units validate --log-t 20,22 --threads 1,12 --samples 5

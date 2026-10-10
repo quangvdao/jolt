@@ -2,7 +2,9 @@
 
 use crate::bytecode::BytecodeRow;
 use crate::cycle::CycleFacts;
-use crate::decode::{eval, load_form, shift_form, store_form, Rails, Source, Sources, BRANCH_FORM};
+use crate::decode::{
+    eval, load_form, shift_form, store_form, FormError, Line, Rails, Source, Sources, BRANCH_FORM,
+};
 use crate::layout::{BitsRow, Layout};
 
 /// Values supplied by the surrounding register, RAM and successor arguments.
@@ -38,6 +40,106 @@ impl BaseWords {
             rd_write_value: facts.rd_post_value,
             ram_read_value: facts.ram_pre_value,
             next_pc: facts.next_pc,
+        }
+    }
+}
+
+/// Decode rails, carry words and selected key bits, without positional forms,
+/// expected words or residuals. `NextPC` remains an input to the JALR rail.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct F2Words {
+    add_left: u64,
+    add_right: u64,
+    add_sum: u64,
+    and_left: u64,
+    and_right: u64,
+    and_out: u64,
+    left_key: u64,
+    right_key: u64,
+    pub(crate) less_than: u64,
+    carry: u64,
+    carry_left: u64,
+    carry_right: u64,
+    carry_step: u64,
+    key_diff: u64,
+    pub(crate) left_key_bit: u64,
+    pub(crate) right_key_bit: u64,
+}
+
+impl F2Words {
+    #[inline]
+    fn rails(line: &Line, src: &Sources) -> Self {
+        let mut words = Self::default();
+        match &line.rails {
+            Rails::None => {}
+            Rails::Adder { left, right, sum } => {
+                words.add_left = eval(left, src);
+                words.add_right = eval(right, src);
+                words.add_sum = eval(sum, src);
+            }
+            Rails::And { left, right, out } => {
+                words.and_left = eval(left, src);
+                words.and_right = eval(right, src);
+                words.and_out = eval(out, src);
+            }
+            Rails::Compare { keys, less_than } => {
+                let (left, right) = keys.keys();
+                words.left_key = eval(left, src);
+                words.right_key = eval(right, src);
+                words.less_than = eval(less_than, src) & 1;
+            }
+        }
+        words.carry = words.add_left ^ words.add_right ^ words.add_sum;
+        words.carry_left = words.add_right ^ words.add_sum;
+        words.carry_right = words.add_left ^ words.add_sum;
+        words.carry_step =
+            ((words.carry ^ (words.carry >> 1)) & (u64::MAX >> 1)) | ((words.carry & 1) << 63);
+        words.key_diff = words.left_key ^ words.right_key;
+        words
+    }
+
+    #[inline]
+    fn select_key_bit(&mut self, p: u8) {
+        self.left_key_bit ^= (self.left_key >> p) & 1;
+        self.right_key_bit ^= (self.right_key >> p) & 1;
+    }
+
+    /// Evaluates the selected rails and the key bits at a decoded position.
+    /// Invalid bytecode has zero rails. A position outside 0..64 is rejected.
+    #[inline]
+    pub fn compute(row: &BytecodeRow, src: &Sources, pos: u8) -> Result<Self, FormError> {
+        if pos >= 64 {
+            return Err(FormError::ShiftPositionOutOfRange { pos });
+        }
+        let Some(variant) = row.variant else {
+            return Ok(Self::default());
+        };
+        let mut out = Self::rails(variant.line(), src);
+        if variant.key_kind().is_some() {
+            out.select_key_bit(pos);
+        }
+        Ok(out)
+    }
+
+    #[inline]
+    pub(crate) fn lane(&self, lane: Lane) -> u64 {
+        match lane {
+            Lane::CarryLeft => self.carry_left,
+            Lane::CarryRight => self.carry_right,
+            Lane::CarryStep => self.carry_step,
+            Lane::AndLeft => self.and_left,
+            Lane::AndRight => self.and_right,
+            Lane::AndOut => self.and_out,
+            Lane::Small
+            | Lane::KeyDiff
+            | Lane::KeyDiffAbove
+            | Lane::RdResidual
+            | Lane::RamResidual
+            | Lane::NextPCResidual
+            | Lane::Bits0
+            | Lane::Bits1
+            | Lane::Bits2
+            | Lane::Bits3 => 0,
         }
     }
 }
@@ -109,32 +211,24 @@ impl Words {
         };
         let line = variant.line();
         let src = Sources::new(layout, row, base, bits);
-        let mut words = Self::default();
-        match &line.rails {
-            Rails::None => {}
-            Rails::Adder { left, right, sum } => {
-                words.add_left = eval(left, &src);
-                words.add_right = eval(right, &src);
-                words.add_sum = eval(sum, &src);
-            }
-            Rails::And { left, right, out } => {
-                words.and_left = eval(left, &src);
-                words.and_right = eval(right, &src);
-                words.and_out = eval(out, &src);
-            }
-            Rails::Compare { keys, less_than } => {
-                let (left, right) = keys.keys();
-                words.left_key = eval(left, &src);
-                words.right_key = eval(right, &src);
-                words.less_than = eval(less_than, &src) & 1;
-            }
-        }
-        words.carry = words.add_left ^ words.add_right ^ words.add_sum;
-        words.carry_left = words.add_right ^ words.add_sum;
-        words.carry_right = words.add_left ^ words.add_sum;
-        words.carry_step =
-            ((words.carry ^ (words.carry >> 1)) & (u64::MAX >> 1)) | ((words.carry & 1) << 63);
-        words.key_diff = words.left_key ^ words.right_key;
+        let mut f2 = F2Words::rails(line, &src);
+        let mut words = Self {
+            add_left: f2.add_left,
+            add_right: f2.add_right,
+            add_sum: f2.add_sum,
+            and_left: f2.and_left,
+            and_right: f2.and_right,
+            and_out: f2.and_out,
+            left_key: f2.left_key,
+            right_key: f2.right_key,
+            less_than: f2.less_than,
+            carry: f2.carry,
+            carry_left: f2.carry_left,
+            carry_right: f2.carry_right,
+            carry_step: f2.carry_step,
+            key_diff: f2.key_diff,
+            ..Self::default()
+        };
         let [low, high] = layout.pos_ra();
         let f0 = low.full(bits);
         let f1 = high.full(bits);
@@ -150,8 +244,7 @@ impl Words {
                     if variant.key_kind().is_some() {
                         words.key_diff_above ^=
                             words.key_diff & u64::MAX.checked_shl(u32::from(p) + 1).unwrap_or(0);
-                        words.left_key_bit ^= (words.left_key >> p) & 1;
-                        words.right_key_bit ^= (words.right_key >> p) & 1;
+                        f2.select_key_bit(p);
                     }
                     if let Some(shift) = line.shift {
                         if let Ok(form) = shift_form(shift.kind, p) {
@@ -161,6 +254,8 @@ impl Words {
                 }
             }
         }
+        words.left_key_bit = f2.left_key_bit;
+        words.right_key_bit = f2.right_key_bit;
         if let Some(access) = line.access {
             if let Some(kind) = access.kind {
                 let mut lo = f0;

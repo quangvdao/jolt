@@ -7,7 +7,7 @@ use crate::words::column::{
     LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, LESS_THAN as COLUMN_LESS_THAN, ONE as COLUMN_ONE,
     RIGHT_KEY_BIT as COLUMN_RIGHT_KEY_BIT,
 };
-use crate::words::{Lane, WitnessRow, WITNESS_COLUMNS};
+use crate::words::{F2Words, Lane, WitnessRow, WITNESS_COLUMNS};
 use jolt_field::F128;
 use jolt_r1cs::{ConstraintMatrices, SparseRow};
 use thiserror::Error;
@@ -51,10 +51,15 @@ impl LaneRows {
     /// Returns `Az`, `Bz`, `Cz`, with bit i the value of row i in the family.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> [u64; 3] {
+        self.values_from(|lane| z.lane(lane))
+    }
+
+    #[inline]
+    fn values_from(&self, lane: impl Fn(Lane) -> u64) -> [u64; 3] {
         [
-            z.lane(self.a) & self.ab_mask,
-            z.lane(self.b) & self.ab_mask,
-            z.lane(self.c),
+            lane(self.a) & self.ab_mask,
+            lane(self.b) & self.ab_mask,
+            lane(self.c),
         ]
     }
 }
@@ -143,12 +148,12 @@ impl PackedTerm {
     }
 
     #[inline]
-    fn value(self, z: &WitnessRow) -> u128 {
+    fn value(self, word: impl Fn(usize) -> u64) -> u128 {
         let start = usize::from(self.start);
         let offset = start % 64;
-        let low = z.0.get(start / 64).copied().unwrap_or(0) >> offset;
+        let low = word(start / 64) >> offset;
         let high = if offset != 0 {
-            z.0.get(start / 64 + 1).copied().unwrap_or(0) << (64 - offset)
+            word(start / 64 + 1) << (64 - offset)
         } else {
             0
         };
@@ -198,11 +203,16 @@ impl PackedForm {
     /// Constants read `z[ONE]` even on a noncanonical witness.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> F128 {
-        let constant = self.one && z.bit(COLUMN_ONE).unwrap_or(false);
+        self.values_from(|i| z.0.get(i).copied().unwrap_or(0))
+    }
+
+    #[inline]
+    fn values_from(&self, word: impl Fn(usize) -> u64) -> F128 {
+        let constant = self.one && word(COLUMN_ONE / 64) & 1 != 0;
         let raw = self
             .terms
             .iter()
-            .fold(u128::from(constant), |sum, term| sum ^ term.value(z));
+            .fold(u128::from(constant), |sum, term| sum ^ term.value(&word));
         F128::from_raw(raw)
     }
 
@@ -231,7 +241,16 @@ impl PackedRow {
     /// Returns `Az`, `Bz`, `Cz`; this evaluation performs no field multiplication.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> [F128; 3] {
-        [self.a.values(z), self.b.values(z), self.c.values(z)]
+        self.values_from(|i| z.0.get(i).copied().unwrap_or(0))
+    }
+
+    #[inline]
+    fn values_from(&self, word: impl Fn(usize) -> u64) -> [F128; 3] {
+        [
+            self.a.values_from(&word),
+            self.b.values_from(&word),
+            self.c.values_from(&word),
+        ]
     }
 }
 
@@ -312,6 +331,7 @@ pub struct RowFailure {
 #[derive(Clone, Debug)]
 pub struct RowSystem {
     lanes: [LaneRows; 2],
+    keys_differ_column: usize,
     packed: Vec<PackedRow>,
 }
 
@@ -436,6 +456,7 @@ impl RowSystem {
             });
         }
         Self {
+            keys_differ_column: COLUMN_BITS + layout.keys_differ(),
             lanes: [
                 LaneRows {
                     a: Lane::CarryLeft,
@@ -454,6 +475,32 @@ impl RowSystem {
             ],
             packed,
         }
+    }
+
+    /// Values of rows 0..130 on the compact evaluator, using the same lane
+    /// masks and packed forms as `values` on a canonical `WitnessRow`.
+    #[inline]
+    pub fn f2_values(&self, words: &F2Words, keys_differ: bool) -> ([[u64; 3]; 2], [[F128; 3]; 2]) {
+        let lanes = self
+            .lanes
+            .map(|row| row.values_from(|lane| words.lane(lane)));
+        let word = |i| {
+            if i == 0 {
+                1 | ((words.left_key_bit & 1) << COLUMN_LEFT_KEY_BIT)
+                    | ((words.right_key_bit & 1) << COLUMN_RIGHT_KEY_BIT)
+                    | ((words.less_than & 1) << COLUMN_LESS_THAN)
+            } else if i == self.keys_differ_column / 64 {
+                u64::from(keys_differ) << (self.keys_differ_column % 64)
+            } else {
+                0
+            }
+        };
+        let tail = std::array::from_fn(|i| {
+            self.packed
+                .get(i)
+                .map_or([F128::from_raw(0); 3], |row| row.values_from(word))
+        });
+        (lanes, tail)
     }
 
     /// The two 64-row lane families, starting at rows 0 and 64.

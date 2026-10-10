@@ -69,3 +69,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "bytecode"
 required-features = ["test-utils"]
+
+[[test]]
+name = "e2e"
+required-features = ["test-utils"]

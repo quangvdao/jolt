@@ -84,4 +84,6 @@ pub enum Rv64iProverError {
     SharedBuffer,
     #[error("RAM exponent {log_K_ram} cannot be represented on this host")]
     RamDimension { log_K_ram: usize },
+    #[error("witness initial RAM differs from the checked initial RAM")]
+    InitialRamMismatch,
 }

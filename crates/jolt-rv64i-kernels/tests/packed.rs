@@ -400,25 +400,16 @@ mod tests {
             .unwrap(),
         );
         let plan = ScatterPlan::new(source).unwrap();
-        let mut rows = [77];
         let mut weights = [F128::from_raw(13)];
         let mut output = [];
-        let mut cursors = vec![0; plan.cursor_len()];
         assert_eq!(
-            plan.scatter_into(
-                |_| F128::from_raw(1),
-                &mut rows,
-                &mut weights,
-                &mut output,
-                &mut cursors
-            ),
+            plan.scatter_into(|_| F128::from_raw(1), &mut weights, &mut output),
             Err(ScatterError::BufferLength {
                 buffer: "output",
                 expected: 1,
                 actual: 0
             })
         );
-        assert_eq!(rows, [77]);
         assert_eq!(weights, [F128::from_raw(13)]);
     }
 }

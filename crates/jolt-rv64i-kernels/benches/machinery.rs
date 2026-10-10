@@ -172,10 +172,8 @@ enum Machinery {
         inputs: Arc<Inputs>,
         plan: Box<ScatterPlan<MachinerySource>>,
         plan_ns: f64,
-        rows: Vec<u32>,
         weights: Vec<F128>,
         output: Vec<F128>,
-        cursors: Vec<u32>,
     },
     Merge {
         pool: ScratchPool,
@@ -236,8 +234,6 @@ impl Machinery {
                 let plan = Box::new(ScatterPlan::new(Arc::clone(trace))?);
                 let plan_ns = start.elapsed().as_nanos() as f64;
                 Ok(Self::Scatter {
-                    cursors: vec![0; plan.cursor_len()],
-                    rows: vec![0; plan.cycles()],
                     weights: vec![F128::from_raw(0); plan.cycles()],
                     output: vec![F128::from_raw(0); plan.bytecode_rows()],
                     inputs,
@@ -300,15 +296,13 @@ impl MachineryKernel for Machinery {
             Self::Scatter {
                 inputs,
                 plan,
-                rows,
                 weights,
                 output,
-                cursors,
                 ..
             } => {
                 let plan = black_box(plan.as_ref());
                 let inputs = black_box(inputs.as_ref());
-                plan.scatter_into(|cycle| inputs.weight(cycle), rows, weights, output, cursors)?;
+                plan.scatter_into(|cycle| inputs.weight(cycle), weights, output)?;
                 let _ = black_box(&*output);
                 Ok(output[0])
             }

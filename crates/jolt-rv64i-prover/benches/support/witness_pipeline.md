@@ -81,6 +81,7 @@ No recorder overflow occurred.
 | Executed fixture remains compatible with the adapters bench | `adapters/source/20/12 --samples 1 inventory` smoke run |
 | Fact replay and nonaccess RAM reads | `facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads` |
 | Earliest typed failure and register/RAM ordering | `fact_differences_name_the_first_cycle_and_register_field`; `load_facts_reject_ram_pre_values_and_register_reads_before_row_generation` |
+| Parallel chunk counts and earliest generation fault, with earlier replay faults taking precedence | `parallel_fact_generation_keeps_counts_and_first_fault_across_chunks`, using literal JAL and LD instructions on 1/12-thread pools |
 | Absent operands and RAM allocation failure | `absent_operands_and_nonaccess_ram_facts_do_not_replace_replayed_reads`; `constructors_return_a_typed_error_for_unallocatable_ram` |
 | Decoded rows and counts against committed ground truth | `decoded_rows_match_committed_rows_in_both_constructors` |
 | Validated digits, byte groups, shared ownership | `source_matches_committed_columns_words_and_weighted_sum`; `shared_source_enforces_group_ownership_and_shared_lifetimes` |
@@ -90,3 +91,32 @@ No recorder overflow occurred.
 Baseline checks: prover all-target clippy with test-utils and denied warnings;
 prover nextest 75/75; formatting and style invariant checks. No new permanent
 old-versus-new tests or diagnostic test hooks were introduced.
+
+## Constructor retention
+
+The retained change generates committed bits, decoded rows and variant counts
+in parallel using the canonical `BitsBuilder` and `DigitFields`, then runs the
+state replay in order. It reduces generation faults to the earliest cycle but
+reports that fault only after the replay checks that cycle's pre-state. It adds
+no trace-sized intermediate. One-thread pools keep generation fused with replay.
+The private replay input selects these cases at compile time; keeping replay
+out of line removed a measured regression of the fused case.
+
+Three alternating baseline/candidate pairs used saved release executables with
+identical native flags and seven samples per case per block. The table reports
+the median of the three block medians of the whole constructor, including
+allocation, canonical RAM and state replay. Load averages at the six block
+starts were 16.32/18.25/17.20, 15.97/18.14/17.17, 17.85/18.46/17.29,
+17.54/18.38/17.27, 16.86/18.23/17.22 and 16.47/18.12/17.19; afterwards
+16.19/18.04/17.16. All are loaded-machine measurements.
+
+| log T | Threads | Before ns/cycle | Before ms | After ns/cycle | After ms | Reduction |
+|---|---|---|---|---|---|---|
+| 20 | 1 | 32.049 | 33.606 | 30.930 | 32.432 | 3.49% |
+| 20 | 12 | 31.999 | 33.554 | 18.260 | 19.147 | 42.94% |
+| 22 | 1 | 32.334 | 135.619 | 30.173 | 126.554 | 6.68% |
+| 22 | 12 | 31.571 | 132.417 | 17.617 | 73.889 | 44.20% |
+
+The constructor peak remains 96 MiB at log T 20 and 360 MiB at log T 22,
+plus at most 336 bytes of Rayon bookkeeping in these blocks. Earlier candidate
+builds regressed the single-thread phase and were revised before retention.

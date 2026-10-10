@@ -12,11 +12,13 @@ use jolt_kernels::WitnessPlane;
 use jolt_rv64i_arith::decode::SourceParts;
 use jolt_rv64i_arith::{
     BaseWords, BitsBuilder, BitsRow, Bytecode, BytecodeRow, Chunk, CycleError, CycleFacts, Layout,
-    Variant, WitnessRow,
+    Variant, WitnessError, WitnessRow,
 };
+use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_verifier::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 #[cfg(feature = "test-utils")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 use std::sync::Arc;
 
 /// Sixteen-byte replay cache: the increment and low-first bytecode/RAM indices,
@@ -202,7 +204,7 @@ pub struct Rv64iWitness {
     pub bits: Arc<[BitsRow]>,
     /// One pre-state record per committed cycle.
     pub words: Arc<[CycleWords]>,
-    /// Packed digits written in the replay, with one row per committed cycle.
+    /// Packed digits produced with committed rows, with one row per committed cycle.
     pub decoded: Arc<[DecodedCycle]>,
     /// Number of fetched cycles of each variant; unused variant indices stay zero.
     pub variant_cycles: [u64; 64],
@@ -317,13 +319,14 @@ impl Rv64iWitness {
         final_pc: u64,
     ) -> Result<Self, Rv64iProverError> {
         let mut witness = Self::prepare(layout, bytecode, bits, initial_ram, final_pc)?;
-        witness.replay(None)?;
+        witness.replay(())?;
         Ok(witness)
     }
 
-    /// Generates committed rows and checks present operands in one forward replay; normalized `NOOP`
+    /// Generates committed and decoded rows in parallel on multi-thread pools, then checks
+    /// present operands in one ordered state replay. Single-thread pools fuse both walks. Normalized `NOOP`
     /// selector reads include index zero because original operand presence is erased, and RAM facts
-    /// are read only on accesses. Returns the first difference before generating that row or a geometry,
+    /// are read only on accesses. Returns the first difference or a geometry,
     /// fetch, row-generation or allocation error; outputs and instruction transitions remain unchecked.
     pub fn from_facts(
         layout: Layout,
@@ -343,7 +346,12 @@ impl Rv64iWitness {
         let bits = (0..facts.len()).map(|_| [0; 4]).collect();
         let mut witness =
             Self::prepare_with_ram(layout, bytecode, bits, initial_ram, final_ram, final_pc)?;
-        witness.replay(Some(facts))?;
+        if rayon::current_num_threads() == 1 {
+            witness.replay(facts)?;
+        } else {
+            let error = witness.generate_facts(facts)?;
+            witness.replay(GeneratedFacts { facts, error })?;
+        }
         Ok(witness)
     }
 
@@ -422,11 +430,84 @@ impl Rv64iWitness {
         })
     }
 
-    fn replay(&mut self, facts: Option<&[CycleFacts]>) -> Result<(), Rv64iProverError> {
+    #[expect(
+        clippy::expect_used,
+        reason = "prepare_with_ram checked the nonzero power-of-two row count"
+    )]
+    fn generate_facts(
+        &mut self,
+        facts: &[CycleFacts],
+    ) -> Result<Option<CycleError>, Rv64iProverError> {
+        let fields = DigitFields::new(&self.layout);
+        let builder = BitsBuilder::new(&self.layout, &self.bytecode)?;
+        let bytecode = &self.bytecode;
+        let chunk_len = CycleChunks::new(facts.len().ilog2() as usize, 0)
+            .expect("checked witness dimensions")
+            .chunk_len();
+        let bits = Arc::get_mut(&mut self.bits).ok_or(Rv64iProverError::SharedBuffer)?;
+        let decoded = Arc::get_mut(&mut self.decoded).ok_or(Rv64iProverError::SharedBuffer)?;
+        let generated = bits
+            .par_chunks_mut(chunk_len)
+            .zip(decoded.par_chunks_mut(chunk_len))
+            .zip(facts.par_chunks(chunk_len))
+            .enumerate()
+            .map(|(chunk, ((bits, decoded), facts))| {
+                let mut counts = [0_u64; 64];
+                for (offset, ((output, decoded), fact)) in
+                    bits.iter_mut().zip(decoded).zip(facts).enumerate()
+                {
+                    let cycle = chunk * chunk_len + offset;
+                    let (row, parts) = builder
+                        .bits_row_with_parts(fact)
+                        .map_err(|error| CycleError { cycle, error })?;
+                    let variant = bytecode
+                        .rows()
+                        .get(fact.bytecode_index as usize)
+                        .and_then(|row| row.variant)
+                        .ok_or(CycleError {
+                            cycle,
+                            error: WitnessError::InvalidRow {
+                                bytecode_index: fact.bytecode_index,
+                            },
+                        })?;
+                    *output = row;
+                    *decoded = fields.pack(u64::from(fact.bytecode_index), variant, &parts);
+                    counts[variant.index()] += 1;
+                }
+                Ok::<_, CycleError>(counts)
+            })
+            .reduce(
+                || Ok([0_u64; 64]),
+                |left, right| match (left, right) {
+                    (Ok(mut left), Ok(right)) => {
+                        for (left, right) in left.iter_mut().zip(right) {
+                            *left += right;
+                        }
+                        Ok(left)
+                    }
+                    (Err(left), Err(right)) => Err(if left.cycle <= right.cycle {
+                        left
+                    } else {
+                        right
+                    }),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                },
+            );
+        match generated {
+            Ok(counts) => {
+                self.variant_cycles = counts;
+                Ok(None)
+            }
+            Err(error) => Ok(Some(error)),
+        }
+    }
+
+    #[inline(never)]
+    fn replay<'a, R: ReplayInput<'a>>(&mut self, mut request: R) -> Result<(), Rv64iProverError> {
         let fields = DigitFields::new(&self.layout);
         let decoded = Arc::get_mut(&mut self.decoded).ok_or(Rv64iProverError::SharedBuffer)?;
         let builder = BitsBuilder::new(&self.layout, &self.bytecode)?;
-        let mut rows = match facts {
+        let mut rows = match request.facts() {
             Some(facts) => ReplayRows::Facts {
                 bits: Arc::get_mut(&mut self.bits).ok_or(Rv64iProverError::SharedBuffer)?,
                 facts,
@@ -521,20 +602,31 @@ impl Rv64iWitness {
                 }
             }
             let parts = match input {
-                ReplayCycle::Bits { parts, .. } => parts,
+                ReplayCycle::Bits { parts, .. } => Some(parts),
                 ReplayCycle::Facts { fact, committed } => {
-                    let (bits, parts) = builder
-                        .bits_row_with_parts(fact)
-                        .map_err(|error| CycleError { cycle, error })?;
-                    *committed = bits;
-                    parts
+                    if R::GENERATED {
+                        // Generation faults surface after this cycle's replay checks,
+                        // preserving the first-fault contract of from_facts.
+                        if let Some(error) = request.generation_error(cycle) {
+                            return Err(error.into());
+                        }
+                        None
+                    } else {
+                        let (bits, parts) = builder
+                            .bits_row_with_parts(fact)
+                            .map_err(|error| CycleError { cycle, error })?;
+                        *committed = bits;
+                        Some(parts)
+                    }
                 }
             };
             if let Some(previous) = cycle.checked_sub(1).and_then(|i| words.get_mut(i)) {
                 previous.next_pc = row.pc;
             }
-            decoded[cycle] = fields.pack(index, variant, &parts);
-            self.variant_cycles[variant.index()] += 1;
+            if let Some(parts) = parts {
+                decoded[cycle] = fields.pack(index, variant, &parts);
+                self.variant_cycles[variant.index()] += 1;
+            }
             let inc = decoded[cycle].inc;
             if row.variant.is_some_and(|v| v.is_store()) {
                 *self
@@ -748,10 +840,41 @@ impl Rv64iWitness {
             .pc;
         let mut witness =
             Self::prepare_with_ram(layout, bytecode, bits, initial_ram, final_ram, final_pc)?;
-        witness.replay(None)?;
+        witness.replay(())?;
         Ok(witness)
     }
 }
+trait ReplayInput<'a> {
+    const GENERATED: bool = false;
+    fn facts(&self) -> Option<&'a [CycleFacts]>;
+    fn generation_error(&mut self, _cycle: usize) -> Option<CycleError> {
+        None
+    }
+}
+impl<'a> ReplayInput<'a> for () {
+    fn facts(&self) -> Option<&'a [CycleFacts]> {
+        None
+    }
+}
+impl<'a> ReplayInput<'a> for &'a [CycleFacts] {
+    fn facts(&self) -> Option<&'a [CycleFacts]> {
+        Some(self)
+    }
+}
+struct GeneratedFacts<'a> {
+    facts: &'a [CycleFacts],
+    error: Option<CycleError>,
+}
+impl<'a> ReplayInput<'a> for GeneratedFacts<'a> {
+    const GENERATED: bool = true;
+    fn facts(&self) -> Option<&'a [CycleFacts]> {
+        Some(self.facts)
+    }
+    fn generation_error(&mut self, cycle: usize) -> Option<CycleError> {
+        self.error.take_if(|error| error.cycle == cycle)
+    }
+}
+
 enum ReplayCycle<'a> {
     Bits {
         index: u64,
@@ -778,4 +901,92 @@ impl<F: JoltField> WitnessPlane<F> for Rv64iPlane {
         = &'w Rv64iWitness
     where
         F: 'w;
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "malformed fixtures fail their tests")]
+mod tests {
+    use super::{DigitFields, Rv64iWitness};
+    use crate::error::{FactField, Rv64iProverError};
+    use jolt_program::image::decode::decode_instruction;
+    use jolt_riscv::RV64I;
+    use jolt_rv64i_arith::{Bytecode, CycleError, CycleFacts, Layout, Variant, WitnessError};
+    use rayon::ThreadPoolBuilder;
+    use std::sync::Arc;
+
+    #[test]
+    fn parallel_fact_generation_keeps_counts_and_first_fault_across_chunks() {
+        let layout = Layout::new(1, 5, 0).unwrap();
+        let instruction = decode_instruction(0x0000_006f, 0, false, RV64I).unwrap();
+        let bytecode = Arc::new(Bytecode::preprocess(&[instruction], &layout).unwrap());
+        let facts = vec![CycleFacts::default(); 1 << 14];
+        for threads in [1, 12] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let witness = pool
+                .install(|| {
+                    Rv64iWitness::from_facts(layout.clone(), Arc::clone(&bytecode), &facts, vec![])
+                })
+                .unwrap();
+            assert_eq!(
+                witness.variant_cycles[Variant::JAL_X0.index()],
+                facts.len() as u64
+            );
+            assert_eq!(
+                witness.variant_cycles.iter().sum::<u64>(),
+                facts.len() as u64
+            );
+            let fields = DigitFields::new(&layout);
+            for (bits, decoded) in witness.bits.iter().zip(witness.decoded.iter()) {
+                assert_eq!(*bits, [0; 4]);
+                assert_eq!(
+                    fields.variant().read(decoded),
+                    Variant::JAL_X0.index() as u64
+                );
+                assert_eq!(decoded.inc, 0);
+            }
+            let mut changed = facts.clone();
+            changed[8197].bytecode_index = u32::MAX;
+            changed[4107].bytecode_index = u32::MAX;
+            let result = pool.install(|| {
+                Rv64iWitness::from_facts(layout.clone(), Arc::clone(&bytecode), &changed, vec![])
+            });
+            assert!(
+                matches!(result, Err(Rv64iProverError::InvalidBytecode { cycle: 4107, index }) if index == u64::from(u32::MAX))
+            );
+            let load = decode_instruction(0x0000_3083, 0, false, RV64I).unwrap();
+            let load_bytecode = Arc::new(Bytecode::preprocess(&[load], &layout).unwrap());
+            let mut accesses = facts.clone();
+            accesses[8197].ram_word_index = 2;
+            accesses[4107].ram_word_index = 1;
+            let result = pool.install(|| {
+                Rv64iWitness::from_facts(layout.clone(), load_bytecode, &accesses, vec![])
+            });
+            assert!(matches!(
+                result,
+                Err(Rv64iProverError::Cycle(CycleError {
+                    cycle: 4107,
+                    error: WitnessError::RamWordIndexMismatch {
+                        expected: 0,
+                        found: 1
+                    },
+                }))
+            ));
+            changed[513].rd_pre_value = 1;
+            let result = pool.install(|| {
+                Rv64iWitness::from_facts(layout.clone(), Arc::clone(&bytecode), &changed, vec![])
+            });
+            assert!(matches!(
+                result,
+                Err(Rv64iProverError::FactMismatch {
+                    cycle: 513,
+                    field: FactField::RdPreValue,
+                    expected: 0,
+                    found: 1
+                })
+            ));
+        }
+    }
 }

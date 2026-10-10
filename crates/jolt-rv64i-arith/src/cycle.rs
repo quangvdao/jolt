@@ -15,7 +15,9 @@ use crate::words::BaseWords;
 /// index is `(address - LowestAddress) / 8`, and words are little endian.
 /// `next_pc` is the next cycle's PC, or `FinalPC` on the last cycle. The
 /// surrounding protocol owes the five obligations documented on [`BaseWords`];
-/// this crate does not authenticate the facts.
+/// this crate does not authenticate the facts. On a cycle without a RAM access,
+/// `ram_word_index`, `ram_pre_value` and `ram_post_value` are zero by convention;
+/// they are not read as the RAM word of the surrounding protocol.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CycleFacts {
     pub bytecode_index: u32,

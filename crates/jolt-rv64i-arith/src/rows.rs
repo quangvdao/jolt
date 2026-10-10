@@ -28,6 +28,14 @@ pub enum RowGroup {
     OneHot,
 }
 
+#[derive(Clone, Copy)]
+enum FixedExtensionRow {
+    KeysAgreeAbove,
+    KeysEqual,
+    WordResidual(Lane),
+    ControlResidual,
+}
+
 /// Sixty-four rows whose A and B columns are masked bit lanes and whose C
 /// columns are the unmasked lane: `(z[a] & mask) · (z[b] & mask) = z[c]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,8 +316,37 @@ pub struct RowSystem {
 }
 
 impl RowSystem {
+    const FIXED_EXTENSION_ROWS: &[(FixedExtensionRow, RowGroup)] = &[
+        (FixedExtensionRow::KeysAgreeAbove, RowGroup::KeysAgreeAbove),
+        (FixedExtensionRow::KeysEqual, RowGroup::KeysEqual),
+        (
+            FixedExtensionRow::WordResidual(Lane::RdResidual),
+            RowGroup::RdResidual,
+        ),
+        (
+            FixedExtensionRow::WordResidual(Lane::RamResidual),
+            RowGroup::RamResidual,
+        ),
+        (
+            FixedExtensionRow::WordResidual(Lane::NextPCResidual),
+            RowGroup::NextPCResidual,
+        ),
+        (
+            FixedExtensionRow::ControlResidual,
+            RowGroup::ControlResidual,
+        ),
+    ];
+
     /// Rows 0–129 have coefficients and evaluations in `F_2`.
     pub const F2_ROWS: usize = 130;
+
+    /// Dimension of the padded extension-field row block, without constructing
+    /// the fixed extension equations or one equation per layout chunk.
+    pub fn f128_row_variables_for(layout: &Layout) -> usize {
+        (Self::FIXED_EXTENSION_ROWS.len() + layout.chunks().count())
+            .next_power_of_two()
+            .ilog2() as usize
+    }
 
     /// Constructs `136 + ceil(log_K_bytecode/4) + ceil(log_K_ram/4) + 2`
     /// equations; stored digits k use coefficients `1 + x^(m·k)`, m=1,2,3.
@@ -351,46 +388,35 @@ impl RowSystem {
                 c: empty.clone(),
                 group: RowGroup::KeyBits,
             },
-            PackedRow {
-                a: keys_differ,
-                b: block(Lane::KeyDiffAbove),
-                c: empty.clone(),
-                group: RowGroup::KeysAgreeAbove,
-            },
-            PackedRow {
-                a: not_keys_differ,
-                b: block(Lane::KeyDiff),
-                c: empty.clone(),
-                group: RowGroup::KeysEqual,
-            },
         ];
-        for (lane, group) in [
-            (Lane::RdResidual, RowGroup::RdResidual),
-            (Lane::RamResidual, RowGroup::RamResidual),
-            (Lane::NextPCResidual, RowGroup::NextPCResidual),
-        ] {
+        for &(row, group) in Self::FIXED_EXTENSION_ROWS {
+            let (a, b) = match row {
+                FixedExtensionRow::KeysAgreeAbove => {
+                    (keys_differ.clone(), block(Lane::KeyDiffAbove))
+                }
+                FixedExtensionRow::KeysEqual => (not_keys_differ.clone(), block(Lane::KeyDiff)),
+                FixedExtensionRow::WordResidual(lane) => (block(lane), one.clone()),
+                FixedExtensionRow::ControlResidual => (
+                    PackedForm {
+                        one: false,
+                        terms: vec![PackedTerm::table(
+                            COLUMN_CONTROL_RESIDUAL as u16,
+                            11,
+                            1,
+                            0,
+                            false,
+                        )],
+                    },
+                    one.clone(),
+                ),
+            };
             packed.push(PackedRow {
-                a: block(lane),
-                b: one.clone(),
+                a,
+                b,
                 c: empty.clone(),
                 group,
             });
         }
-        packed.push(PackedRow {
-            a: PackedForm {
-                one: false,
-                terms: vec![PackedTerm::table(
-                    COLUMN_CONTROL_RESIDUAL as u16,
-                    11,
-                    1,
-                    0,
-                    false,
-                )],
-            },
-            b: one,
-            c: empty,
-            group: RowGroup::ControlResidual,
-        });
         for chunk in layout.chunks() {
             let form = |m| PackedForm {
                 one: true,

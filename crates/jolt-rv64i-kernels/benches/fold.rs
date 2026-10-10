@@ -45,15 +45,7 @@ struct FoldBench {
     point: Vec<F128>,
     plan: ScatterPlan<SyntheticTrace>,
     layout: FoldLayout,
-    form: LoopForm,
     diagnostics: Diagnostics,
-}
-
-#[derive(Clone, Copy)]
-enum LoopForm {
-    Selected,
-    Cycle,
-    Shape,
 }
 
 struct Diagnostics {
@@ -62,7 +54,6 @@ struct Diagnostics {
     threads: usize,
     cycle_bucket_bytes: usize,
     row_bucket_bytes: usize,
-    weight_scratch_bytes: usize,
     scatter_bytes: usize,
     plan_bytes: usize,
     updates: f64,
@@ -98,11 +89,7 @@ impl ProveRounds<F128> for FoldBench {
 }
 
 impl FoldBench {
-    fn new(
-        source: Arc<SyntheticTrace>,
-        byte_count: usize,
-        form: LoopForm,
-    ) -> Result<(Self, F128), FoldBenchError> {
+    fn new(source: Arc<SyntheticTrace>, byte_count: usize) -> Result<(Self, F128), FoldBenchError> {
         let log_t = source.cycles().ilog2() as usize;
         let trace = Arc::new(ValidatedTrace::new(source)?);
         let shapes = synthetic_router_shapes()?;
@@ -164,11 +151,6 @@ impl FoldBench {
             threads: rayon::current_num_threads(),
             cycle_bucket_bytes: (layout.entries() + histogram_entries) * 16,
             row_bucket_bytes: (layout.row_entries() + histogram_entries) * 16,
-            weight_scratch_bytes: if !matches!(form, LoopForm::Cycle) {
-                geometry.chunk_len() * 16
-            } else {
-                0
-            },
             scatter_bytes: cycles * 16,
             plan_bytes,
             updates: bucket_xors as f64 / cycles as f64,
@@ -182,29 +164,19 @@ impl FoldBench {
                 point,
                 plan,
                 layout,
-                form,
                 diagnostics,
             },
             F128::from_raw(0),
         ))
     }
     fn extract(&self) -> Result<MeasuredFold, FoldBenchError> {
-        let args = (
+        let (output, phases) = self.layout.measure(
             &self.trace,
-            self.shapes.as_slice(),
-            self.point.as_slice(),
+            &self.shapes,
+            &self.point,
             &self.plan,
-            HISTOGRAM_COLUMNS.as_slice(),
-        );
-        let (output, phases) = match self.form {
-            LoopForm::Selected => self.layout.measure(args.0, args.1, args.2, args.3, args.4),
-            LoopForm::Cycle => self
-                .layout
-                .measure_cycle_major(args.0, args.1, args.2, args.3, args.4),
-            LoopForm::Shape => self
-                .layout
-                .measure_shape_major(args.0, args.1, args.2, args.3, args.4),
-        }?;
+            &HISTOGRAM_COLUMNS,
+        )?;
         Ok(MeasuredFold { output, phases })
     }
 
@@ -215,39 +187,19 @@ impl FoldBench {
     fn report(&self, measured: &MeasuredFold, scale: CycleScale) {
         let d = &self.diagnostics;
         let times = scale.durations(measured.phases);
-        let form = match self.form {
-            LoopForm::Selected => "selected_shape",
-            LoopForm::Cycle => "cycle",
-            LoopForm::Shape => "shape",
-        };
         let _ = std::hint::black_box(&measured.output);
-        println!("fold/scratch/{}/{}/{}/{} cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} chunk_weight_scratch_bytes_per_worker={} scatter_buffer_bytes={} plan_bytes={} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", d.byte_count, d.log_t, d.threads, form, d.cycle_bucket_bytes, d.row_bucket_bytes, d.weight_scratch_bytes, d.scatter_bytes, d.plan_bytes, d.updates, d.updates*0.6, d.row_model_ns, d.merge_model_ns);
-        println!("fold/pass_phases/{}/{}/{}/{form} fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6}", d.byte_count, d.log_t, d.threads, times[0], times[1], times[2], times[3]);
+        println!("fold/scratch/{}/{}/{}/cycle cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} chunk_weight_scratch_bytes_per_worker=0 scatter_buffer_bytes={} plan_bytes={} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", d.byte_count, d.log_t, d.threads, d.cycle_bucket_bytes, d.row_bucket_bytes, d.scatter_bytes, d.plan_bytes, d.updates, d.updates*0.6, d.row_model_ns, d.merge_model_ns);
+        println!("fold/pass_phases/{}/{}/{}/cycle fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6}", d.byte_count, d.log_t, d.threads, times[0], times[1], times[2], times[3]);
     }
 }
 
 fn main() -> Result<(), RunnerError> {
-    let variants = if std::env::var_os("FOLD_COMPARE_FORMS").is_some() {
-        vec![
-            ("none/cycle", (0, LoopForm::Cycle)),
-            ("none/shape", (0, LoopForm::Shape)),
-            ("default/cycle", (8, LoopForm::Cycle)),
-            ("default/shape", (8, LoopForm::Shape)),
-            ("all/cycle", (64, LoopForm::Cycle)),
-            ("all/shape", (64, LoopForm::Shape)),
-        ]
-    } else {
-        vec![
-            ("none", (0, LoopForm::Selected)),
-            ("default", (8, LoopForm::Selected)),
-            ("all", (64, LoopForm::Selected)),
-        ]
-    };
+    let variants = [("none", 0), ("default", 8), ("all", 64)];
     run_core_variants(
         "fold",
         &[SynthProfile::AllRows],
         &variants,
-        |source, &(bytes, form)| FoldBench::new(source, bytes, form),
+        |source, &bytes| FoldBench::new(source, bytes),
         |core, _| core.extract(),
         |core, measured, scale| core.report(measured, scale),
     )

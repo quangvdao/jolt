@@ -12,7 +12,6 @@ mod tests {
     use jolt_field::F128;
     use jolt_rv64i_kernels::oracle::mle_at;
     use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
-    use jolt_rv64i_kernels::par::CycleChunks;
     use jolt_rv64i_kernels::router::fold::{fold_pass, FoldCalibration, FoldLayout, FoldOutput};
     use jolt_rv64i_kernels::router::shape::{
         selector_counts, synthetic_router_shapes, BitEntry, RouteEntry, RouterError, RouterShape,
@@ -817,13 +816,11 @@ mod tests {
                 .sum::<usize>();
             let buckets = (layout.entries() + hist_entries) * threads * size_of::<F128>();
             let scatter = trace.source().cycles() * size_of::<F128>();
-            let chunk_weights =
-                CycleChunks::new(log_t, 0).unwrap().chunk_len() * threads * size_of::<F128>();
             assert!(
-                stats.peak_bytes <= returned + buckets + scatter + chunk_weights + runtime_bytes,
+                stats.peak_bytes <= returned + buckets + scatter + runtime_bytes,
                 "peak {} exceeds {}",
                 stats.peak_bytes,
-                returned + buckets + scatter + chunk_weights + runtime_bytes
+                returned + buckets + scatter + runtime_bytes
             );
             drop(result);
             assert!(

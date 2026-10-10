@@ -8,7 +8,7 @@ use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::{CycleSource, ValidatedTrace};
-use compiled::{BankStorage, ChunkBuckets, CompiledShape, ReadBit};
+use compiled::{BankStorage, CompiledShape, ReadBit};
 use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
@@ -306,35 +306,7 @@ impl FoldLayout {
         plan: &ScatterPlan<S>,
         histogram_columns: &[usize],
     ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-        fold_impl::<S, true, true>(source, shapes, point, plan, self, histogram_columns)
-    }
-
-    /// Benchmark observation of the cycle-major compiled fold pass. The arguments
-    /// and checked layout contract are the same as `measure`.
-    #[cfg(feature = "test-utils")]
-    pub fn measure_cycle_major<S: CycleSource>(
-        &self,
-        source: &ValidatedTrace<S>,
-        shapes: &[RouterShape],
-        point: &[F128],
-        plan: &ScatterPlan<S>,
-        histogram_columns: &[usize],
-    ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-        fold_impl::<S, true, false>(source, shapes, point, plan, self, histogram_columns)
-    }
-
-    /// Benchmark observation of the shape-major compiled fold pass. The arguments
-    /// and checked layout contract are the same as `measure`.
-    #[cfg(feature = "test-utils")]
-    pub fn measure_shape_major<S: CycleSource>(
-        &self,
-        source: &ValidatedTrace<S>,
-        shapes: &[RouterShape],
-        point: &[F128],
-        plan: &ScatterPlan<S>,
-        histogram_columns: &[usize],
-    ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-        fold_impl::<S, true, true>(source, shapes, point, plan, self, histogram_columns)
+        fold_impl::<S, true>(source, shapes, point, plan, self, histogram_columns)
     }
 
     /// Cycle bucket elements per worker; includes metadata and any constant totals.
@@ -385,6 +357,27 @@ pub struct FoldOutput {
     pub histograms: Vec<Vec<F128>>,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "private word slices have the checked layout dimensions"
+)]
+#[inline]
+fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
+    if bytes {
+        let mut buckets = ByteBuckets::new(storage).expect("whole byte positions");
+        for position in buckets.positions_mut() {
+            position[(word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
+            word >>= ByteBuckets::BITS_PER_POSITION;
+        }
+    } else {
+        let mut buckets = NibbleBuckets::new(storage).expect("whole nibble positions");
+        for position in buckets.positions_mut() {
+            position[(word & (NibbleBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
+            word >>= NibbleBuckets::BITS_PER_POSITION;
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum HistogramPlan {
     Digit { shape: usize },
@@ -408,7 +401,7 @@ pub fn fold_pass<S: CycleSource>(
     layout: &FoldLayout,
     histogram_columns: &[usize],
 ) -> Result<FoldOutput, RouterError> {
-    fold_impl::<S, false, true>(trace, shapes, r_cycle, plan, layout, histogram_columns)
+    fold_impl::<S, false>(trace, shapes, r_cycle, plan, layout, histogram_columns)
         .map(|(output, _)| output)
 }
 
@@ -546,6 +539,7 @@ impl<'a, S: CycleSource> Histograms<'a, S> {
 struct CyclePass<'a, S: CycleSource> {
     source: &'a S,
     layout: &'a FoldLayout,
+    shapes: &'a [RouterShape],
     plan: &'a ScatterPlan<S>,
     pool: &'a ScratchPool,
     histograms: &'a Histograms<'a, S>,
@@ -559,10 +553,11 @@ impl<S: CycleSource> CyclePass<'_, S> {
         clippy::expect_used,
         reason = "validated chunk geometry and exclusive scratch loans"
     )]
-    fn run<const SHAPE_MAJOR: bool>(self, chunk_len: usize) {
+    fn run(self) {
         let Self {
             source,
             layout,
+            shapes,
             plan,
             pool,
             histograms,
@@ -570,11 +565,6 @@ impl<S: CycleSource> CyclePass<'_, S> {
             high,
             weights,
         } = self;
-        let weight_pool = if SHAPE_MAJOR {
-            Some(ScratchPool::new(chunk_len).expect("validated chunk scratch"))
-        } else {
-            None
-        };
         plan.emission_chunks(weights)
             .expect("freshly sized weight buffer")
             .for_each(|(interval, slots, weights)| {
@@ -582,10 +572,6 @@ impl<S: CycleSource> CyclePass<'_, S> {
                     return;
                 };
                 let mut scratch = pool.take().expect("sequential chunk body");
-                let mut buckets = ChunkBuckets::new(&mut scratch);
-                let mut local_weights = weight_pool
-                    .as_ref()
-                    .map(|pool| pool.take().expect("sequential chunk weights"));
                 for (block, slots) in slots.chunks_exact(low.len()).enumerate() {
                     let start = interval.start + block * low.len();
                     let hi = high[start / low.len()];
@@ -594,53 +580,79 @@ impl<S: CycleSource> CyclePass<'_, S> {
                         let e = hi * lo;
                         // Scatter slots are relative to the whole chunk, not its equality block.
                         weights[usize::from(slot).min(last)] = e;
-                        if SHAPE_MAJOR {
-                            let local = local_weights.as_mut().expect("shape-major weight loan");
-                            let end = local.len() - 1;
-                            local[(cycle - interval.start).min(end)] = e;
-                        } else {
-                            for (index, (sl, compiled)) in
-                                layout.shapes.iter().zip(&layout.compiled).enumerate()
-                            {
-                                if !compiled.cycle(source, cycle, e, &mut buckets, sl.totals) {
-                                    for &(column, base) in &histograms.fallbacks[index] {
-                                        if let Some(digit) = source.digit(column, cycle) {
-                                            buckets.xor(base + digit, e);
+                        for (index, (shape, sl)) in shapes.iter().zip(&layout.shapes).enumerate() {
+                            if let Some(h) = shape.selector(source, cycle, false) {
+                                let bytes = sl.bytes(h);
+                                let size = word_entries(bytes);
+                                let base = sl.bases[h];
+                                for ((_, word), storage) in sl.words.iter().zip(
+                                    scratch[base..base + sl.words.len() * size]
+                                        .chunks_exact_mut(size),
+                                ) {
+                                    let word = match *word {
+                                        WordSlot::Trace(index) => source.trace_word(index, cycle),
+                                        WordSlot::Bytecode(index) => source
+                                            .bytecode_word(index, source.bytecode_index(cycle)),
+                                        WordSlot::Bits(_) | WordSlot::Zero => 0,
+                                    };
+                                    bucket_word(storage, word, e, bytes);
+                                }
+                                let mut base = sl.metadata + h * sl.meta_len();
+                                for &(column, bound) in &sl.digits {
+                                    if let Some(digit) = source.digit(column, cycle) {
+                                        let storage = &mut scratch[base..base + bound];
+                                        if bound == NibbleBuckets::ENTRIES_PER_POSITION {
+                                            let mut buckets = NibbleBuckets::new(storage)
+                                                .expect("one padded digit position");
+                                            buckets.positions_mut()[0][digit
+                                                & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
+                                        } else if let Some(last) = storage.len().checked_sub(1) {
+                                            storage[digit.min(last)] += e;
                                         }
+                                    }
+                                    base += bound;
+                                }
+                                for flags in sl.flags.chunks(NibbleBuckets::BITS_PER_POSITION) {
+                                    let mut value = 0;
+                                    for (bit, &column) in flags.iter().enumerate() {
+                                        value |= usize::from(source.digit(column, cycle).is_some())
+                                            << bit;
+                                    }
+                                    let mut buckets = NibbleBuckets::new(
+                                        &mut scratch
+                                            [base..base + NibbleBuckets::ENTRIES_PER_POSITION],
+                                    )
+                                    .expect("one packed flag position");
+                                    buckets.positions_mut()[0]
+                                        [value & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
+                                    base += NibbleBuckets::ENTRIES_PER_POSITION;
+                                }
+                                if let Some(base) = sl.totals {
+                                    scratch[base + h] += e;
+                                }
+                            } else {
+                                for &(column, base) in &histograms.fallbacks[index] {
+                                    if let Some(digit) = source.digit(column, cycle) {
+                                        scratch[base + digit] += e;
                                     }
                                 }
                             }
                         }
                         for &(column, base) in &histograms.direct {
                             if let Some(digit) = source.digit(column, cycle) {
-                                buckets.xor(base + digit, e);
+                                scratch[base + digit] += e;
                             }
                         }
                     }
                 }
-                if SHAPE_MAJOR {
-                    let local = local_weights.as_ref().expect("shape-major weight loan");
-                    for (index, (sl, compiled)) in
-                        layout.shapes.iter().zip(&layout.compiled).enumerate()
-                    {
-                        compiled.cycles(
-                            source,
-                            interval.start,
-                            &local[..interval.len()],
-                            &mut buckets,
-                            sl.totals,
-                            &histograms.fallbacks[index],
-                        );
-                    }
-                }
             });
-        drop(weight_pool);
     }
 }
 
 struct RowPass<'a, S> {
     source: &'a S,
     layout: &'a FoldLayout,
+    shapes: &'a [RouterShape],
     pool: &'a ScratchPool,
     histograms: &'a [(usize, usize)],
     weights: &'a [F128],
@@ -655,29 +667,42 @@ impl<S: CycleSource> RowPass<'_, S> {
         let Self {
             source,
             layout,
+            shapes,
             pool: row_pool,
             histograms,
             weights,
         } = self;
+        let row_shapes: Vec<_> = shapes
+            .iter()
+            .zip(&layout.shapes)
+            .filter(|(_, sl)| !sl.row_words.is_empty())
+            .collect();
         weights
             .par_chunks(chunk_len)
             .enumerate()
             .for_each(|(chunk, rows)| {
-                let start = chunk * chunk_len;
                 let mut scratch = row_pool.take().expect("sequential row body");
-                let mut buckets = ChunkBuckets::new(&mut scratch);
-                for (sl, compiled) in layout.shapes.iter().zip(&layout.compiled) {
-                    if !sl.row_words.is_empty() {
-                        compiled.rows(source, start, rows, &sl.row_words, &mut buckets);
-                    }
-                }
                 for (offset, &e) in rows.iter().enumerate() {
                     if e == ZERO {
                         continue;
                     }
+                    let row = chunk * chunk_len + offset;
+                    for &(shape, sl) in &row_shapes {
+                        if let Some(h) = shape.selector(source, row, true) {
+                            let bytes = sl.bytes(h);
+                            let size = word_entries(bytes);
+                            let base = sl.row_bases[h];
+                            for (&(_, word), storage) in sl.row_words.iter().zip(
+                                scratch[base..base + sl.row_words.len() * size]
+                                    .chunks_exact_mut(size),
+                            ) {
+                                bucket_word(storage, source.bytecode_word(word, row), e, bytes);
+                            }
+                        }
+                    }
                     for &(column, base) in histograms {
-                        if let Some(digit) = source.row_digit(column, start + offset) {
-                            buckets.xor(base + digit, e);
+                        if let Some(digit) = source.row_digit(column, row) {
+                            scratch[base + digit] += e;
                         }
                     }
                 }
@@ -689,7 +714,7 @@ impl<S: CycleSource> RowPass<'_, S> {
     clippy::expect_used,
     reason = "validated geometry, private scratch ownership and freshly sized scatter buffers cannot fail"
 )]
-fn fold_impl<S: CycleSource, const MEASURE: bool, const SHAPE_MAJOR: bool>(
+fn fold_impl<S: CycleSource, const MEASURE: bool>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
     r_cycle: &[F128],
@@ -717,6 +742,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool, const SHAPE_MAJOR: bool>(
     CyclePass {
         source,
         layout,
+        shapes,
         plan,
         pool: &pool,
         histograms: &histograms,
@@ -724,7 +750,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool, const SHAPE_MAJOR: bool>(
         high: &high,
         weights: &mut weights,
     }
-    .run::<SHAPE_MAJOR>(geometry.chunk_len());
+    .run();
     if let Some(clock) = start {
         times[0] = clock.elapsed();
         start = Some(Instant::now());
@@ -758,6 +784,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool, const SHAPE_MAJOR: bool>(
     RowPass {
         source,
         layout,
+        shapes,
         pool: &row_pool,
         histograms: &histograms.rows,
         weights: &ra_fold,

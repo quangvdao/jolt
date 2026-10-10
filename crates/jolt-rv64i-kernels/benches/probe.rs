@@ -14,6 +14,7 @@
 //! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
 //! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
 //! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
+//! | Bk | bucket/fold_{none,hot8}_share_0_grouped_{4096,16384,65536}/all_rows | stable selector groups; sorting and weights prepared before timing |
 //! | sct | sct/partitioned_emit_rows_20/all_rows | cached-slot weight emission and buffered range application |
 //! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
 //! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
@@ -77,6 +78,11 @@
 //! Bucket read-out uses those same layouts: 128 reads per byte bit, eight per
 //! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
 //! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
+//! Grouped variants retain the same update count and selector remapping. They
+//! visit each shape's stable groups within a block, then each word, with one
+//! word's position blocks borrowed before its offset loop. Prepared offsets,
+//! group boundaries and cycle weights are outside timing; their memory is
+//! additional to the bucket footprint. No timed block allocates or sorts.
 //!
 //! sct calls the library ScatterPlan: construction caches each cycle's u16 slot
 //! and each slot's u16 row offset. Timing emits weights through those slots into
@@ -112,6 +118,7 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use jolt_rv64i_kernels::packed::buckets::{ByteBuckets, NibbleBuckets};
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::router::fold::FoldLayout;
@@ -750,10 +757,87 @@ struct Bucket {
     scratch: Vec<Mutex<Vec<F128>>>,
     selectors: Vec<u8>,
     operations: usize,
+    grouped: Option<GroupedBuckets>,
+}
+
+struct GroupedBuckets {
+    block_len: usize,
+    weights: Vec<F128>,
+    blocks: Vec<[SelectorGroups; 5]>,
+}
+
+struct SelectorGroups {
+    starts: Vec<usize>,
+    offsets: Vec<u16>,
+}
+
+impl GroupedBuckets {
+    fn new(source: &SyntheticTrace, selectors: &[u8], block_len: usize) -> Self {
+        let cycles = CycleSource::cycles(source);
+        let weights = (0..cycles)
+            .into_par_iter()
+            .map(|cycle| trace_value(source, cycle))
+            .collect();
+        let blocks = (0..cycles.div_ceil(block_len))
+            .into_par_iter()
+            .map(|block| {
+                let start = block * block_len;
+                let end = (start + block_len).min(cycles);
+                std::array::from_fn(|shape| {
+                    let bound = [64, 512, 128, 512, 1][shape];
+                    let keys: Vec<usize> = (start..end)
+                        .map(|cycle| {
+                            let low = source.digit(10, cycle).unwrap_or(0);
+                            let high = source.digit(11, cycle).unwrap_or(0);
+                            match shape {
+                                0 => usize::from(selectors[cycle]),
+                                1 => source
+                                    .digit(13, cycle)
+                                    .map_or(bound, |kind| low + 8 * high + 64 * kind),
+                                2 => source.digit(14, cycle).map_or(bound, |kind| low + 8 * kind),
+                                3 => source
+                                    .digit(15, cycle)
+                                    .map_or(bound, |kind| low + 8 * high + 64 * kind),
+                                4 => usize::from(
+                                    !(source.digit(16, cycle).is_some()
+                                        && source.digit(19, cycle).is_some()),
+                                ),
+                                _ => unreachable!(),
+                            }
+                        })
+                        .collect();
+                    let mut starts = vec![0; bound + 2];
+                    for &key in &keys {
+                        starts[key + 1] += 1;
+                    }
+                    for key in 0..=bound {
+                        starts[key + 1] += starts[key];
+                    }
+                    let mut cursors = starts[..=bound].to_vec();
+                    let mut offsets = vec![0; end - start];
+                    for (offset, key) in keys.into_iter().enumerate() {
+                        offsets[cursors[key]] = offset as u16;
+                        cursors[key] += 1;
+                    }
+                    SelectorGroups { starts, offsets }
+                })
+            })
+            .collect();
+        Self {
+            block_len,
+            weights,
+            blocks,
+        }
+    }
 }
 
 impl Bucket {
-    fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
+    fn new(
+        source: Arc<SyntheticTrace>,
+        layout: BucketLayout,
+        threads: usize,
+        grouped_block: Option<usize>,
+    ) -> Self {
         let entries = layout.geometry().0;
         let selectors: Vec<u8> = match layout {
             BucketLayout::Column => Vec::new(),
@@ -788,6 +872,8 @@ impl Bucket {
                 })
                 .sum(),
         };
+        let grouped =
+            grouped_block.map(|block_len| GroupedBuckets::new(&source, &selectors, block_len));
         Self {
             source,
             layout,
@@ -796,6 +882,7 @@ impl Bucket {
                 .collect(),
             selectors,
             operations,
+            grouped,
         }
     }
 
@@ -809,7 +896,126 @@ impl Bucket {
         }
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "calibration geometry gives exact fixed-size word and metadata blocks"
+    )]
+    fn run_grouped(&self, grouped: &GroupedBuckets) -> F128 {
+        let source = black_box(self.source.as_ref());
+        let grouped = black_box(grouped);
+        let BucketLayout::Fold { byte_selectors, .. } = self.layout else {
+            unreachable!();
+        };
+        let fold = FoldLayout::calibration(byte_selectors);
+        grouped
+            .blocks
+            .par_iter()
+            .enumerate()
+            .for_each(|(block, shapes)| {
+                let worker = rayon::current_thread_index().unwrap_or(0);
+                let mut buckets = self.scratch[worker]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let start = block * grouped.block_len;
+                let end = (start + grouped.block_len).min(grouped.weights.len());
+                let weights = &grouped.weights[start..end];
+                let Some(last) = weights.len().checked_sub(1) else {
+                    return;
+                };
+                for (shape, groups) in shapes.iter().enumerate() {
+                    let bound = [64, 512, 128, 512, 1][shape];
+                    for (selector, endpoints) in groups.starts.windows(2).take(bound).enumerate() {
+                        let offsets = &groups.offsets[endpoints[0]..endpoints[1]];
+                        if offsets.is_empty() {
+                            continue;
+                        }
+                        let bytes = shape == 0 && selector < byte_selectors;
+                        let base = if shape == 0 {
+                            fold.variant_base(selector)
+                        } else {
+                            fold.shape_base(shape, selector)
+                        };
+                        let word_entries = if bytes { 8 * 256 } else { 16 * 16 };
+                        let mut trace_word = |slot: usize, word: usize| {
+                            let table = &mut buckets
+                                [base + slot * word_entries..base + (slot + 1) * word_entries];
+                            bucket_word_group(table, offsets, weights, bytes, |offset| {
+                                source.trace_word(word, start + offset)
+                            });
+                        };
+                        match shape {
+                            0 => {
+                                for (slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
+                                    trace_word(slot, word);
+                                }
+                            }
+                            1 => trace_word(0, 0),
+                            2 => {
+                                trace_word(0, 3);
+                                trace_word(1, 1);
+                            }
+                            3 => {
+                                trace_word(0, 0);
+                                trace_word(1, 1);
+                            }
+                            4 => (),
+                            _ => unreachable!(),
+                        }
+                        if shape == 3 || shape == 4 {
+                            let (first_slot, first_word, count) =
+                                if shape == 3 { (2, 0, 1) } else { (0, 1, 2) };
+                            for index in 0..count {
+                                let slot = first_slot + index;
+                                let word = first_word + index;
+                                let table = &mut buckets
+                                    [base + slot * word_entries..base + (slot + 1) * word_entries];
+                                bucket_word_group(table, offsets, weights, false, |offset| {
+                                    source
+                                        .bytecode_word(word, source.bytecode_index(start + offset))
+                                });
+                            }
+                        }
+                        if shape == 0 {
+                            let metadata = fold.variant_metadata_base(selector);
+                            for (slot, column) in (5..12).enumerate() {
+                                let table: &mut [F128; 16] = (&mut buckets
+                                    [metadata + slot * 16..metadata + (slot + 1) * 16])
+                                    .try_into()
+                                    .unwrap();
+                                for &offset in offsets {
+                                    let offset = usize::from(offset).min(last);
+                                    let digit =
+                                        source.digit(column, start + offset).unwrap_or(0) & 15;
+                                    table[digit] += weights[offset];
+                                }
+                            }
+                            let table: &mut [F128; 16] = (&mut buckets
+                                [metadata + 7 * 16..metadata + 8 * 16])
+                                .try_into()
+                                .unwrap();
+                            for &offset in offsets {
+                                let offset = usize::from(offset).min(last);
+                                let cycle = start + offset;
+                                let flags = usize::from(source.digit(18, cycle).is_some())
+                                    | (usize::from(source.digit(19, cycle).is_some()) << 1)
+                                    | (usize::from(source.digit(20, cycle).is_some()) << 2);
+                                table[flags] += weights[offset];
+                            }
+                        }
+                    }
+                }
+            });
+        self.scratch.iter().fold(F128::from_raw(0), |sum, buckets| {
+            let buckets = buckets.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = black_box(&*buckets);
+            sum + buckets[0]
+        })
+    }
+
     fn run(&mut self) -> F128 {
+        if let Some(grouped) = &self.grouped {
+            return self.run_grouped(grouped);
+        }
         let source = black_box(&self.source);
         let _ = black_box(&self.scratch);
         let selectors = black_box(&self.selectors);
@@ -919,6 +1125,46 @@ impl Bucket {
             let _ = black_box(&*buckets);
             sum + buckets[0]
         })
+    }
+}
+
+#[inline]
+#[expect(
+    clippy::unwrap_used,
+    reason = "callers take exactly one calibration word block before entering the offset loop"
+)]
+fn bucket_word_group(
+    table: &mut [F128],
+    offsets: &[u16],
+    weights: &[F128],
+    bytes: bool,
+    word: impl Fn(usize) -> u64,
+) {
+    let Some(last) = weights.len().checked_sub(1) else {
+        return;
+    };
+    if bytes {
+        let mut view = ByteBuckets::new(table).unwrap();
+        let positions: &mut [[F128; 256]; 8] = view.positions_mut().try_into().unwrap();
+        for &offset in offsets {
+            let offset = usize::from(offset).min(last);
+            let weight = weights[offset];
+            for (position, value) in positions.iter_mut().zip(word(offset).to_le_bytes()) {
+                position[usize::from(value)] += weight;
+            }
+        }
+    } else {
+        let mut view = NibbleBuckets::new(table).unwrap();
+        let positions: &mut [[F128; 16]; 16] = view.positions_mut().try_into().unwrap();
+        for &offset in offsets {
+            let offset = usize::from(offset).min(last);
+            let weight = weights[offset];
+            let mut value = word(offset);
+            for position in positions.iter_mut() {
+                position[(value & 15) as usize] += weight;
+                value >>= 4;
+            }
+        }
     }
 }
 
@@ -1458,10 +1704,24 @@ impl Unit {
                 Ok(Self::Lookup(Box::new(Lookup::new(trace()?, pattern, kib))))
             }
             "bucket" => {
-                let layout = if case.variant == "column_128kib" {
+                let (variant, grouped_block) =
+                    if let Some((variant, block)) = case.variant.split_once("_grouped_") {
+                        let block = block
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|block| [4096, 16384, 65536].contains(block))
+                            .ok_or_else(invalid)?;
+                        if !["fold_none_share_0", "fold_hot8_share_0"].contains(&variant) {
+                            return Err(invalid());
+                        }
+                        (variant, Some(block))
+                    } else {
+                        (case.variant.as_str(), None)
+                    };
+                let layout = if variant == "column_128kib" {
                     BucketLayout::Column
                 } else {
-                    let (layout, share) = case.variant.split_once("_share_").ok_or_else(invalid)?;
+                    let (layout, share) = variant.split_once("_share_").ok_or_else(invalid)?;
                     let byte_selectors = match layout {
                         "fold_none" => 0,
                         "fold_hot8" => 8,
@@ -1478,7 +1738,12 @@ impl Unit {
                         share,
                     }
                 };
-                Ok(Self::Bucket(Bucket::new(trace()?, layout, threads)))
+                Ok(Self::Bucket(Bucket::new(
+                    trace()?,
+                    layout,
+                    threads,
+                    grouped_block,
+                )))
             }
             "scatter" => {
                 let (method, rows) = case.variant.split_once("_rows_").ok_or_else(invalid)?;
@@ -1814,6 +2079,16 @@ fn main() -> Result<(), RunnerError> {
                 unit: "bucket",
                 variant: format!("fold_{layout}_share_{share}"),
                 profiles: BOTH,
+                minimum_threads: 1,
+            });
+        }
+    }
+    for (layout, share) in [("none", 0), ("hot8", 0)] {
+        for block in [4096, 16384, 65536] {
+            cases.push(ProbeCase {
+                unit: "bucket",
+                variant: format!("fold_{layout}_share_{share}_grouped_{block}"),
+                profiles: ALL_ROWS,
                 minimum_threads: 1,
             });
         }

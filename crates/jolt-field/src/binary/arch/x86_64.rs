@@ -1,7 +1,9 @@
 use std::arch::x86_64::{
     __m128i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128, _mm_shuffle_epi32,
-    _mm_slli_epi64, _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
+    _mm_sll_epi64, _mm_slli_epi64, _mm_slli_si128, _mm_srl_epi64, _mm_srli_epi64, _mm_srli_si128,
+    _mm_xor_si128,
 };
+use std::ops::{Shl, Shr};
 
 #[derive(Clone, Copy)]
 pub(super) struct Word(__m128i);
@@ -12,6 +14,11 @@ pub(super) const KARATSUBA128: bool = true;
 pub(super) const SHIFT_SQUARE128: bool = true;
 
 impl Word {
+    #[inline]
+    pub(super) fn reduce64(self) -> u64 {
+        self.low() ^ super::super::portable::fold64(self.high_to_low()).low()
+    }
+
     #[inline]
     pub(super) fn from_unreduced64(value: Unreduced64) -> Self {
         value
@@ -122,5 +129,25 @@ impl Word {
     pub(super) fn low_to_high(self) -> Self {
         // SAFETY: SSE2 is baseline on x86_64.
         unsafe { Self(_mm_slli_si128::<8>(self.0)) }
+    }
+}
+
+impl Shl<u32> for Word {
+    type Output = Self;
+
+    #[inline]
+    fn shl(self, shift: u32) -> Self {
+        // SAFETY: SSE2 is baseline on x86_64; shifts act independently on each lane.
+        unsafe { Self(_mm_sll_epi64(self.0, _mm_cvtsi64_si128(i64::from(shift)))) }
+    }
+}
+
+impl Shr<u32> for Word {
+    type Output = Self;
+
+    #[inline]
+    fn shr(self, shift: u32) -> Self {
+        // SAFETY: SSE2 is baseline on x86_64; shifts act independently on each lane.
+        unsafe { Self(_mm_srl_epi64(self.0, _mm_cvtsi64_si128(i64::from(shift)))) }
     }
 }

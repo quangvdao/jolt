@@ -15,6 +15,13 @@ pub(super) const SHIFT_SQUARE128: bool = false;
 
 impl Word {
     #[inline]
+    pub(super) fn reduce64(self) -> u64 {
+        let k = Self::from_u64(0x1b);
+        let first = self.mul_hl(k);
+        self.xor(first).xor(first.mul_hl(k)).low()
+    }
+
+    #[inline]
     pub(super) fn from_unreduced64(value: Unreduced64) -> Self {
         Self::from_u128(value)
     }

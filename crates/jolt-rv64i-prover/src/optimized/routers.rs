@@ -1,22 +1,31 @@
 //! Routers adapters for the packed RV64I kernels.
 
+use crate::optimized::source::WitnessSource;
 use crate::optimized::source::{SharedSource, WitnessColumns};
 use crate::plane::{Rv64iPlane, Rv64iWitness};
 #[cfg(feature = "allocative")]
 use allocative::Allocative;
 use jolt_claims::NoChallenges;
 use jolt_field::F128;
+use jolt_kernels::mem::drop_in_background_thread;
 use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
 use jolt_rv64i_arith::Layout;
+use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
+use jolt_rv64i_kernels::round::eq::eq_table;
+use jolt_rv64i_kernels::router::claims::claims_pass;
+use jolt_rv64i_kernels::router::cycle::RouterCycleMember;
 use jolt_rv64i_kernels::router::cycle::RoutersCycleCore;
 use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout};
+use jolt_rv64i_kernels::router::lift::{source_lift, RetainedWordLifts};
 use jolt_rv64i_kernels::router::shape::{
     BitEntry, RouteEntry, RouterError, RouterShape, RouterShapeRequest, SelectorFactor, WordSlot,
 };
 use jolt_rv64i_kernels::router::short::RouterShortCore;
+use jolt_rv64i_kernels::source::ValidatedTrace;
+use jolt_rv64i_verifier::ids::RouterCycleDerived;
 use jolt_rv64i_verifier::ids::{DerivedId, Router, RouterShortDerived};
 use jolt_rv64i_verifier::public::routes::{
     bank, selector_slots, source_slots, BankWord, Factor, RouteTensors, ROUTERS,
@@ -24,9 +33,18 @@ use jolt_rv64i_verifier::public::routes::{
 use jolt_rv64i_verifier::stages::stage3a::{
     RouterShort, RouterShortInputClaims, RouterShortOutputClaims,
 };
+use jolt_rv64i_verifier::stages::stage3b::{
+    RouterCycleBranch, RouterCycleBranchInputClaims, RouterCycleBranchOutputClaims,
+    RouterCycleCompare, RouterCycleCompareInputClaims, RouterCycleCompareOutputClaims,
+    RouterCycleMemory, RouterCycleMemoryInputClaims, RouterCycleMemoryOutputClaims,
+    RouterCycleShift, RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims,
+    RouterCycleVariant, RouterCycleVariantInputClaims, RouterCycleVariantOutputClaims,
+};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::fmt::Display;
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
 fn geometry(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
@@ -278,3 +296,406 @@ impl SumcheckKernel<F128> for ShortKernel {
         Ok(())
     }
 }
+
+#[derive(Default)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct CycleState {
+    group: Option<Arc<Mutex<CycleGroup>>>,
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+enum Extraction {
+    Pending {
+        #[cfg_attr(feature = "allocative", allocative(skip))]
+        lifts: Box<RetainedWordLifts>,
+        #[cfg_attr(feature = "allocative", allocative(skip))]
+        plan: Arc<ScatterPlan<WitnessSource>>,
+    },
+    Complete {
+        trace_words: Vec<F128>,
+        bytecode_words: Vec<F128>,
+    },
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct CycleGroup {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    trace: Arc<ValidatedTrace<WitnessSource>>,
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    members: Vec<Option<RouterCycleMember>>,
+    r_1: Vec<F128>,
+    x: Vec<F128>,
+    extraction: Extraction,
+    variant_terms: VariantTerms,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct VariantTerms {
+    words: [F128; 8],
+    one: F128,
+}
+impl VariantTerms {
+    fn new(shape: &RouterShape, x: &[F128]) -> Result<Self, RouterError> {
+        if x.len() != shape.slots() {
+            return Err(RouterError::PointLength {
+                expected: shape.slots(),
+                actual: x.len(),
+            });
+        }
+        let word_point: Vec<_> = shape.word_slots().iter().map(|&slot| x[slot]).collect();
+        let word_weights = eq_table(&word_point, None);
+        let bit_weights = eq_table(&x[..6], None);
+        let mut words = [F128::from_raw(0); 8];
+        for (target, weight) in words.iter_mut().zip(&word_weights) {
+            *target = *weight;
+        }
+        let mut one = F128::from_raw(0);
+        for (slot, word) in shape.bank().iter().enumerate() {
+            if let WordSlot::Bits(entries) = word {
+                for (bit, entry) in entries.iter().enumerate() {
+                    if *entry == BitEntry::One {
+                        one += word_weights[slot] * bit_weights[bit];
+                    }
+                }
+            }
+        }
+        Ok(Self { words, one })
+    }
+}
+
+struct TakenMember {
+    member: RouterCycleMember,
+    group: Arc<Mutex<CycleGroup>>,
+}
+type FactorValues = Vec<(Factor, F128)>;
+
+impl CycleGroup {
+    fn new(
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        r_1: &[F128],
+        x: &[F128],
+    ) -> Result<Self, KernelError<F128>> {
+        let columns = WitnessColumns::new(&witness.layout);
+        let shapes = router_shapes(&columns, &witness.layout, None).map_err(geometry)?;
+        let shared = session.state_or_insert_with(SharedSource::default);
+        let trace = shared.prepare(witness, Some(RoutersCycleCore::columns(&shapes)))?;
+        let plan = shared.plan()?;
+        let variant_shape = ROUTERS
+            .iter()
+            .zip(&shapes)
+            .find(|(router, _)| **router == Router::Variant)
+            .map(|(_, shape)| shape)
+            .ok_or_else(|| geometry("Variant shape is absent"))?;
+        let variant_terms = VariantTerms::new(variant_shape, x).map_err(geometry)?;
+        let lifted = source_lift(&trace, &shapes, x).map_err(geometry)?;
+        let core = RoutersCycleCore::new(
+            shared.take_selector_group()?,
+            &shapes,
+            r_1,
+            x,
+            lifted.source_tables,
+        )
+        .map_err(geometry)?;
+        Ok(Self {
+            trace,
+            members: core.members().into_iter().map(Some).collect(),
+            r_1: r_1.to_vec(),
+            x: x.to_vec(),
+            extraction: Extraction::Pending {
+                lifts: Box::new(lifted.lifts),
+                plan,
+            },
+            variant_terms,
+        })
+    }
+
+    fn take_member(
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        router: Router,
+        r_1: &[F128],
+        x: &[F128],
+    ) -> Result<TakenMember, KernelError<F128>> {
+        if session
+            .state::<CycleState>()
+            .and_then(|state| state.group.as_ref())
+            .is_none()
+        {
+            let group = Arc::new(Mutex::new(Self::new(session, witness, r_1, x)?));
+            session.state_or_insert_with(CycleState::default).group = Some(group);
+        }
+        let group = session
+            .state::<CycleState>()
+            .and_then(|state| state.group.as_ref())
+            .cloned()
+            .ok_or_else(|| geometry("cycle group is absent"))?;
+        let member = {
+            let mut state = group.lock().map_err(geometry)?;
+            if state.r_1 != r_1 || state.x != x {
+                return Err(geometry("router points differ from the cycle group"));
+            }
+            let index = ROUTERS
+                .iter()
+                .position(|name| *name == router)
+                .ok_or_else(|| geometry("router is absent"))?;
+            let member = state
+                .members
+                .get_mut(index)
+                .and_then(Option::take)
+                .ok_or_else(|| geometry("router member was already taken"))?;
+            member
+        };
+        Ok(TakenMember { member, group })
+    }
+
+    fn claims(&mut self, r_3: &[F128]) -> Result<(), SumcheckKernelError<F128>> {
+        if let Extraction::Pending { lifts, plan } = &self.extraction {
+            let words = [
+                WitnessColumns::rs1_value(),
+                WitnessColumns::rs2_value(),
+                WitnessColumns::rd_pre_value(),
+                WitnessColumns::ram_read_value(),
+                WitnessColumns::next_pc(),
+            ];
+            let output =
+                claims_pass(&self.trace, lifts, &words, plan, r_3).map_err(output_error)?;
+            // Assignment drops the retained lifts and this group's plan Arc at extraction.
+            self.extraction = Extraction::Complete {
+                trace_words: output.trace_words,
+                bytecode_words: output.bytecode_words,
+            };
+        }
+        Ok(())
+    }
+
+    fn word(&self, word: BankWord) -> Result<F128, SumcheckKernelError<F128>> {
+        let Extraction::Complete {
+            trace_words,
+            bytecode_words,
+        } = &self.extraction
+        else {
+            return Err(output_error("claims are absent"));
+        };
+        let value = match word_slot(word) {
+            WordSlot::Trace(index) => trace_words.get(index),
+            WordSlot::Bytecode(index) => bytecode_words.get(index),
+            WordSlot::Bits(_) | WordSlot::Zero => None,
+        };
+        value
+            .copied()
+            .ok_or_else(|| output_error("word claim is absent"))
+    }
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative), allocative(bound = ""))]
+struct CycleKernel<R> {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    member: RouterCycleMember,
+    group: Arc<Mutex<CycleGroup>>,
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    factors: &'static [Factor],
+    r_3: Vec<F128>,
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    relation: PhantomData<R>,
+}
+
+impl<R> ProveRounds<F128> for CycleKernel<R> {
+    fn num_rounds(&self) -> usize {
+        self.member.num_rounds()
+    }
+    fn prove_round(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+        previous_claim: F128,
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        let message = self.member.prove_round(bind, round, previous_claim)?;
+        if let Some(bind) = bind {
+            self.r_3.push(bind);
+        }
+        Ok(message)
+    }
+    fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
+        self.member.finish_rounds(bind)?;
+        self.r_3.push(bind);
+        Ok(())
+    }
+}
+
+impl<R> CycleKernel<R> {
+    fn factors(&self) -> Result<(F128, FactorValues), SumcheckKernelError<F128>> {
+        let (source, values) = self.member.final_values().map_err(output_error)?;
+        if values.len() != self.factors.len() {
+            return Err(output_error("factor claims are absent"));
+        }
+        Ok((source, self.factors.iter().copied().zip(values).collect()))
+    }
+}
+
+fn factor_value(
+    values: &[(Factor, F128)],
+    factor: Factor,
+) -> Result<F128, SumcheckKernelError<F128>> {
+    values
+        .iter()
+        .find(|(name, _)| *name == factor)
+        .map(|(_, value)| *value)
+        .ok_or_else(|| output_error("factor claim is absent"))
+}
+
+macro_rules! cycle_adapter {
+    ($prepare:ident, $relation:ident, $inputs:ident, $outputs:ident, $router:ident, |$state:ident, $source:ident, $factors:ident, $terms:ident| $output:expr) => {
+        /// Shares the five-member `RoutersCycleCore`, retained lifts and plan.
+        /// Variant coefficients alone are checked against the relation's derived terms.
+        #[derive(Default)]
+        pub struct $prepare;
+        impl PrepareKernel<F128, $relation<F128>, Rv64iPlane> for $prepare {
+            fn prepare(&self, session: &mut ProofSession, witness: &Rv64iWitness, inputs: ProverInputs<'_, F128, $relation<F128>>) -> Result<Box<dyn SumcheckKernel<F128, Relation = $relation<F128>>>, KernelError<F128>> {
+                let TakenMember { member, group } = CycleGroup::take_member(session, witness, Router::$router, inputs.relation.r_1(), inputs.relation.x())?;
+                Ok(Box::new(CycleKernel::<$relation<F128>> { member, group, factors: bank(Router::$router, &witness.layout).factors, r_3: Vec::with_capacity(inputs.relation.r_1().len()), relation: std::marker::PhantomData }))
+            }
+        }
+        impl SumcheckKernel<F128> for CycleKernel<$relation<F128>> {
+            type Relation = $relation<F128>;
+            fn output_claims(&mut self, _: &$inputs<F128>) -> Result<$outputs<F128>, SumcheckKernelError<F128>> {
+                let ($source, $factors) = self.factors()?;
+                let mut $state = self.group.lock().map_err(output_error)?;
+                $state.claims(&self.r_3)?;
+                let $terms = $state.variant_terms;
+                $output
+            }
+            fn validate_derived_tables(&self, relation: &Self::Relation, input_points: &$inputs<Vec<F128>>, output_points: &$outputs<Vec<F128>>, challenges: &NoChallenges<F128>) -> Result<(), SumcheckKernelError<F128>> {
+                if Router::$router == Router::Variant {
+                    let terms = self.group.lock().map_err(output_error)?.variant_terms;
+                    for (term, got) in terms.words.iter().copied().enumerate().map(|(index, value)| (RouterCycleDerived::WordSlot(index), value)).chain(std::iter::once((RouterCycleDerived::OneSlot, terms.one))) {
+                        let id = DerivedId::RouterCycle(Router::Variant, term);
+                        let expected = relation.derive_output_term(&id, input_points, output_points, challenges)?;
+                        if got != expected { return Err(SumcheckKernelError::DerivedTableDrift { id: id.into(), expected, got }); }
+                    }
+                }
+                Ok(())
+            }
+            fn park_residue(self: Box<Self>, session: &mut ProofSession) {
+                if let Some(state) = session.state::<CycleState>() {
+                    if state.group.is_some() {
+                        session.state_or_insert_with(CycleState::default).group = None;
+                        // plan() in the group's successful prepare pins a held session plan.
+                        let _ = session.state_or_insert_with(SharedSource::default).release_plan();
+                    }
+                }
+                drop_in_background_thread(self);
+            }
+        }
+    };
+}
+
+cycle_adapter!(
+    RouterCycleVariantPrepare,
+    RouterCycleVariant,
+    RouterCycleVariantInputClaims,
+    RouterCycleVariantOutputClaims,
+    Variant,
+    |state, source, factors, terms| {
+        let rs1_value = state.word(BankWord::Rs1Value)?;
+        let rs2_value = state.word(BankWord::Rs2Value)?;
+        let rd_pre_value = state.word(BankWord::RdPreValue)?;
+        let imm = state.word(BankWord::Imm)?;
+        let fall_through_pc = state.word(BankWord::FallThroughPC)?;
+        let pc_plus_imm = state.word(BankWord::PCPlusImm)?;
+        let pc = state.word(BankWord::PC)?;
+        let next_pc = state.word(BankWord::NextPC)?;
+        let words = [
+            rs1_value,
+            rs2_value,
+            rd_pre_value,
+            imm,
+            fall_through_pc,
+            pc_plus_imm,
+            pc,
+            next_pc,
+        ];
+        let variant_bits = source
+            + words
+                .into_iter()
+                .zip(terms.words)
+                .map(|(word, coefficient)| word * coefficient)
+                .sum::<F128>()
+            + terms.one;
+        Ok(RouterCycleVariantOutputClaims {
+            rs1_value,
+            rs2_value,
+            rd_pre_value,
+            imm,
+            fall_through_pc,
+            pc_plus_imm,
+            pc,
+            next_pc,
+            variant_bits,
+            variant: factor_value(&factors, Factor::Variant)?,
+        })
+    }
+);
+cycle_adapter!(
+    RouterCycleShiftPrepare,
+    RouterCycleShift,
+    RouterCycleShiftInputClaims,
+    RouterCycleShiftOutputClaims,
+    Shift,
+    |state, _source, factors, _terms| {
+        Ok(RouterCycleShiftOutputClaims {
+            rs1_value: state.word(BankWord::Rs1Value)?,
+            shift_kind: factor_value(&factors, Factor::ShiftKind)?,
+            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
+            pos_ra_1: factor_value(&factors, Factor::Pos(1))?,
+        })
+    }
+);
+cycle_adapter!(
+    RouterCycleMemoryPrepare,
+    RouterCycleMemory,
+    RouterCycleMemoryInputClaims,
+    RouterCycleMemoryOutputClaims,
+    Memory,
+    |state, _source, factors, _terms| {
+        Ok(RouterCycleMemoryOutputClaims {
+            ram_read_value: state.word(BankWord::RamReadValue)?,
+            rs2_value: state.word(BankWord::Rs2Value)?,
+            access_kind: factor_value(&factors, Factor::AccessKind)?,
+            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
+        })
+    }
+);
+cycle_adapter!(
+    RouterCycleComparePrepare,
+    RouterCycleCompare,
+    RouterCycleCompareInputClaims,
+    RouterCycleCompareOutputClaims,
+    Compare,
+    |state, _source, factors, _terms| {
+        Ok(RouterCycleCompareOutputClaims {
+            rs1_value: state.word(BankWord::Rs1Value)?,
+            rs2_value: state.word(BankWord::Rs2Value)?,
+            imm: state.word(BankWord::Imm)?,
+            key_kind: factor_value(&factors, Factor::KeyKind)?,
+            pos_ra_0: factor_value(&factors, Factor::Pos(0))?,
+            pos_ra_1: factor_value(&factors, Factor::Pos(1))?,
+        })
+    }
+);
+cycle_adapter!(
+    RouterCycleBranchPrepare,
+    RouterCycleBranch,
+    RouterCycleBranchInputClaims,
+    RouterCycleBranchOutputClaims,
+    Branch,
+    |state, _source, factors, _terms| {
+        Ok(RouterCycleBranchOutputClaims {
+            fall_through_pc: state.word(BankWord::FallThroughPC)?,
+            pc_plus_imm: state.word(BankWord::PCPlusImm)?,
+            branch: factor_value(&factors, Factor::Branch)?,
+            should_branch: factor_value(&factors, Factor::ShouldBranch)?,
+        })
+    }
+);

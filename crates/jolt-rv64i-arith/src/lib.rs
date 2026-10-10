@@ -33,7 +33,10 @@ pub use decode::{
     eval, load_form, shift_form, store_form, Form, FormError, Line, Rails, ShortForm, Source,
     Sources, Term, TermError, Wire, BRANCH_FORM,
 };
-pub use layout::{chunk_indicators, BitsRow, Chunk, ChunkError, Layout, LayoutError, BITS_COLUMNS};
+pub use layout::{
+    chunk_indicators, BitsRow, Chunk, ChunkError, Layout, LayoutError, BITS_COLUMNS,
+    MAX_LOG_K_BYTECODE,
+};
 pub use rows::{
     LaneRows, PackedForm, PackedRow, PackedTerm, PackedTermError, RowFailure, RowGroup, RowSet,
     RowSystem,

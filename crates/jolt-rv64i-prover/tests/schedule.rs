@@ -15,18 +15,25 @@ use jolt_rv64i_arith::Layout;
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
     commitment::transparent::TransparentBits,
-    prover::{prove_with_transcript, ProverPreprocessing},
+    prover::{prove, prove_with_transcript, ProverPreprocessing},
 };
 use jolt_rv64i_verifier::{
     claims::{router_short::RouterShortSymbolic, spartan_inner::SpartanInnerSymbolic},
+    commitment::{BitsCommitmentScheme, BitsGeometry},
     proof::geometry,
+    public::matrices::RowMatrices,
     stages::{
-        stage1::Stage1Sumchecks, stage3b::Stage3bSumchecks, stage4::Stage4Sumchecks,
-        stage5::Stage5Sumchecks, stage6a::Stage6aSumchecks, stage6b::Stage6bSumchecks,
+        stage1, stage1::Stage1Sumchecks, stage2, stage3a, stage3b, stage3b::Stage3bSumchecks,
+        stage4, stage4::Stage4Sumchecks, stage5, stage5::Stage5Sumchecks, stage6a,
+        stage6a::Stage6aSumchecks, stage6b, stage6b::Stage6bSumchecks,
     },
+    statement::CheckedInputs,
+    transcript::preamble,
     verifier::verify_with_transcript,
 };
+use jolt_sumcheck::BatchPrelude;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
+use std::sync::Arc;
 use support::{Event, RecordedTranscript};
 
 macro_rules! member_degrees {
@@ -195,6 +202,155 @@ fn generated_schedule_matches_both_reference_layouts() {
         assert_eq!(wires, [6, 2, 5, 18, 7, 4, 1, 256]);
         assert_eq!(wires.into_iter().sum::<usize>(), 299);
     }
+}
+
+#[test]
+fn concrete_member_windows_match_the_envelope_schedule_on_a_counting_loop() {
+    let (statement, verifier, witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier,
+        scheme: (),
+    };
+    let proof = prove(
+        &preprocessing,
+        &statement,
+        &witness,
+        &Rv64iBackend::reference(),
+    )
+    .unwrap();
+    let checked = CheckedInputs::new(&preprocessing.verifier, &statement, &proof).unwrap();
+    let schedule = geometry(
+        checked.log_T(),
+        checked.log_K_bytecode(),
+        checked.log_K_ram(),
+    )
+    .unwrap();
+    let check_batch = |index: usize, concrete: BatchPrelude<F128>| {
+        let envelope = &schedule[index];
+        assert_eq!(
+            (concrete.max_num_vars, concrete.max_degree),
+            (envelope.max_num_vars, envelope.max_degree),
+            "batch index {index}",
+        );
+        assert_eq!(
+            concrete
+                .members
+                .iter()
+                .map(|member| (member.rounds, member.offset))
+                .collect::<Vec<_>>(),
+            envelope
+                .members
+                .iter()
+                .map(|member| (member.rounds, member.offset))
+                .collect::<Vec<_>>(),
+            "member windows of batch index {index}",
+        );
+    };
+    let mut transcript: RecordedTranscript = preamble(&checked);
+    let state = TransparentBits::verify_commit(
+        &(),
+        BitsGeometry {
+            log_T: checked.log_T(),
+        },
+        &proof.bits_commitment,
+        &mut transcript,
+    )
+    .unwrap();
+    check_batch(
+        0,
+        stage1::verify::from_checked(&checked, &mut transcript.fork())
+            .unwrap()
+            .geometry()
+            .unwrap(),
+    );
+    let s1 = stage1::verify::verify(&checked, &proof.stage1, &mut transcript).unwrap();
+    check_batch(
+        1,
+        stage2::verify::from_upstream(Arc::new(RowMatrices::new(checked.layout())), &s1)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s2 = stage2::verify::verify(&checked, &proof.stage2, &mut transcript, &s1).unwrap();
+    check_batch(
+        2,
+        stage3a::verify::from_upstream(&checked, &s2)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s3a = stage3a::verify::verify(&checked, &proof.stage3a, &mut transcript, &s2).unwrap();
+    check_batch(
+        3,
+        stage3b::verify::from_upstream(&checked, &s1, &s3a)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s3b =
+        stage3b::verify::verify(&checked, &proof.stage3b, &mut transcript, &s1, &s3a).unwrap();
+    check_batch(
+        4,
+        stage4::verify::from_upstream(&checked, &mut transcript.fork(), &s3a, &s3b)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s4 = stage4::verify::verify(&checked, &proof.stage4, &mut transcript, &s3a, &s3b).unwrap();
+    check_batch(
+        5,
+        stage5::verify::from_upstream(&checked, &s3a, &s4)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s5 = stage5::verify::verify(&checked, &proof.stage5, &mut transcript, &s3a, &s4).unwrap();
+    check_batch(
+        6,
+        stage6a::verify::from_upstream(&checked, &s3a, &s3b, &s4, &s5)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let s6a = stage6a::verify::verify(
+        &checked,
+        &proof.stage6a,
+        &mut transcript,
+        &s3a,
+        &s3b,
+        &s4,
+        &s5,
+    )
+    .unwrap();
+    check_batch(
+        7,
+        stage6b::verify::from_upstream(&checked, &s1, &s2, &s3a, &s3b, &s4, &s5, &s6a)
+            .unwrap()
+            .batch
+            .geometry()
+            .unwrap(),
+    );
+    let _output = stage6b::verify::verify(
+        &checked,
+        &proof.stage6b,
+        &mut transcript,
+        &s1,
+        &s2,
+        &s3a,
+        &s3b,
+        &s4,
+        &s5,
+        &s6a,
+        state,
+        &proof.opening,
+    )
+    .unwrap();
 }
 
 #[test]

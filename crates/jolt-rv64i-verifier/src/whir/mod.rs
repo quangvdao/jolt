@@ -14,5 +14,6 @@
 //! are specified in the [commitment specification](../../../../specs/rv64i-binary-commitment.md),
 //! sections 2–6 and 8.
 
+pub mod code;
 pub mod error;
 pub mod params;

@@ -2,3 +2,5 @@
 //! Shared protocol geometry and validation belong to `jolt_rv64i_verifier::whir`.
 
 #![deny(unsafe_code)]
+
+pub mod ntt;

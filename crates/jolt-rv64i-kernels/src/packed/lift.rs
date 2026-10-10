@@ -1,4 +1,5 @@
-//! Linear maps from packed bits to field elements through byte or nibble tables.
+//! Linear maps from packed bits to field elements through one-bit, two-bit,
+//! nibble or byte lookup tables, including compact maps in caller-provided arenas.
 //!
 //! A caller folds any scalar multiplying the map into the supplied weights
 //! before construction. Lifting uses lookups and field addition only.
@@ -6,7 +7,7 @@
 use jolt_field::F128;
 use thiserror::Error;
 
-/// A set of weights that cannot describe the significant bits of one word.
+/// Invalid weights, compact table dimensions or arena layouts for a packed-bit lift.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LiftError {
     /// More than 64 significant-bit weights were supplied.
@@ -15,6 +16,18 @@ pub enum LiftError {
         /// The supplied number of weights.
         count: usize,
     },
+    /// A compact lookup width must be one, two, four, or eight bits.
+    #[error("unsupported compact lift width {bits}")]
+    Width { bits: usize },
+    /// A compact table must contain two, four, sixteen or 256 entries.
+    #[error("unsupported compact table length {entries}")]
+    TableLength { entries: usize },
+    /// A lookup table received more weights than its index width.
+    #[error("compact table accepts {capacity} weights, received {count}")]
+    TableWeightCount { capacity: usize, count: usize },
+    /// A static view disagrees with the arena's table layout.
+    #[error("compact lift view does not match its arena layout")]
+    Layout,
 }
 
 /// The map `word ↦ Σ_i word[i]·weights[i]` over all 64 bits of a word.
@@ -110,4 +123,93 @@ fn table<const N: usize>(weights: &[F128]) -> [F128; N] {
         }
     }
     entries
+}
+
+#[derive(Clone, Copy)]
+/// A range of lookup tables in an arena preserved by the caller. Appending
+/// tables preserves existing lifts; replacing entries changes their map.
+pub(crate) struct CompactLift {
+    start: usize,
+    len: usize,
+    bits: usize,
+}
+
+impl CompactLift {
+    pub(crate) fn new(
+        weights: &[F128],
+        bits: usize,
+        arena: &mut Vec<F128>,
+    ) -> Result<Self, LiftError> {
+        if weights.len() > 64 {
+            return Err(LiftError::WeightCount {
+                count: weights.len(),
+            });
+        }
+        if !matches!(bits, 1 | 2 | 4 | 8) {
+            return Err(LiftError::Width { bits });
+        }
+        let start = arena.len();
+        for weights in weights.chunks(bits) {
+            match bits {
+                1 => arena.extend_from_slice(&table::<2>(weights)),
+                2 => arena.extend_from_slice(&table::<4>(weights)),
+                4 => arena.extend_from_slice(&table::<16>(weights)),
+                _ => arena.extend_from_slice(&table::<256>(weights)),
+            }
+        }
+        Ok(Self {
+            start,
+            len: arena.len() - start,
+            bits,
+        })
+    }
+
+    /// Checks width, table count and arena bounds before forming a static view.
+    pub(crate) fn view<const N: usize, const TABLES: usize>(
+        self,
+        arena: &[F128],
+    ) -> Result<CompactView<'_, N, TABLES>, LiftError> {
+        if N != 1 << self.bits || Some(self.len) != N.checked_mul(TABLES) {
+            return Err(LiftError::Layout);
+        }
+        let values = arena
+            .get(self.start..self.start + self.len)
+            .ok_or(LiftError::Layout)?;
+        let tables = values
+            .as_chunks::<N>()
+            .0
+            .try_into()
+            .map_err(|_| LiftError::Layout)?;
+        Ok(CompactView { tables })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompactView<'a, const N: usize, const TABLES: usize> {
+    tables: &'a [[F128; N]; TABLES],
+}
+
+impl<const N: usize, const TABLES: usize> CompactView<'_, N, TABLES> {
+    #[inline]
+    pub(crate) fn lift(self, mut word: u64) -> F128 {
+        let mut sum = F128::from_raw(0);
+        for table in self.tables {
+            sum += table[(word & (N as u64 - 1)) as usize];
+            word >>= N.ilog2();
+        }
+        sum
+    }
+}
+
+pub(crate) fn compact_table<const N: usize>(weights: &[F128]) -> Result<[F128; N], LiftError> {
+    if !matches!(N, 2 | 4 | 16 | 256) {
+        return Err(LiftError::TableLength { entries: N });
+    }
+    if weights.len() > N.ilog2() as usize {
+        return Err(LiftError::TableWeightCount {
+            capacity: N.ilog2() as usize,
+            count: weights.len(),
+        });
+    }
+    Ok(table(weights))
 }

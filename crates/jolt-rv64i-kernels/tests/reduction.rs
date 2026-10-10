@@ -614,15 +614,17 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
     pool.install(|| {
         for rounds in [8, 14] {
             let fixture = Fixture::new(rounds, true);
-            let mut core =
-                ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
             let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
             let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * pool.current_num_threads();
-            let resident = CountingAllocator::live_bytes();
             let mut claim = fixture.claim();
             let challenges: Vec<_> = (0..rounds)
                 .map(|i| F128::from_raw(79 + i as u128))
                 .collect();
+            // Exclude only fixture-owned storage; the core releases its dense inputs.
+            let resident = CountingAllocator::live_bytes();
+            let lifetime = AllocationMeasurement::begin();
+            let mut core =
+                ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
             let measurement = AllocationMeasurement::begin();
             for round in 0..rounds {
                 let message = core
@@ -647,8 +649,14 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
             );
             assert!(stats.peak_bytes >= stats.final_bytes);
             assert!(stats.peak_bytes <= 64 * 1024 + runtime_bytes);
-            assert!(stats.final_bytes <= runtime_bytes);
-            assert!(CountingAllocator::live_bytes() < resident + runtime_bytes);
+            let final_values_bytes = std::mem::size_of_val(core.final_values().unwrap());
+            let lifetime_stats = lifetime.finish();
+            assert!((final_values_bytes..=final_values_bytes + runtime_bytes)
+                .contains(&lifetime_stats.final_bytes));
+            drop(core);
+            assert!(
+                (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
+            );
         }
     });
 }

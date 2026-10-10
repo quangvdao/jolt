@@ -273,12 +273,12 @@ fn report_prepared(samples: &[PreparedSample], log_t: usize, threads: usize) {
             .map(|sample| sample.preparation / divisor)
             .collect(),
     );
-    let peak_bytes = samples
+    let incremental_peak_bytes = samples
         .iter()
         .map(|sample| sample.allocation.peak_bytes)
         .max()
         .unwrap_or(0);
-    let final_bytes = samples
+    let incremental_final_bytes = samples
         .iter()
         .map(|sample| sample.allocation.final_bytes)
         .max()
@@ -289,7 +289,7 @@ fn report_prepared(samples: &[PreparedSample], log_t: usize, threads: usize) {
         .max()
         .unwrap_or(0);
     print!(
-        "reduction_shared/local/{log_t}/{threads} construct_ns={:.6} rounds_ns={:.6} finish_ns={:.6} extract_ns={:.6} total_ns={:.6} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs}",
+        "reduction_shared/local/{log_t}/{threads} construct_ns={:.6} rounds_ns={:.6} finish_ns={:.6} extract_ns={:.6} total_ns={:.6} incremental_peak_bytes={incremental_peak_bytes} incremental_final_bytes={incremental_final_bytes} allocs_with_preparation={allocs}",
         phases[0][0], phases[1][0], phases[2][0], phases[3][0], total[0],
     );
     if samples.len() > 1 {
@@ -355,12 +355,12 @@ fn run_prepared_shared() -> Result<(), RunnerError> {
             let mut samples = Vec::with_capacity(options.samples);
             for _ in 0..options.samples {
                 samples.push(pool.install(|| {
+                    let measurement = AllocationMeasurement::begin();
                     let start = Instant::now();
                     let prepared = word_table(&source, &weights[2]);
                     let preparation = start.elapsed().as_nanos() as f64;
                     // The prepared table has one owner, transferred into the core.
-                    // Its allocation and pass precede the four measured phases.
-                    let measurement = AllocationMeasurement::begin();
+                    // Preparation is outside the four timers, inside memory accounting.
                     let start = Instant::now();
                     let mut tables =
                         g_pass_digits(&validated, &map, &pass_weights).map_err(|error| {

@@ -442,6 +442,12 @@ macro_rules! __stage_shape_check {
 /// one parameter `F: JoltField`, and the plane implements `WitnessPlane<F>`
 /// for every `F: JoltField`.
 ///
+/// Both impls are for the batch, so its name must resolve to a type local to
+/// the expanding crate. For a batch declared in another crate, declare a
+/// local tuple struct of the same name with `Deref` to that batch: the
+/// expansion reaches the batch only through `self` and its member fields,
+/// which must be visible to the expanding crate.
+///
 /// Declaring a family also needs `jolt-claims` for the claim derives and
 /// `serde` for `SumcheckBatch`'s output aggregate. Tables for
 /// `NaiveSumcheckProver` need `jolt-poly`. If that crate declares an `allocative`

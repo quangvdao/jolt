@@ -152,8 +152,11 @@ Key abstractions introduced or modified:
   with `B: ?Sized + PrepareKernel<F, SpartanShift<F>, P>
   + PrepareKernel<F, InstructionInput<F>, P> + ...`, one bound per member. Each stage
   demands exactly its members' slots through this impl's where-clause, and prepares the
-  members inline in `prove`. Both generated impls attach to the batch type, so a family
-  declared in another crate can expand the same macro without violating the orphan rule.
+  members inline in `prove`. Both generated impls are for the batch type and for no
+  uncovered type parameter, so the orphan rule admits the expansion in any crate where
+  the batch name resolves to a local type: the crate that declares the batch, or a crate
+  that wraps a foreign batch in a local type of the same name with `Deref` to it (the
+  expansion reaches the batch only through `self` and member fields).
   `Proved<F, S, C>` is one generic carrier in jolt-prover
   `{ recorded, output_claims: S::OutputClaims, output_points: S::OutputPoints, final_claim }`
   (replaces v1's per-stage generated `ProvedStageN`).

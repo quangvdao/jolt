@@ -77,7 +77,7 @@ impl WitnessLanes {
         }
         let chunks = CycleChunks::new(cycles.ilog2() as usize, 0)?;
         let rows = RowSystem::new(&witness.layout);
-        let fields = DigitFields::new(&witness.layout)?;
+        let fields = DigitFields::new(&witness.layout);
         let mut lanes = Vec::new();
         lanes
             .try_reserve_exact(cycles)
@@ -118,7 +118,7 @@ impl WitnessLanes {
         rows: &RowSystem,
         cycle: usize,
     ) -> Result<([[u64; 3]; 2], u8), LanesError> {
-        let fields = DigitFields::new(&witness.layout)?;
+        let fields = DigitFields::new(&witness.layout);
         Self::cycle_with_fields(witness, rows, &fields, cycle)
     }
 

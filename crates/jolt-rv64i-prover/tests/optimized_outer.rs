@@ -333,7 +333,7 @@ fn malformed_lanes_report_first_cycle_on_every_pool_and_invalid_geometry() {
         .map(|range| range.start + 1)
         .collect();
     assert_eq!(cycles.len(), 2);
-    let field = DigitFields::new(&witness.layout).unwrap().bytecode_index();
+    let field = DigitFields::new(&witness.layout).bytecode_index();
     let mask = u64::MAX >> (64 - field.bits());
     let invalid_index = witness.bytecode.rows().len() - 1;
     assert_eq!(witness.bytecode.rows()[invalid_index].variant, None);

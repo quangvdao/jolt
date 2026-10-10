@@ -20,8 +20,7 @@ use std::sync::Arc;
 
 /// Sixteen-byte replay cache: the increment and low-first bytecode/RAM indices,
 /// six position bits, `KeysDiffer`, `ShouldBranch`, `JalrLowBit` and six variant
-/// bits. `DigitFields::new` checks `b + a + 15 <= 64`; valid layouts have at most
-/// 49 index bits.
+/// bits. `Layout::new` bounds the total index width by 49 bits.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "allocative", derive(Allocative))]
@@ -63,7 +62,7 @@ impl DigitField {
 }
 
 /// The sole packing geometry. Chunks accumulate their layout widths low first;
-/// position, flags and variant follow the indices. Construction rejects overflow.
+/// position, flags and variant follow the indices. `Layout::new` bounds their width.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "allocative", derive(Allocative))]
 pub struct DigitFields {
@@ -80,13 +79,11 @@ pub struct DigitFields {
     variant: DigitField,
 }
 impl DigitFields {
-    pub fn new(layout: &Layout) -> Result<Self, Rv64iProverError> {
+    pub fn new(layout: &Layout) -> Self {
         let b = layout.log_K_bytecode();
         let a = layout.log_K_ram();
-        let bits = b + a + 15;
-        if bits > 64 {
-            return Err(Rv64iProverError::DecodedPacking { bits });
-        }
+        // Layout::new pins b + a <= 49, so all packed fields fit.
+        debug_assert!(b + a + 15 <= 64);
         let mut shift = 0;
         let mut chunks = |chunks: &[Chunk]| {
             let mut fields = [DigitField::new(0, 1); 16];
@@ -98,7 +95,7 @@ impl DigitFields {
         };
         let bytecode = chunks(layout.bytecode_ra());
         let ram = chunks(layout.ram_ra());
-        Ok(Self {
+        Self {
             bytecode_index: DigitField::new(0, b),
             ram_index: DigitField::new(b, a),
             bytecode,
@@ -110,7 +107,7 @@ impl DigitFields {
             should_branch: DigitField::new(shift + 7, 1),
             jalr_low_bit: DigitField::new(shift + 8, 1),
             variant: DigitField::new(shift + 9, 6),
-        })
+        }
     }
     pub fn bytecode_fields(&self) -> &[DigitField] {
         &self.bytecode[..self.bytecode_len]
@@ -241,7 +238,7 @@ impl Rv64iWitness {
                 cycle,
                 rows: self.decoded.len(),
             })?;
-        let fields = DigitFields::new(&self.layout)?;
+        let fields = DigitFields::new(&self.layout);
         let index = fields.bytecode_index().read(decoded);
         let fetched = usize::try_from(index)
             .ok()
@@ -359,7 +356,6 @@ impl Rv64iWitness {
         }
         let _ = BitsBuilder::new(&layout, &bytecode)?;
         let _ = bytecode.final_pc_index(final_pc)?;
-        let _ = DigitFields::new(&layout)?;
         let decoded = (0..bits.len()).map(|_| DecodedCycle::default()).collect();
         let words = (0..bits.len()).map(|_| CycleWords::default()).collect();
         Ok(Self {
@@ -376,7 +372,7 @@ impl Rv64iWitness {
     }
 
     fn replay(&mut self, facts: Option<&[CycleFacts]>) -> Result<(), Rv64iProverError> {
-        let fields = DigitFields::new(&self.layout)?;
+        let fields = DigitFields::new(&self.layout);
         let decoded = Arc::get_mut(&mut self.decoded).ok_or(Rv64iProverError::SharedBuffer)?;
         let builder = BitsBuilder::new(&self.layout, &self.bytecode)?;
         let mut rows = match facts {

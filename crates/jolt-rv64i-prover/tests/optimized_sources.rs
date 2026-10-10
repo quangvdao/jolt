@@ -61,7 +61,7 @@ fn bit(row: &BitsRow, column: usize) -> bool {
 
 fn check_decoded(witness: &Rv64iWitness) {
     let layout = &witness.layout;
-    let fields = DigitFields::new(layout).unwrap();
+    let fields = DigitFields::new(layout);
     let mut counts = [0_u64; 64];
     assert_eq!(witness.decoded.len(), witness.bits.len());
     for (cycle, (decoded, committed)) in witness.decoded.iter().zip(witness.bits.iter()).enumerate()
@@ -129,7 +129,7 @@ fn check_decoded(witness: &Rv64iWitness) {
 #[test]
 fn decoded_rows_match_committed_rows_in_both_constructors() {
     assert_eq!(std::mem::size_of::<DecodedCycle>(), 16);
-    let fields = DigitFields::new(&Layout::new(3, 46, 0).unwrap()).unwrap();
+    let fields = DigitFields::new(&Layout::new(3, 46, 0).unwrap());
     assert_eq!((fields.variant().shift(), fields.variant().bits()), (58, 6));
     for witness in witnesses() {
         check_decoded(&witness);

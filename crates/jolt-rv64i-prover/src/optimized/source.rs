@@ -41,8 +41,8 @@ pub struct WitnessColumns {
     map: Vec<ColumnMap>,
 }
 impl WitnessColumns {
-    pub fn new(layout: &Layout) -> Result<Self, Rv64iProverError> {
-        let fields = DigitFields::new(layout)?;
+    pub fn new(layout: &Layout) -> Self {
+        let fields = DigitFields::new(layout);
         let mut reads = Vec::new();
         let mut widths = Vec::new();
         let mut committed = [None; 256];
@@ -106,7 +106,7 @@ impl WitnessColumns {
             start: layout.keys_differ(),
             columns: vec![keys_differ, should_branch, jalr_low_bit],
         });
-        Ok(Self {
+        Self {
             bytecode,
             ram,
             pos,
@@ -122,7 +122,7 @@ impl WitnessColumns {
             widths,
             committed,
             map,
-        })
+        }
     }
     pub fn bytecode_chunk(&self, chunk: usize) -> Option<usize> {
         self.bytecode.get(chunk).copied()
@@ -263,8 +263,8 @@ impl WitnessSource {
             words: Arc::clone(&witness.words),
             decoded: Arc::clone(&witness.decoded),
             bytecode: Arc::clone(&witness.bytecode),
-            fields: DigitFields::new(&witness.layout)?,
-            columns: WitnessColumns::new(&witness.layout)?,
+            fields: DigitFields::new(&witness.layout),
+            columns: WitnessColumns::new(&witness.layout),
             kinds,
         })
     }

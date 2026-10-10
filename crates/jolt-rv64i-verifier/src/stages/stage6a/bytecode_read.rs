@@ -10,7 +10,7 @@ pub use crate::claims::bytecode_read::{
     BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims, BytecodeReadAddressOutputClaims,
 };
 use crate::ids::{BytecodeAddressDerived, DerivedId};
-use crate::points::{self, PointsError};
+use crate::points::{PointsError, WordLift};
 pub use crate::public::bytecode::BytecodeReadPoints;
 
 #[derive(Clone)]
@@ -35,9 +35,9 @@ impl<F: JoltField> BytecodeReadAddress<F> {
             });
         }
         points.validate()?;
-        let entry_pc = points::lift(entry_pc, &points.r_bit)?;
-        let final_pc =
-            points.r_3.iter().copied().product::<F>() * points::lift(final_pc, &points.r_bit)?;
+        let lift = WordLift::new(&points.r_bit)?;
+        let entry_pc = lift.evaluate(entry_pc);
+        let final_pc = points.r_3.iter().copied().product::<F>() * lift.evaluate(final_pc);
         Ok(Self {
             symbolic: BytecodeReadAddressSymbolic::new(log_K_bytecode),
             points,

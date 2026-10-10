@@ -1,5 +1,6 @@
 .PHONY: help bootstrap build-emulator \
-        arch-tests-64imac arch-tests-generate arch-tests-run arch-tests-smoke
+        arch-tests-64imac arch-tests-generate arch-tests-run arch-tests-smoke \
+        arch-tests-rv64i arch-tests-rv64i-smoke
 
 MAKEFILE_DIR      := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
 ARCH_TEST_DIR     := $(MAKEFILE_DIR)/third-party/riscv-arch-test
@@ -14,6 +15,12 @@ ARCH_TEST_RUNNER  := $(MAKEFILE_DIR)/tests/arch-tests/run.sh
 EMULATOR_BIN      := $(MAKEFILE_DIR)/target/debug/jolt-emu
 SMOKE_DIR         := $(MAKEFILE_DIR)/tests/arch-tests/smoke
 SMOKE_ELF         := $(SMOKE_DIR)/fail.elf
+RV64I_TARGET_DIR  := $(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(MAKEFILE_DIR)/target)
+RV64I_CHECK_BIN   := $(RV64I_TARGET_DIR)/debug/rv64i-arch-check
+RV64I_SMOKE_ELF   := $(RV64I_TARGET_DIR)/arch-tests-smoke/rv64i-fail.elf
+# I-* ELF count from the first generation at ACT4 commit
+# a7c99303516f4e668f7488f172043392e23b9dfd.
+RV64I_ARCH_EXPECT ?= 51
 
 # Number of parallel jobs for the ACT4 generator. Falls back to 1 when
 # neither `nproc` nor `sysctl` is available.
@@ -70,3 +77,36 @@ $(SMOKE_ELF): $(SMOKE_DIR)/fail.S $(MAKEFILE_DIR)/tests/arch-tests/jolt/link.ld
 		-nostdlib -nostartfiles \
 		-T $(MAKEFILE_DIR)/tests/arch-tests/jolt/link.ld \
 		-o $@ $<
+
+
+arch-tests-rv64i: ## Check ACT4 I-* execution traces against RV64I cycle rows
+	@test -n "$(RV64I_ARCH_EXPECT)" || { \
+		echo "set RV64I_ARCH_EXPECT to the I-* ELF count from the first generation at a7c99303516f4e668f7488f172043392e23b9dfd" >&2; \
+		exit 2; \
+	}
+	$(MAKE) arch-tests-generate
+	cargo build -p jolt-rv64i-trace --features arch-check --bin rv64i-arch-check
+	$(ARCH_TEST_RUNNER) \
+		--emulator "$(RV64I_CHECK_BIN)" \
+		--work-dir "$(ARCH_TEST_WORK)" \
+		--skip-file "$(ARCH_TEST_SKIP)" \
+		--match 'I-*' --expect "$(RV64I_ARCH_EXPECT)"
+
+arch-tests-rv64i-smoke: ## Require the RV64I checker to report the deliberate HTIF failure
+	cargo build -p jolt-rv64i-trace --features arch-check --bin rv64i-arch-check
+	@mkdir -p "$(dir $(RV64I_SMOKE_ELF))"
+	PATH="/opt/riscv/bin:$$PATH" riscv-none-elf-gcc \
+		-march=rv64i -mabi=lp64 -nostdlib -nostartfiles -Wl,--no-relax \
+		-T "$(MAKEFILE_DIR)/tests/arch-tests/jolt/link.ld" \
+		-o "$(RV64I_SMOKE_ELF)" "$(SMOKE_DIR)/fail.S"
+	@if "$(RV64I_CHECK_BIN)" --strict "$(RV64I_SMOKE_ELF)" >/dev/null 2>&1; then \
+		echo "RV64I smoke FAIL: deliberate HTIF failure returned success" >&2; \
+		exit 1; \
+	else \
+		rc=$$?; \
+		if [ "$$rc" -ne 1 ]; then \
+			echo "RV64I smoke FAIL: expected HTIF-failure exit 1, found $$rc" >&2; \
+			exit 1; \
+		fi; \
+		echo "RV64I smoke OK: checker returned HTIF-failure exit 1"; \
+	fi

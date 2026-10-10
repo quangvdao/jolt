@@ -1,0 +1,13 @@
+[package]
+name = "rv64i-trace-guests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 2

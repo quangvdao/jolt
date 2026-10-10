@@ -1,0 +1,71 @@
+[package]
+name = "jolt-rv64i-prover"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Binary-field RV64I prover protocol"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+allocative = ["dep:allocative", "jolt-rv64i-verifier/allocative", "jolt-kernels/allocative"]
+parallel = ["jolt-kernels/parallel", "jolt-sumcheck/parallel"]
+test-utils = ["jolt-rv64i-verifier/test-utils", "dep:rand"]
+
+[dependencies]
+allocative = { workspace = true, optional = true }
+blake2.workspace = true
+common.workspace = true
+jolt-claims.workspace = true
+jolt-crypto.workspace = true
+jolt-field = { path = "../jolt-field", default-features = false, features = ["binary"] }
+jolt-poly.workspace = true
+jolt-r1cs.workspace = true
+jolt-rv64i-arith.workspace = true
+jolt-sumcheck.workspace = true
+jolt-transcript = { workspace = true, features = ["transcript-blake2b"] }
+thiserror.workspace = true
+jolt-kernels.workspace = true
+jolt-prover.workspace = true
+jolt-verifier.workspace = true
+tracing.workspace = true
+jolt-rv64i-verifier.workspace = true
+rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
+
+[dev-dependencies]
+jolt-program = { workspace = true, features = ["image"] }
+jolt-riscv.workspace = true
+
+[[test]]
+name = "bits_reduction"
+required-features = ["test-utils"]
+
+[[test]]
+name = "wire"
+required-features = ["test-utils"]
+
+[[test]]
+name = "witness"
+required-features = ["test-utils"]
+
+[[test]]
+name = "spartan"
+required-features = ["test-utils"]
+
+[[test]]
+name = "routers"
+required-features = ["test-utils"]
+
+[[test]]
+name = "read_checking"
+required-features = ["test-utils"]
+
+[[test]]
+name = "val_evaluation"
+required-features = ["test-utils"]
+
+[[test]]
+name = "bytecode"
+required-features = ["test-utils"]

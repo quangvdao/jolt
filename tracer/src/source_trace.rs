@@ -1,31 +1,73 @@
+use std::cmp::Reverse;
+
+use common::constants::RAM_START_ADDRESS;
 use jolt_program::execution::{
     ExecutionBackend, JoltProgram, MemoryImage, OwnedTrace, RamAccess, RamRead, RamWrite,
     RegisterRead, RegisterState, RegisterWrite, SourceTraceError, SourceTraceRow, TraceError,
     TraceInputs, TraceOutput,
 };
+use jolt_program::image::DecodeMode;
 use jolt_riscv::{NormalizedOperands, SourceInstructionKind as Kind, RV64I};
 
-use crate::{emulator::Emulator, instruction::Instruction, AdviceTape};
+use crate::{
+    emulator::{mmu::MemoryWrapper, Emulator},
+    instruction::Instruction,
+    AdviceTape,
+};
 
 /// Traces RV64I source instructions without virtual-sequence expansion.
 ///
-/// Decoding always uses RV64I. ECALL and EBREAK are rejected when reached;
+/// Decoding always uses RV64I and defaults to strict decoding. ECALL and
+/// EBREAK are rejected when reached;
 /// fetches must name decoded instructions, accesses must be aligned, control
 /// cells are write-once and unreadable, and stores cannot overlap instructions.
 /// Rows capture old operands and aligned RAM doublewords, including x0 loads.
 /// The first PC stall emits one final row; termination stores do not stop tracing.
 /// Text spans above 256 MiB are rejected before emulator construction. The
 /// memory configuration must cover the loaded image, as for `TracerBackend`.
+/// In either decode mode, initial RAM must equal the decoded image everywhere:
+/// the last `memory_init` entry wins, absent image bytes are zero, and RAM outside
+/// its allocation is zero. At trace start, before any row, a difference returns
+/// `ImageMismatch` at its lowest address. This checks the emulator's memory;
+/// it is not a constraint on a proof.
 #[derive(Default, Debug, Clone)]
 pub struct SourceTracerBackend {
     row_capacity: usize,
+    decode_mode: DecodeMode,
 }
 
 impl SourceTracerBackend {
     /// Reserves space for this many rows before execution; otherwise capacity
     /// grows amortised. The default hint is zero.
+    ///
+    /// At trace start in either mode, checks the emulator's RAM against the
+    /// decoded image everywhere. Later image entries win and absent image bytes
+    /// or RAM outside its allocation count as zero. The lowest difference
+    /// returns `ImageMismatch` before any row; this is a runtime memory check,
+    /// not a constraint on a proof.
     pub fn with_row_capacity(rows: usize) -> Self {
-        Self { row_capacity: rows }
+        Self {
+            row_capacity: rows,
+            decode_mode: DecodeMode::Strict,
+        }
+    }
+
+    /// Selects how executable sections containing data words are decoded.
+    ///
+    /// Rows index the instruction list returned by `decode_elf_with_mode` with
+    /// RV64I and this same mode; consumers must resolve indices with that mode.
+    /// The mode matters only for an image rejected by strict decoding. A fetch
+    /// of an omitted word returns `PcOutsideProgram`, a guarantee of
+    /// `SourceTracerBackend`. Hole bytes are ordinary memory: loads read the
+    /// decoded image until a store changes it, and stores overlapping only holes
+    /// emit ordinary rows. The PC remains absent whatever was stored there.
+    ///
+    /// `DecodeMode` changes static decoding only. The emulator's own fetch,
+    /// `TracerBackend`, the native x86 backend and chunked replay do not consult
+    /// it and provide no such fetch guarantee.
+    pub fn with_decode_mode(mut self, mode: DecodeMode) -> Self {
+        self.decode_mode = mode;
+        self
     }
 }
 
@@ -37,7 +79,7 @@ impl ExecutionBackend<SourceTraceRow> for SourceTracerBackend {
         program: &JoltProgram,
         inputs: TraceInputs,
     ) -> Result<TraceOutput<Self::Trace>, TraceError> {
-        let mut execution = SourceExecution::new(program, inputs)?;
+        let mut execution = SourceExecution::new(program, inputs, self.decode_mode)?;
         let mut rows = Vec::with_capacity(self.row_capacity);
         while execution.step(&mut rows)? {}
         let (advice_tape, memory, device) = crate::finish_emulator(execution.emulator);
@@ -157,11 +199,16 @@ struct SourceExecution {
 }
 
 impl SourceExecution {
-    fn new(program: &JoltProgram, inputs: TraceInputs) -> Result<Self, TraceError> {
+    fn new(
+        program: &JoltProgram,
+        inputs: TraceInputs,
+        mode: DecodeMode,
+    ) -> Result<Self, TraceError> {
         if program.elf_bytes().is_empty() {
             return Err(TraceError::MissingElfBytes);
         }
-        let (instructions, _, _, _) = crate::decode_with_profile(program.elf_bytes(), RV64I)?;
+        let (instructions, memory_init, _, _) =
+            crate::decode_with_mode(program.elf_bytes(), RV64I, mode)?;
         let table = InstructionTable::new(&instructions)?;
         let mut emulator = crate::create_emulator(
             program.elf_bytes(),
@@ -173,6 +220,7 @@ impl SourceExecution {
             inputs.advice_tape.map(AdviceTape::from_bytes),
         );
         let mmu = &mut emulator.get_mut_cpu().mmu;
+        check_initial_image(&memory_init, &mmu.memory)?;
         mmu.set_access_recording(false);
         if let Some(device) = mmu.jolt_device.as_mut() {
             device
@@ -296,3 +344,128 @@ impl SourceExecution {
 
 #[cfg(test)]
 mod tests;
+
+fn check_initial_image(
+    memory_init: &[(u64, u8)],
+    memory: &MemoryWrapper,
+) -> Result<(), SourceTraceError> {
+    let (ram, touched) = memory.memory.data.flat_parts();
+    let ram = &ram[..touched];
+    if memory_init.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+        compare_image(memory_init, ram)
+    } else {
+        let mut image_order: Vec<usize> = (0..memory_init.len()).collect();
+        // Equal addresses retain the last section entry.
+        image_order.sort_unstable_by_key(|&index| (memory_init[index].0, Reverse(index)));
+        image_order.dedup_by_key(|index| memory_init[*index].0);
+        compare_image(
+            &SortedImage {
+                entries: memory_init,
+                order: &image_order,
+            },
+            ram,
+        )
+    }
+}
+
+trait ImageEntries {
+    fn len(&self) -> usize;
+    fn entry(&self, index: usize) -> (u64, u8);
+}
+
+impl ImageEntries for [(u64, u8)] {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn entry(&self, index: usize) -> (u64, u8) {
+        self[index]
+    }
+}
+
+struct SortedImage<'a> {
+    entries: &'a [(u64, u8)],
+    order: &'a [usize],
+}
+
+impl ImageEntries for SortedImage<'_> {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn entry(&self, index: usize) -> (u64, u8) {
+        self.entries[self.order[index]]
+    }
+}
+
+// check_initial_image supplies final bytes in strictly increasing address order.
+// flat_parts guarantees zero RAM beyond the supplied touched prefix.
+#[inline]
+fn compare_image<E: ImageEntries + ?Sized>(
+    entries: &E,
+    ram: &[u64],
+) -> Result<(), SourceTraceError> {
+    let compare_word = |address, expected: u64, actual: u64| {
+        let difference = expected ^ actual;
+        if difference == 0 {
+            Ok(())
+        } else {
+            Err(SourceTraceError::ImageMismatch {
+                address: address + u64::from(difference.trailing_zeros() / 8),
+            })
+        }
+    };
+    let mut position = 0;
+    let mut ram_position = 0;
+    while position < entries.len() {
+        let (address, byte) = entries.entry(position);
+        let word_address = address & !7;
+        let word_index = (word_address - RAM_START_ADDRESS) / 8;
+        while ram_position < ram.len() && (ram_position as u64) < word_index {
+            compare_word(
+                RAM_START_ADDRESS + ram_position as u64 * 8,
+                0,
+                ram[ram_position],
+            )?;
+            ram_position += 1;
+        }
+        let actual = if ram_position < ram.len() {
+            let actual = ram[ram_position];
+            ram_position += 1;
+            actual
+        } else {
+            0
+        };
+        let mut expected = u64::from(byte) << ((address & 7) * 8);
+        // Eight unique increasing addresses spanning one word are contiguous.
+        if address == word_address
+            && entries.len() - position >= 8
+            && entries.entry(position + 7).0 == word_address + 7
+        {
+            for offset in 1..8 {
+                expected |= u64::from(entries.entry(position + offset).1) << (offset * 8);
+            }
+            position += 8;
+        } else {
+            position += 1;
+            while position < entries.len() {
+                let (address, byte) = entries.entry(position);
+                if address & !7 != word_address {
+                    break;
+                }
+                expected |= u64::from(byte) << ((address & 7) * 8);
+                position += 1;
+            }
+        }
+        compare_word(word_address, expected, actual)?;
+    }
+    while ram_position < ram.len() {
+        compare_word(
+            RAM_START_ADDRESS + ram_position as u64 * 8,
+            0,
+            ram[ram_position],
+        )?;
+        ram_position += 1;
+    }
+    Ok(())
+}

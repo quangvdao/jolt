@@ -14,7 +14,7 @@
 //! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
 //! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
 //! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
-//! | Bk | bucket/fold_{none,hot8}_share_0_grouped_{4096,16384,65536}/all_rows | stable selector groups; sorting and weights prepared before timing |
+//! | Bk | bucket/fold_{none,hot8}_share_0_grouped_{4096,16384,65536}/all_rows; hot8_share_25 also retained | stable selector groups; sorting and weights prepared before timing |
 //! | sct | sct/partitioned_emit_rows_20/all_rows | cached-slot weight emission and buffered range application |
 //! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
 //! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
@@ -1711,7 +1711,13 @@ impl Unit {
                             .ok()
                             .filter(|block| [4096, 16384, 65536].contains(block))
                             .ok_or_else(invalid)?;
-                        if !["fold_none_share_0", "fold_hot8_share_0"].contains(&variant) {
+                        if ![
+                            "fold_none_share_0",
+                            "fold_hot8_share_0",
+                            "fold_hot8_share_25",
+                        ]
+                        .contains(&variant)
+                        {
                             return Err(invalid());
                         }
                         (variant, Some(block))
@@ -2083,7 +2089,7 @@ fn main() -> Result<(), RunnerError> {
             });
         }
     }
-    for (layout, share) in [("none", 0), ("hot8", 0)] {
+    for (layout, share) in [("none", 0), ("hot8", 0), ("hot8", 25)] {
         for block in [4096, 16384, 65536] {
             cases.push(ProbeCase {
                 unit: "bucket",

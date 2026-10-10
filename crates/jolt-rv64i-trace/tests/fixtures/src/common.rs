@@ -1,4 +1,4 @@
-use core::arch::{asm, global_asm};
+use core::arch::global_asm;
 use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
 
@@ -14,8 +14,7 @@ global_asm!(
     ".globl _start",
     "_start:",
     "la sp, __stack_top",
-    "call guest_main",
-    "2: jal zero, 2b",
+    "j guest_main",
 );
 
 pub fn input() -> u64 {
@@ -28,15 +27,13 @@ pub fn finish(value: u64) -> ! {
     unsafe {
         write_volatile(OUTPUT as *mut u64, value);
         write_volatile(TERMINATION as *mut u64, 1);
-        asm!("2: jal zero, 2b", options(noreturn));
     }
+    loop {}
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    // SAFETY: guests.rs reserves the panic word; the trap-free loop never returns.
-    unsafe {
-        write_volatile(PANIC as *mut u64, 1);
-        asm!("2: jal zero, 2b", options(noreturn));
-    }
+    // SAFETY: guests.rs reserves the aligned panic word.
+    unsafe { write_volatile(PANIC as *mut u64, 1) };
+    loop {}
 }

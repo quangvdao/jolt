@@ -21,7 +21,6 @@ use jolt_rv64i_verifier::{
 };
 
 #[test]
-#[ignore = "Rust 1.95 recipe emits compressed code at 0x80000018 in input-loop despite -m,-a,-c; riscv-none-elf-gcc is absent. Rerun: CARGO_TARGET_DIR=/Users/quangdao/Documents/SNARKs/jolt-wt/trace-target cargo nextest run -p jolt-rv64i-trace --features emulator --run-ignored only --cargo-quiet -E 'binary(guests)'"]
 fn bare_rust_guests_pass_strict_decode_rows_and_outputs() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let target =
@@ -37,7 +36,10 @@ fn bare_rust_guests_pass_strict_decode_rows_and_outputs() {
             "riscv64imac-unknown-none-elf",
         ])
         .env("CARGO_TARGET_DIR", &target)
-        .env("RUSTFLAGS", "-C target-feature=-m,-a,-c")
+        .env(
+            "RUSTFLAGS",
+            "-C target-feature=-m,-a,-c,-zmmul,-zca,-zaamo,-zalrsc",
+        )
         .output()
         .unwrap();
     assert!(

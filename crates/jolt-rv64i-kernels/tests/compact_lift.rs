@@ -134,8 +134,16 @@ fn compact_lifts_reject_malformed_weights_widths_views_and_arenas() {
     assert!(matches!(lift.view::<256, 2>(&[]), Err(LiftError::Layout)));
     assert!(matches!(
         compact_table::<8>(&[one; 3]),
-        Err(LiftError::Width { bits: 3 })
+        Err(LiftError::TableLength { entries: 8 })
     ));
+    assert!(matches!(
+        compact_table::<3>(&[one]),
+        Err(LiftError::TableLength { entries: 3 })
+    ));
+    assert_eq!(
+        compact_table::<3>(&[one]).unwrap_err().to_string(),
+        "unsupported compact table length 3"
+    );
     assert!(matches!(
         compact_table::<16>(&[one; 5]),
         Err(LiftError::TableWeightCount {

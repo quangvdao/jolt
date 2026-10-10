@@ -1,4 +1,5 @@
-//! Linear maps from packed bits to field elements through byte or nibble tables.
+//! Linear maps from packed bits to field elements through one-bit, two-bit,
+//! nibble or byte lookup tables, including compact maps in caller-provided arenas.
 //!
 //! A caller folds any scalar multiplying the map into the supplied weights
 //! before construction. Lifting uses lookups and field addition only.
@@ -6,7 +7,7 @@
 use jolt_field::F128;
 use thiserror::Error;
 
-/// A set of weights that cannot describe the significant bits of one word.
+/// Invalid weights, compact table dimensions or arena layouts for a packed-bit lift.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LiftError {
     /// More than 64 significant-bit weights were supplied.
@@ -18,6 +19,9 @@ pub enum LiftError {
     /// A compact lookup width must be one, two, four, or eight bits.
     #[error("unsupported compact lift width {bits}")]
     Width { bits: usize },
+    /// A compact table must contain two, four, sixteen or 256 entries.
+    #[error("unsupported compact table length {entries}")]
+    TableLength { entries: usize },
     /// A lookup table received more weights than its index width.
     #[error("compact table accepts {capacity} weights, received {count}")]
     TableWeightCount { capacity: usize, count: usize },
@@ -199,9 +203,7 @@ impl<const N: usize, const TABLES: usize> CompactView<'_, N, TABLES> {
 
 pub(crate) fn compact_table<const N: usize>(weights: &[F128]) -> Result<[F128; N], LiftError> {
     if !matches!(N, 2 | 4 | 16 | 256) {
-        return Err(LiftError::Width {
-            bits: N.checked_ilog2().unwrap_or(0) as usize,
-        });
+        return Err(LiftError::TableLength { entries: N });
     }
     if weights.len() > N.ilog2() as usize {
         return Err(LiftError::TableWeightCount {

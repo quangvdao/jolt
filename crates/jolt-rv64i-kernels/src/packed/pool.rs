@@ -6,7 +6,6 @@ use jolt_field::F128;
 use rayon::prelude::*;
 use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
@@ -37,9 +36,13 @@ pub enum PoolError {
 pub struct ScratchPool {
     len: usize,
     capacity: usize,
-    free: Mutex<Vec<Vec<F128>>>,
-    lent: AtomicUsize,
-    exclusive: AtomicBool,
+    state: Mutex<PoolState>,
+}
+
+struct PoolState {
+    free: Vec<Vec<F128>>,
+    lent: usize,
+    exclusive: bool,
 }
 
 impl ScratchPool {
@@ -57,29 +60,31 @@ impl ScratchPool {
         Ok(Self {
             len,
             capacity,
-            free: Mutex::new(free),
-            lent: AtomicUsize::new(0),
-            exclusive: AtomicBool::new(false),
+            state: Mutex::new(PoolState {
+                free,
+                lent: 0,
+                exclusive: false,
+            }),
         })
     }
 
     /// Lends a retained array, or creates a zero array below the worker bound.
     /// At the bound this returns `Exhausted` without allocating or waiting for
-    /// an array. The free-list lock is acquired once, never per element.
+    /// an array. The state lock is acquired once, never per element; a new
+    /// array is allocated and zero-filled after reserving the loan and unlocking.
     pub fn take(&self) -> Result<ScratchGuard<'_>, PoolError> {
-        let mut free = self.lock()?;
-        if self.exclusive.load(Ordering::Relaxed) {
-            return Err(PoolError::MergeInProgress);
-        }
-        let lent = self.lent.load(Ordering::Relaxed);
-        if lent == self.capacity {
-            return Err(PoolError::Exhausted);
-        }
-        let array = match free.pop() {
-            Some(array) => array,
-            None => Self::zeroed(self.len)?,
+        let array = {
+            let mut state = self.lock()?;
+            if state.exclusive {
+                return Err(PoolError::MergeInProgress);
+            }
+            if state.lent == self.capacity {
+                return Err(PoolError::Exhausted);
+            }
+            state.lent += 1;
+            state.free.pop()
         };
-        self.lent.store(lent + 1, Ordering::Relaxed);
+        let array = array.unwrap_or_else(|| Self::zeroed(self.len));
         Ok(ScratchGuard { pool: self, array })
     }
 
@@ -92,7 +97,7 @@ impl ScratchPool {
         let mut owned = self.detach()?;
         let arrays = &mut owned.arrays;
         let result = if arrays.is_empty() {
-            Self::zeroed(self.len)
+            Ok(Self::zeroed(self.len))
         } else {
             let mut stride = 1;
             while stride < arrays.len() {
@@ -132,56 +137,45 @@ impl ScratchPool {
         Ok(())
     }
 
-    /// Maximum simultaneous pool-owned arrays, fixed at construction.
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// Counts live free and lent arrays, for checking the scratch bound.
     /// A merge or zero-fill owns its arrays exclusively and returns `MergeInProgress`.
     pub fn allocated_arrays(&self) -> Result<usize, PoolError> {
-        let free = self.lock()?;
-        if self.exclusive.load(Ordering::Relaxed) {
+        let state = self.lock()?;
+        if state.exclusive {
             return Err(PoolError::MergeInProgress);
         }
-        Ok(free.len() + self.lent.load(Ordering::Relaxed))
+        Ok(state.free.len() + state.lent)
     }
 
     fn detach(&self) -> Result<ScratchArrays<'_>, PoolError> {
-        let mut free = self.lock()?;
-        if self.exclusive.load(Ordering::Relaxed) {
+        let mut state = self.lock()?;
+        if state.exclusive {
             return Err(PoolError::MergeInProgress);
         }
-        let lent = self.lent.load(Ordering::Relaxed);
-        if lent != 0 {
-            return Err(PoolError::MergeWhileLent { lent });
+        if state.lent != 0 {
+            return Err(PoolError::MergeWhileLent { lent: state.lent });
         }
-        self.exclusive.store(true, Ordering::Relaxed);
+        state.exclusive = true;
         Ok(ScratchArrays {
             pool: self,
-            arrays: std::mem::take(&mut *free),
+            arrays: std::mem::take(&mut state.free),
         })
     }
 
     fn restore(&self, arrays: Vec<Vec<F128>>) {
         // Destructors restore ownership even on unwind; checked operations
         // continue to report a poisoned free-list lock.
-        let mut free = self.free.lock().unwrap_or_else(|err| err.into_inner());
-        *free = arrays;
-        self.exclusive.store(false, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.free = arrays;
+        state.exclusive = false;
     }
 
-    fn zeroed(len: usize) -> Result<Vec<F128>, PoolError> {
-        let mut array = Vec::new();
-        array
-            .try_reserve_exact(len)
-            .map_err(|_| PoolError::Length { len })?;
-        array.resize(len, F128::from_raw(0));
-        Ok(array)
+    fn zeroed(len: usize) -> Vec<F128> {
+        vec![F128::from_raw(0); len]
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Vec<Vec<F128>>>, PoolError> {
-        self.free.lock().map_err(|_| PoolError::Poisoned)
+    fn lock(&self) -> Result<MutexGuard<'_, PoolState>, PoolError> {
+        self.state.lock().map_err(|_| PoolError::Poisoned)
     }
 }
 
@@ -221,8 +215,8 @@ impl Drop for ScratchGuard<'_> {
     fn drop(&mut self) {
         // A destructor cannot report poison. Returning ownership preserves the
         // array bound; later checked operations still return PoolError::Poisoned.
-        let mut free = self.pool.free.lock().unwrap_or_else(|err| err.into_inner());
-        free.push(std::mem::take(&mut self.array));
-        let _ = self.pool.lent.fetch_sub(1, Ordering::Relaxed);
+        let mut state = self.pool.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.free.push(std::mem::take(&mut self.array));
+        state.lent -= 1;
     }
 }

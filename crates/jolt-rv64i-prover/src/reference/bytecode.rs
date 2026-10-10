@@ -11,7 +11,6 @@ use jolt_rv64i_verifier::ids::{
     BytecodeCycleDerived, CycleWeight, DerivedId, OpeningId, RelationId, VirtualPolynomial,
 };
 use jolt_rv64i_verifier::points::{self, PointsError};
-use jolt_rv64i_verifier::public::bytecode::BytecodeWeights;
 use jolt_rv64i_verifier::stages::stage6a::{
     BytecodeReadAddress, BytecodeReadAddressInputClaims, BytecodeReadAddressOutputClaims,
 };
@@ -127,12 +126,11 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadAddress<F>, Rv64iPlane>
         inputs: ProverInputs<'_, F, BytecodeReadAddress<F>>,
     ) -> Result<Box<dyn SumcheckKernel<F, Relation = BytecodeReadAddress<F>>>, KernelError<F>> {
         let relation = inputs.relation;
-        let weights =
-            BytecodeWeights::new(relation.public_points(), inputs.challenges).map_err(|e| {
-                KernelError::InvalidGeometry {
-                    reason: e.to_string(),
-                }
-            })?;
+        let weights = relation.public_weights(inputs.challenges).map_err(|e| {
+            KernelError::InvalidGeometry {
+                reason: e.to_string(),
+            }
+        })?;
         let count = witness.bytecode.rows().len();
         let mut h: [Vec<F>; 5] = std::array::from_fn(|_| Vec::with_capacity(count));
         for row in witness.bytecode.rows() {

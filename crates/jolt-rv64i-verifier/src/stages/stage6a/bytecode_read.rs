@@ -14,12 +14,15 @@ pub use crate::claims::bytecode_read::{
 use crate::ids::{BytecodeAddressDerived, DerivedId};
 use crate::points::{PointsError, WordLift};
 pub use crate::public::bytecode::BytecodeReadPoints;
+use crate::public::bytecode::BytecodeWeights;
+use std::sync::Arc;
 
 /// Address relation over a low-variable-first bytecode index, using earlier router and state points.
 #[derive(Clone)]
 pub struct BytecodeReadAddress<F: JoltField> {
     symbolic: BytecodeReadAddressSymbolic,
     points: BytecodeReadPoints<F>,
+    lift: Arc<WordLift<F>>,
     entry_pc: F,
     final_pc: F,
 }
@@ -40,12 +43,18 @@ impl<F: JoltField> BytecodeReadAddress<F> {
             });
         }
         points.validate()?;
-        let lift = WordLift::new(&points.r_bit)?;
+        let lift = Arc::new(WordLift::new(&points.r_bit)?);
         let entry_pc = lift.evaluate(entry_pc);
-        let final_pc = points.r_3.iter().copied().product::<F>() * lift.evaluate(final_pc);
+        let final_pc = points
+            .r_3
+            .iter()
+            .fold(lift.evaluate(final_pc), |value, coordinate| {
+                value * *coordinate
+            });
         Ok(Self {
             symbolic: BytecodeReadAddressSymbolic::new(log_K_bytecode),
             points,
+            lift,
             entry_pc,
             final_pc,
         })
@@ -55,6 +64,15 @@ impl<F: JoltField> BytecodeReadAddress<F> {
     pub fn public_points(&self) -> &BytecodeReadPoints<F> {
         &self.points
     }
+    /// Prepares challenge-weighted public folds at this relation's checked low-variable-first points, sharing its bit-weight table.
+    /// The coefficients must be this batch's draws; point or table allocation failures return `PointsError`.
+    pub fn public_weights(
+        &self,
+        coefficients: &BytecodeReadAddressChallenges<F>,
+    ) -> Result<BytecodeWeights<F>, PointsError> {
+        BytecodeWeights::with_lift(&self.points, coefficients, Arc::clone(&self.lift))
+    }
+
     /// Consumed word, selector and update points have low-variable-first fixed coordinates followed by their upstream cycle point.
     pub fn input_points(&self) -> BytecodeReadAddressInputClaims<Vec<F>> {
         self.points.input_points()

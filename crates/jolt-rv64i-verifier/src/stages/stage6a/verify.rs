@@ -13,7 +13,6 @@ use crate::commitment::BitsCommitmentScheme;
 use crate::error::Rv64iVerifierError;
 use crate::points::PointsError;
 use crate::proof::{BatchProof, BytecodeAddressValue};
-use crate::public::bytecode::BytecodeWeights;
 use crate::stages::stage3a::Output as Stage3aOutput;
 use crate::stages::stage3b::Output as Stage3bOutput;
 use crate::stages::stage4::Output as Stage4Output;
@@ -179,17 +178,16 @@ pub fn finish<S: BitsCommitmentScheme>(
     points: Stage6aOutputPoints<F128>,
     challenges: &Stage6aChallenges<F128>,
 ) -> Result<Output, Rv64iVerifierError> {
-    let bytecode_folds = BytecodeWeights::new(
-        batch.bytecode_read_address.public_points(),
-        &challenges.bytecode_read_address,
-    )
-    .and_then(|weights| {
-        weights.evaluate(
-            checked.preprocessing().bytecode(),
-            &points.bytecode_read_address.address_claim,
-        )
-    })
-    .map_err(term_error)?;
+    let bytecode_folds = batch
+        .bytecode_read_address
+        .public_weights(&challenges.bytecode_read_address)
+        .and_then(|weights| {
+            weights.evaluate(
+                checked.preprocessing().bytecode(),
+                &points.bytecode_read_address.address_claim,
+            )
+        })
+        .map_err(term_error)?;
     Ok(Output {
         claims,
         points,

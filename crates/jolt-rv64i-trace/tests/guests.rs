@@ -141,9 +141,9 @@ fn bare_rust_guests_pass_strict_decode_rows_and_outputs() {
             }));
             assert_eq!(word, expected, "{name}: final RAM word {index}");
         }
-        for source in output.trace.rows() {
+        for (source, fact) in output.trace.rows().iter().zip(&execution.facts) {
             assert_eq!(
-                source.instruction_index() as usize,
+                fact.bytecode_index as usize,
                 preprocessing.bytecode().index_of_pc(source.pc()).unwrap(),
                 "{name}"
             );

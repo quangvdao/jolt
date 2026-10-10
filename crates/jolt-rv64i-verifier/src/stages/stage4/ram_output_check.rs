@@ -24,8 +24,8 @@ pub struct RamOutputCheck<F: JoltField> {
     io: Arc<PublicIoMemory>,
 }
 impl<F: JoltField> RamOutputCheck<F> {
-    /// Establishes a six-coordinate bit point and at least five address coordinates.
-    /// Rejects malformed dimensions or an I/O interval outside that address cube.
+    /// Establishes six low-variable-first bit coordinates from batch 3a and at least five address coordinates drawn by batch 4.
+    /// Returns `PointsError` for malformed dimensions or a checked public I/O interval outside that address cube.
     pub fn new(
         tau: Vec<F>,
         r_bit: Vec<F>,

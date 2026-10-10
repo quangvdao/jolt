@@ -10,6 +10,8 @@ use jolt_field::JoltField;
 use jolt_verifier::{stages::relations::ConcreteSumcheck, VerifierError};
 use std::sync::Arc;
 
+/// Reduction over the seventeen low-variable-first router slots at batch 2's column and batch 1's cycle points.
+/// Its shared route tensors must be generated for the checked layout.
 #[derive(Clone)]
 pub struct RouterShort<F: JoltField> {
     symbolic: RouterShortSymbolic,
@@ -19,6 +21,8 @@ pub struct RouterShort<F: JoltField> {
     columns: Vec<F>,
 }
 impl<F: JoltField> RouterShort<F> {
+    /// Checks that the verified batch-2 column point has ten coordinates, returning `PointsError` otherwise.
+    /// The caller supplies the verified batch-1 cycle point; checked inputs establish its trace width.
     pub fn new(w: Vec<F>, r_1: Vec<F>, routes: Arc<RouteTensors>) -> Result<Self, PointsError> {
         if w.len() != 10 {
             return Err(PointsError::Dimension {
@@ -35,15 +39,19 @@ impl<F: JoltField> RouterShort<F> {
             columns,
         })
     }
+    /// The ten low-variable-first witness-column coordinates read from batch 2.
     pub fn w(&self) -> &[F] {
         &self.w
     }
+    /// The low-variable-first batch-1 cycle point retained through batch 2.
     pub fn r_1(&self) -> &[F] {
         &self.r_1
     }
+    /// The checked layout's route tensors shared by all five router reductions.
     pub fn routes(&self) -> &RouteTensors {
         &self.routes
     }
+    /// The consumed routed-witness point in column-then-cycle order, low variable first.
     pub fn input_points(&self) -> RouterShortInputClaims<Vec<F>> {
         RouterShortInputClaims {
             witness_routed: self.w.iter().chain(&self.r_1).copied().collect(),

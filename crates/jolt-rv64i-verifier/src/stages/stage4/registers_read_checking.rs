@@ -12,6 +12,8 @@ use jolt_field::JoltField;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 
+/// Read checking over low-variable-first five register addresses followed by cycles, at the shared batch-3a bit point.
+/// The read claims and their bit-then-cycle points must come from batch 3b.
 #[derive(Clone)]
 pub struct RegistersReadChecking<F: JoltField> {
     symbolic: RegistersReadCheckingSymbolic,
@@ -20,6 +22,8 @@ pub struct RegistersReadChecking<F: JoltField> {
 }
 
 impl<F: JoltField> RegistersReadChecking<F> {
+    /// Establishes six bit coordinates and a nonempty cycle point bounded by `LOG_T_MAX`, returning `PointsError` on mismatch.
+    /// The points must be those verified by batches 3a and 3b.
     pub fn new(r_bit: Vec<F>, r_3: Vec<F>) -> Result<Self, PointsError> {
         check_read_points(&r_bit, &r_3)?;
         Ok(Self {
@@ -28,12 +32,15 @@ impl<F: JoltField> RegistersReadChecking<F> {
             r_3,
         })
     }
+    /// The six low-variable-first bit coordinates verified by batch 3a.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle coordinates verified by batch 3b.
     pub fn r_3(&self) -> &[F] {
         &self.r_3
     }
+    /// Consumed read points in six-bit-then-cycle order, low variable first in each part.
     pub fn input_points(&self) -> RegistersReadCheckingInputClaims<Vec<F>> {
         let point: Vec<_> = self.r_bit.iter().chain(&self.r_3).copied().collect();
         RegistersReadCheckingInputClaims {

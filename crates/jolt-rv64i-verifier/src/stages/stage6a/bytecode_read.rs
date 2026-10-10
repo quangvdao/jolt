@@ -23,8 +23,8 @@ pub struct BytecodeReadAddress<F: JoltField> {
 }
 
 impl<F: JoltField> BytecodeReadAddress<F> {
-    /// Checks the bytecode exponent and earlier bit, kind, register and cycle dimensions.
-    /// Entry and final PCs come from checked inputs; all word points share the six low bit variables.
+    /// Checks the bytecode exponent and the low-variable-first bit, kind, register and cycle points verified by batches 3a, 3b, 4 and 5.
+    /// Entry and final PCs come from checked inputs; malformed point widths or an unsupported exponent return `PointsError`.
     pub fn new(
         log_K_bytecode: usize,
         points: BytecodeReadPoints<F>,
@@ -53,7 +53,7 @@ impl<F: JoltField> BytecodeReadAddress<F> {
     pub fn public_points(&self) -> &BytecodeReadPoints<F> {
         &self.points
     }
-    /// Builds word, selector and update points with their cycle coordinates last.
+    /// Consumed word, selector and update points have low-variable-first fixed coordinates followed by their upstream cycle point.
     pub fn input_points(&self) -> BytecodeReadAddressInputClaims<Vec<F>> {
         self.points.input_points()
     }

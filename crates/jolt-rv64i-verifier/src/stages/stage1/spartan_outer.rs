@@ -49,12 +49,16 @@ impl<F: JoltField> OuterInstance<F> {
 }
 macro_rules! outer {
     ($name:ident, $symbolic:ident, $outputs:ident, $block:ident) => {
+        /// Zero-check of a row block with low-variable-first row coordinates before cycle coordinates.
+        /// `new` validates the row-block and cycle widths; the equality point is drawn by batch 1.
         #[derive(Clone)]
         pub struct $name<F: JoltField> {
             symbolic: $symbolic,
             instance: OuterInstance<F>,
         }
         impl<F: JoltField> $name<F> {
+            /// Establishes a cycle width in `1..=LOG_T_MAX` and the matching row-plus-cycle equality point.
+            /// Rejects row widths above eight, or a binary row block whose width differs from eight.
             pub fn new(
                 log_T: usize,
                 row_variables: usize,
@@ -72,12 +76,15 @@ macro_rules! outer {
                     instance,
                 })
             }
+            /// The batch-1 equality point in row-then-cycle order, low variable first in each part.
             pub fn tau(&self) -> &[F] {
                 &self.instance.tau
             }
+            /// The validated prefix width of row coordinates; the remaining equality coordinates are cycles.
             pub fn row_variables(&self) -> usize {
                 self.instance.row_variables
             }
+            /// The row block whose symbolic zero-check this instance enforces.
             pub fn block(&self) -> RowBlock {
                 RowBlock::$block
             }

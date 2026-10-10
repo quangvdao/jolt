@@ -12,6 +12,8 @@ use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 
+/// Read checking over low-variable-first RAM addresses followed by cycles, at the shared batch-3a bit point.
+/// The read claims and their bit-then-cycle points must come from batch 3b.
 #[derive(Clone)]
 pub struct RamReadChecking<F: JoltField> {
     symbolic: RamReadCheckingSymbolic,
@@ -21,6 +23,8 @@ pub struct RamReadChecking<F: JoltField> {
 }
 
 impl<F: JoltField> RamReadChecking<F> {
+    /// Establishes six bit coordinates and a nonempty cycle point bounded by `LOG_T_MAX`, returning `PointsError` on mismatch.
+    /// The checked layout must admit at least five RAM address coordinates, which this constructor checks.
     pub fn new(layout: &Layout, r_bit: Vec<F>, r_3: Vec<F>) -> Result<Self, PointsError> {
         check_read_points(&r_bit, &r_3)?;
         let a = layout.log_K_ram();
@@ -37,12 +41,15 @@ impl<F: JoltField> RamReadChecking<F> {
             a,
         })
     }
+    /// The six low-variable-first bit coordinates verified by batch 3a.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle coordinates verified by batch 3b.
     pub fn r_3(&self) -> &[F] {
         &self.r_3
     }
+    /// Consumed read points in six-bit-then-cycle order, low variable first in each part.
     pub fn input_points(&self) -> RamReadCheckingInputClaims<Vec<F>> {
         let point: Vec<_> = self.r_bit.iter().chain(&self.r_3).copied().collect();
         RamReadCheckingInputClaims {

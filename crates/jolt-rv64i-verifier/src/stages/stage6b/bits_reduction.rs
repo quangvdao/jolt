@@ -13,6 +13,8 @@ pub use crate::claims::bits_reduction::{
 use crate::ids::{BitsReductionDerived, DerivedId};
 use crate::points::{self, PointsError};
 
+/// Six committed functionals reduced over low-variable-first cycles to the 256 transmitted bit columns.
+/// Its input claims and fixed points come from batches 1, 2, 3a, 3b and 5.
 #[derive(Clone)]
 pub struct BitsReduction<F: JoltField> {
     symbolic: BitsReductionSymbolic,
@@ -26,6 +28,8 @@ pub struct BitsReduction<F: JoltField> {
 }
 
 impl<F: JoltField> BitsReduction<F> {
+    /// Checks equal cycle widths and the ten-column and seventeen-short-slot point widths, returning `PointsError` on mismatch.
+    /// The points must be verified upstream outputs; checked inputs establish their common trace-width bound.
     pub fn new(
         layout: &Layout,
         r_1: Vec<F>,
@@ -163,22 +167,28 @@ impl<F: JoltField> BitsReduction<F> {
         })
     }
 
+    /// The verified low-variable-first batch-1 cycle point used by the direct-column functional.
     pub fn r_1(&self) -> &[F] {
         &self.r_1
     }
+    /// The verified low-variable-first batch-3b cycle point used by the router functionals.
     pub fn r_3(&self) -> &[F] {
         &self.r_3
     }
+    /// The verified low-variable-first batch-5 cycle point used by the increment functional.
     pub fn r_5(&self) -> &[F] {
         &self.r_5
     }
+    /// Sparse column supports in Direct, Variant, Pos0, Pos1, ShouldBranch and Inc order.
     pub fn weights(&self) -> &[Vec<(usize, F)>; 6] {
         &self.weights
     }
+    /// The omitted-zero weights for the two position chunks at batch 3a's fixed short points.
     pub fn pos_zero(&self) -> [F; 2] {
         self.pos_zero
     }
 
+    /// Consumed functional points with fixed column/bit/position coordinates before their upstream cycle coordinates.
     pub fn input_points(&self) -> BitsReductionInputClaims<Vec<F>> {
         BitsReductionInputClaims {
             direct_columns: self.w.iter().chain(&self.r_1).copied().collect(),
@@ -204,6 +214,8 @@ impl<F: JoltField> BitsReduction<F> {
         }
     }
 
+    /// The terminal coefficient of one transmitted column at the low-variable-first cycle point.
+    /// Returns `PointsError` for a column outside 0–255 or a mismatched cycle width.
     pub fn column_weight(
         &self,
         column: usize,
@@ -219,7 +231,8 @@ impl<F: JoltField> BitsReduction<F> {
             .ok_or(PointsError::MissingColumn { column })
     }
 
-    /// Computes the three cycle equalities once and folds the six sparse supports.
+    /// The terminal coefficients of all 256 transmitted columns at a low-variable-first cycle point.
+    /// Returns `PointsError` unless its width matches the verified upstream cycle points.
     pub fn column_weights(
         &self,
         point: &[F],

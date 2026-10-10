@@ -20,6 +20,8 @@ fn term_error(error: PointsError) -> VerifierError {
     }
 }
 
+/// Register-state evaluation reduced over low-variable-first cycles at the verified batch-4 address and bit points.
+/// `new` checks the five register and six bit coordinates; the batch constructor checks their shared cycle geometry.
 #[derive(Clone)]
 pub struct RegistersValEvaluation<F: JoltField> {
     symbolic: RegistersValEvaluationSymbolic,
@@ -28,6 +30,8 @@ pub struct RegistersValEvaluation<F: JoltField> {
     r_4: Vec<F>,
 }
 impl<F: JoltField> RegistersValEvaluation<F> {
+    /// Checks five register and six bit coordinates, returning `PointsError` on mismatch.
+    /// The caller supplies batch 4's cycle point; `Stage5Sumchecks::new` checks its trace width and shared geometry.
     pub fn new(a_reg: Vec<F>, r_bit: Vec<F>, r_4: Vec<F>) -> Result<Self, PointsError> {
         for (point, expected) in [(&a_reg, 5), (&r_bit, 6)] {
             if point.len() != expected {
@@ -44,15 +48,19 @@ impl<F: JoltField> RegistersValEvaluation<F> {
             r_4,
         })
     }
+    /// The final five low-variable-first address coordinates of the RAM point verified by batch 4.
     pub fn a_reg(&self) -> &[F] {
         &self.a_reg
     }
+    /// The six low-variable-first bit coordinates shared with batches 3a and 4.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle point verified by batch 4.
     pub fn r_4(&self) -> &[F] {
         &self.r_4
     }
+    /// The consumed register-value point in address-then-bit-then-cycle order, low variable first.
     pub fn input_points(&self) -> RegistersValEvaluationInputClaims<Vec<F>> {
         RegistersValEvaluationInputClaims {
             registers_val: self
@@ -138,6 +146,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RegistersValEvaluation<F> {
     }
 }
 
+/// RAM-state and final-state evaluations reduced over low-variable-first cycles at verified batch-4 address and bit points.
+/// The initial evaluation must be computed from checked initial RAM at those same points.
 #[derive(Clone)]
 pub struct RamValEvaluation<F: JoltField> {
     symbolic: RamValEvaluationSymbolic,
@@ -147,6 +157,8 @@ pub struct RamValEvaluation<F: JoltField> {
     init_eval: F,
 }
 impl<F: JoltField> RamValEvaluation<F> {
+    /// Checks at least five RAM address coordinates and six bit coordinates, returning `PointsError` on mismatch.
+    /// The caller supplies batch 4's cycle point and checked initial-RAM evaluation; the batch constructor validates shared geometry.
     pub fn new(
         a_ram: Vec<F>,
         r_bit: Vec<F>,
@@ -173,15 +185,19 @@ impl<F: JoltField> RamValEvaluation<F> {
             init_eval,
         })
     }
+    /// The low-variable-first RAM address point verified by batch 4.
     pub fn a_ram(&self) -> &[F] {
         &self.a_ram
     }
+    /// The six low-variable-first bit coordinates shared with batches 3a and 4.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle point verified by batch 4.
     pub fn r_4(&self) -> &[F] {
         &self.r_4
     }
+    /// Consumed RAM-value points in address-then-bit-then-cycle order; final RAM omits the cycle coordinates.
     pub fn input_points(&self) -> RamValEvaluationInputClaims<Vec<F>> {
         let final_point: Vec<_> = self.a_ram.iter().chain(&self.r_bit).copied().collect();
         RamValEvaluationInputClaims {

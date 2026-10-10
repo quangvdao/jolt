@@ -2,7 +2,9 @@ use std::path::Path;
 
 use clap::Parser;
 
-use jolt_eval::objective::performance::read_criterion_estimate;
+use jolt_eval::objective::performance::{
+    read_criterion_estimate, rv64i_trace_adapt::Rv64iTraceAdaptObjective,
+};
 use jolt_eval::objective::{OptimizationObjective, PerformanceObjective, StaticAnalysisObjective};
 
 #[derive(Parser)]
@@ -94,7 +96,20 @@ fn main() -> eyre::Result<()> {
                         }
                     }
                     match read_criterion_estimate(Path::new("."), p.name(), "new") {
-                        Some(secs) => print_row(p.name(), secs, "s"),
+                        Some(value) => {
+                            print_row(p.name(), value, p.units().unwrap_or("-"));
+                            if p.name() == "rv64i_trace_adapt" {
+                                if let Some(report) = Rv64iTraceAdaptObjective
+                                    .read_measurements(Path::new("."), "new")
+                                {
+                                    for measurement in report {
+                                        println!("{}/{}: {:.3} ns/padded cycle, {:.3} ns/executed row, exact facts buffer {} bytes, incremental peak {} bytes (allocator overhead/RSS excluded)",
+                                            measurement.program, measurement.pool, measurement.ns_per_padded_cycle,
+                                            measurement.ns_per_executed_row, measurement.facts_buffer_bytes, measurement.peak_incremental_allocated_bytes);
+                                    }
+                                }
+                            }
+                        }
                         None => {
                             println!("{:<35} {:>15}", p.name(), "NO DATA");
                         }

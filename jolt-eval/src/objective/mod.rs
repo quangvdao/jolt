@@ -7,7 +7,9 @@ pub mod synthesis;
 pub mod telemetry;
 
 use code_quality::PROOF_SYSTEM_CRATE_DIRS;
-use performance::source_trace_gen::SourceTraceGenObjective;
+use performance::{
+    rv64i_trace_adapt::Rv64iTraceAdaptObjective, source_trace_gen::SourceTraceGenObjective,
+};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -145,6 +147,7 @@ pub enum PerformanceObjective {
     MulU128(performance::field_mul::MulU128Objective),
     MulI128(performance::field_mul::MulI128Objective),
     SourceTraceGen(SourceTraceGenObjective),
+    Rv64iTraceAdapt(Rv64iTraceAdaptObjective),
 }
 
 impl PerformanceObjective {
@@ -158,6 +161,7 @@ impl PerformanceObjective {
             Self::MulU128(performance::field_mul::MulU128Objective),
             Self::MulI128(performance::field_mul::MulI128Objective),
             Self::SourceTraceGen(SourceTraceGenObjective),
+            Self::Rv64iTraceAdapt(Rv64iTraceAdaptObjective),
         ]
     }
 
@@ -171,6 +175,7 @@ impl PerformanceObjective {
             Self::MulU128(o) => o.name(),
             Self::MulI128(o) => o.name(),
             Self::SourceTraceGen(o) => o.name(),
+            Self::Rv64iTraceAdapt(o) => o.name(),
         }
     }
 
@@ -184,6 +189,7 @@ impl PerformanceObjective {
             Self::MulU128(o) => o.units(),
             Self::MulI128(o) => o.units(),
             Self::SourceTraceGen(o) => o.units(),
+            Self::Rv64iTraceAdapt(o) => o.units(),
         }
     }
 
@@ -197,6 +203,7 @@ impl PerformanceObjective {
             Self::MulU128(o) => o.description(),
             Self::MulI128(o) => o.description(),
             Self::SourceTraceGen(o) => o.description(),
+            Self::Rv64iTraceAdapt(o) => o.description(),
         }
     }
 
@@ -205,6 +212,7 @@ impl PerformanceObjective {
             Self::BindLowToHigh(_) | Self::BindHighToLow(_) => &["crates/jolt-poly/"],
             Self::NaiveSortTime(_) => &["jolt-eval/src/sort_targets.rs"],
             Self::SourceTraceGen(_) => &["tracer/", "crates/jolt-program/src/execution/"],
+            Self::Rv64iTraceAdapt(_) => &["crates/jolt-rv64i-trace/"],
             Self::MulU64(_) | Self::MulI64(_) | Self::MulU128(_) | Self::MulI128(_) => {
                 &["crates/jolt-field/"]
             }
@@ -232,6 +240,7 @@ pub use code_quality::lloc::LLOC;
 pub use performance::binding::{BIND_HIGH_TO_LOW, BIND_LOW_TO_HIGH};
 pub use performance::field_mul::{MUL_I128, MUL_I64, MUL_U128, MUL_U64};
 pub use performance::naive_sort::NAIVE_SORT_TIME;
+pub use performance::rv64i_trace_adapt::RV64I_TRACE_ADAPT;
 pub use performance::source_trace_gen::SOURCE_TRACE_GEN;
 
 impl OptimizationObjective {

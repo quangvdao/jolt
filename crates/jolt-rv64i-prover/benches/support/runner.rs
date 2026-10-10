@@ -143,7 +143,15 @@ fn print_samples(
     let final_bytes = samples.iter().map(|s| s.final_bytes).max().unwrap_or(0);
     let allocs = samples.iter().map(|s| s.allocs).max().unwrap_or(0);
     let threshold = threshold(name, log_t, threads);
-    print!("{id} samples={} total_ns={total:.6} total_min_ns={min:.6} total_max_ns={max:.6} threshold_ns={threshold:.6} meets_threshold={} peak_bytes={peak} final_bytes={final_bytes} allocs={allocs} decoded_bytes={} peak_with_decoded_bytes={}",samples.len(),total<=threshold,fixture.witness.bits.len()*16,peak+fixture.witness.bits.len()*16);
+    let count = samples.len();
+    let meets_threshold = total <= threshold;
+    let decoded_bytes = fixture.witness.bits.len() * 16;
+    let peak_with_decoded_bytes = peak + decoded_bytes;
+    print!("{id} samples={count} total_ns={total:.6}");
+    print!(" total_min_ns={min:.6} total_max_ns={max:.6}");
+    print!(" threshold_ns={threshold:.6} meets_threshold={meets_threshold}");
+    print!(" peak_bytes={peak} final_bytes={final_bytes} allocs={allocs}");
+    print!(" decoded_bytes={decoded_bytes} peak_with_decoded_bytes={peak_with_decoded_bytes}");
     for phase in Phase::TIMED {
         let label = phase.label();
         let (median, min, max) =
@@ -159,7 +167,10 @@ fn print_samples(
     reason = "setup and inventory notes are benchmark output"
 )]
 pub fn run(options: Options) -> BenchResult<()> {
-    println!("adapters_note phases=kernel_hooks driver_bookkeeping=extract driver_allocations=driver finish=terminal_bind extract=validation_and_claims park=dispatch_and_drop background_drop=feature_selected decoded=resident_apart loaded_machine=true");
+    print!("adapters_note phases=kernel_hooks driver_bookkeeping=extract");
+    print!(" driver_allocations=driver finish=terminal_bind");
+    print!(" extract=validation_and_claims park=dispatch_and_drop");
+    println!(" background_drop=feature_selected decoded=resident_apart loaded_machine=true");
     let mut inventory_failed = false;
     // One executed witness per size, shared by both thread configurations.
     for &log_t in &options.log_t {

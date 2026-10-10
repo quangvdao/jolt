@@ -148,7 +148,14 @@ impl Inventory {
     )]
     pub fn print_laws(&self, log_t: u8, threads: usize) {
         for row in &self.rows {
-            println!("inventory_law/{log_t}/{threads} object={} law={:?} exact_sizes={:?} spec={} loaded_machine=true",row.object,row.law,row.sizes,row.spec);
+            print!(
+                "inventory_law/{log_t}/{threads} object={} law={:?}",
+                row.object, row.law
+            );
+            println!(
+                " exact_sizes={:?} spec={} loaded_machine=true",
+                row.sizes, row.spec
+            );
         }
     }
 
@@ -176,10 +183,17 @@ impl Inventory {
             if matches.is_empty() {
                 unmatched += 1;
             }
-            println!("inventory/{id} entry={index} bytes={size} phase={phase} matches={} loaded_machine=true",if matches.is_empty() {"unmatched".to_owned()} else {matches.join("|")});
+            let matches = if matches.is_empty() {
+                "unmatched".to_owned()
+            } else {
+                matches.join("|")
+            };
+            print!("inventory/{id} entry={index} bytes={size} phase={phase}");
+            println!(" matches={matches} loaded_machine=true");
         }
         let overflow = CountingAllocator::overflow();
-        println!("inventory/{id} entries={entries} unmatched={unmatched} overflow={overflow} loaded_machine=true");
+        print!("inventory/{id} entries={entries} unmatched={unmatched}");
+        println!(" overflow={overflow} loaded_machine=true");
         unmatched != 0 || overflow != 0
     }
 }

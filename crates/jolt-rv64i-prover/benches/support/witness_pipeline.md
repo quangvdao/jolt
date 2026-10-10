@@ -120,3 +120,95 @@ starts were 16.32/18.25/17.20, 15.97/18.14/17.17, 17.85/18.46/17.29,
 The constructor peak remains 96 MiB at log T 20 and 360 MiB at log T 22,
 plus at most 336 bytes of Rayon bookkeeping in these blocks. Earlier candidate
 builds regressed the single-thread phase and were revised before retention.
+
+## Scatter retention and final phases
+
+`ScatterPlan::new` now reads each source index once, storing lossless `u32`
+indices in a reusable chunk-local buffer for placement. The validated row bound
+is 2^24; the cache has only 4,096 entries at the measured sizes. Three alternating
+constructor/scatter-candidate pairs used eleven samples per configuration per
+block. Retention uses the whole preparation-plus-scatter phase, not the index
+loop alone. Block-start loads were 33.60/22.16/18.75, 36.39/23.16/19.15,
+35.83/23.49/19.31, 34.81/23.48/19.33, 34.15/23.73/19.47 and
+36.46/24.39/19.73; afterwards 33.42/24.13/19.69. The following are medians
+of three block medians. Contention changes the unchanged preparation phase too;
+these results establish loaded-machine improvement, not a quiet-machine gate.
+
+| log T | Threads | Before ns/cycle | Before ms | After ns/cycle | After ms | Reduction |
+|---|---|---|---|---|---|---|
+| 20 | 1 | 18.342 | 19.233 | 16.142 | 16.926 | 11.99% |
+| 20 | 12 | 5.249 | 5.504 | 3.814 | 3.999 | 27.35% |
+| 22 | 1 | 15.169 | 63.623 | 13.982 | 58.643 | 7.83% |
+| 22 | 12 | 4.850 | 20.344 | 3.567 | 14.960 | 26.46% |
+
+Final phase medians, shown as ns/cycle / ms, from the three candidate blocks:
+
+| Phase | 20 / 1 thread | 20 / 12 threads | 22 / 1 thread | 22 / 12 threads |
+|---|---|---|---|---|
+| adapt | 4.181 / 4.384 | 1.264 / 1.325 | 4.007 / 16.807 | 1.197 / 5.021 |
+| construct | 36.381 / 38.148 | 18.052 / 18.929 | 30.028 / 125.945 | 17.832 / 74.795 |
+| validate (diagnostic) | 8.246 / 8.646 | 2.011 / 2.109 | 6.654 / 27.910 | 1.901 / 7.975 |
+| prepare | 12.979 / 13.609 | 3.020 / 3.167 | 11.370 / 47.691 | 2.737 / 11.478 |
+| scatter | 2.892 / 3.032 | 0.741 / 0.777 | 2.658 / 11.149 | 0.775 / 3.251 |
+| preparation + scatter | 16.142 / 16.926 | 3.814 / 3.999 | 13.982 / 58.643 | 3.567 / 14.960 |
+| production total | 57.304 / 60.088 | 23.165 / 24.290 | 48.366 / 202.863 | 22.783 / 95.558 |
+
+Maximum incremental requested-byte peaks across these candidate blocks:
+
+| Phase | log T 20 | log T 22 |
+|---|---|---|
+| adapt | 75,497,800 | 301,990,216 |
+| construct | 100,663,344 | 377,487,456 |
+| validate | 2,097,456 | 2,097,456 |
+| prepare | 21,007,392 | 77,704,224 |
+| scatter | 5,160,960 | 20,119,552 |
+
+The scatter peak adds up to twelve 16 KiB caches above the original peak. No
+trace-sized allocation is added. Standalone validation is excluded from the
+production total, which is 95.558 ms at 22/12 in these blocks. That measures
+only this path, not whether the whole prover meets the 673 ms target.
+
+## Remaining costs and specification corrections
+
+- `src/plane.rs`, `Rv64iWitness::initial_state`: canonical initial-RAM checks,
+  dense RAM zero-fill and population remain ordered. `prepare_with_ram` also
+  initializes the final 32T, 40T and 16T shared buffers before filling them.
+- `src/plane.rs`, `Rv64iWitness::replay`: register/RAM pre-state checks and XOR
+  updates depend on earlier cycles. Parallel row generation leaves this ordered
+  walk, and adds one facts walk without adding another owner of trace storage.
+- `src/optimized/source.rs`, `SharedSource::prepare`, through kernel
+  `ValidatedTrace::prepare`: digit validation and group generation remain one
+  parallel walk. They check the source boundary and write the required 18T
+  group bytes. Standalone validation measures those checks separately but
+  cannot replace the fused production preparation.
+- `src/packed/scatter.rs`, `ScatterPlan::new` in the kernels crate: source indices
+  are now read once; counts, prefix sums and placement remain required to build
+  the cached permutation and descriptors.
+
+The specifications are unchanged. In `specs/rv64i-binary-prover-adapters.md`,
+replace the following stale statements:
+
+1. In invariant 5, “The decoded rows are written by the replay the witness
+   already makes”: “Decoded rows are written with committed-row generation
+   from facts, in parallel on multi-thread pools; committed-row constructors
+   write them during replay. No adapter decodes committed rows.”
+2. In Decoded rows, “it is the one walk of the cycles a witness constructor
+   makes”: “Single-thread facts construction and committed-row construction
+   fuse packing and replay. Multi-thread facts construction generates and packs
+   in parallel, then checks state in an ordered replay, deferring generation
+   faults to preserve the first-fault contract.”
+3. In Performance, “the constructor is serial as a whole and this spec does
+   not change that”: “State replay and initialization remain serial; facts-row
+   generation and packing are parallel. Measure the whole constructor instead
+   of treating its decoded-row write as the constructor's cost.”
+4. In Source and shared state, “`ScatterPlan::new` keeps its two reads of the
+   bytecode index per cycle”: “`ScatterPlan::new` reads each index once and
+   retains it in bounded chunk-local scratch for placement.”
+5. The existing adapters-fixture statement that facts are dropped before any
+   measurement needs the qualification “in `adapters`; `witness_pipeline`
+   retains architectural trace rows, and facts through construction, so it
+   measures adaptation and construction themselves.”
+6. The 918 ms budget paragraph conflicts with the task's 673 ms target:
+   “The end-to-end target is 673 ms at 2^22 cycles on 12 threads; allocate costs
+   using whole-phase measurements and do not double-count constructor work.”
+   The corresponding kernels-spec budget paragraph also still states 918 ms.

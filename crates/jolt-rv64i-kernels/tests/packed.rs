@@ -29,6 +29,43 @@ mod tests {
     }
 
     #[test]
+    fn equal_value_tables_do_not_alias() {
+        use jolt_rv64i_kernels::packed::buckets::BucketPlacement;
+        use std::collections::HashSet;
+        use std::mem::size_of;
+
+        let check = |offsets: Vec<usize>, values: usize| {
+            for value in 0..values {
+                let mut residues = HashSet::new();
+                for &offset in &offsets {
+                    assert!(residues.insert((offset + value) * size_of::<F128>() % 4096));
+                }
+            }
+        };
+        check(
+            (0..32)
+                .map(|p| BucketPlacement::Byte.position_offset(p))
+                .collect(),
+            256,
+        );
+        for (placement, positions, values) in [
+            (BucketPlacement::Nibble, 16, 16),
+            (BucketPlacement::Byte, 8, 256),
+        ] {
+            check(
+                (0..9)
+                    .flat_map(|word| {
+                        (0..positions).map(move |p| {
+                            word * placement.word_entries() + placement.position_offset(p)
+                        })
+                    })
+                    .collect(),
+                values,
+            );
+        }
+    }
+
+    #[test]
     fn lifts_equal_weighted_bits() {
         let mut rng = ChaCha20Rng::seed_from_u64(73);
         let weights: [F128; 64] = std::array::from_fn(|_| field(&mut rng));

@@ -1,16 +1,63 @@
 //! Views of caller-owned bucket arrays, indexed by position then value.
 //!
-//! A nibble position occupies 16 consecutive elements; a byte position occupies
-//! 256. A set for one selector value and `words` word slots occupies
-//! `words * 16 * 16` nibble elements (or `words * 8 * 256` byte elements).
-//! Several sets are concatenated in selector order, then word-slot order, then
-//! position order. A caller splits its scratch array at those set boundaries
-//! before constructing the views. The column pass uses 32 byte positions,
-//! exactly 8,192 elements. Digit histograms occupy separate contiguous ranges.
-//! Array merging is owned by [`super::pool::ScratchPool::merge`].
+//! Hot passes use [`BucketPlacement`]: one padding element after each 256
+//! elements (4,096 bytes of `F128`). Byte positions stride by 257 elements;
+//! nibble words stride by 257, with 16 positions at offsets `16*p`.
+//! For byte positions, two entries alias modulo 4,096 exactly when
+//! `Δposition + Δvalue = 0 (mod 256)`. The column pass has 32 positions and
+//! the largest nine-word bank has 72; equal values cannot alias within either.
+//! For nibble words the condition is `Δword + 16*Δposition + Δvalue = 0
+//! (mod 256)`. With at most nine words, `|Δword| <= 8`, `|Δposition| <= 15`;
+//! at equal value this forces both differences to zero. Unequal values can
+//! still alias: byte differences cancel; nibble `Δword + Δvalue` can be zero
+//! or a multiple of 16, canceled by the position difference. Four padding
+//! elements would fail: `4*Δword + 16*Δposition = 0` at `(4, -1)`.
+//! The placement property is checked by `equal_value_tables_do_not_alias`.
+//!
+//! The borrowed views below are dense value domains, excluding padding.
+//! Digit histograms occupy separate contiguous ranges. Array merging is owned
+//! by [`super::pool::ScratchPool::merge`].
 
 use jolt_field::F128;
 use thiserror::Error;
+
+/// Placement of word buckets in scratch, excluding padding from value domains.
+#[derive(Debug, Clone, Copy)]
+pub enum BucketPlacement {
+    Nibble,
+    Byte,
+}
+
+impl BucketPlacement {
+    /// Select the word encoding used by a fold selector value.
+    pub const fn from_bytes(bytes: bool) -> Self {
+        if bytes {
+            Self::Byte
+        } else {
+            Self::Nibble
+        }
+    }
+
+    /// Scratch elements occupied by one word, including block padding.
+    pub const fn word_entries(self) -> usize {
+        match self {
+            Self::Nibble => Self::padded(NibbleBuckets::ELEMENTS_PER_WORD),
+            Self::Byte => Self::padded(ByteBuckets::ELEMENTS_PER_WORD),
+        }
+    }
+
+    /// Offset of a position within a word; byte positions also index whole passes.
+    pub const fn position_offset(self, position: usize) -> usize {
+        match self {
+            Self::Nibble => position * NibbleBuckets::ENTRIES_PER_POSITION,
+            Self::Byte => Self::padded(position * ByteBuckets::ENTRIES_PER_POSITION),
+        }
+    }
+
+    const fn padded(elements: usize) -> usize {
+        elements + elements / (4096 / std::mem::size_of::<F128>())
+    }
+}
 
 /// Invalid bucket geometry or an index outside a checked view.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

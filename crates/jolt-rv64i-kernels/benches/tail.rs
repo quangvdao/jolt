@@ -51,26 +51,6 @@ enum BenchError {
     Unfinished,
 }
 
-fn map() -> Vec<ColumnMap> {
-    let mut map = vec![ColumnMap::Word {
-        start: 0,
-        trace_word: 5,
-    }];
-    map.extend((0..10).map(|column| ColumnMap::Indicators {
-        start: 64 + 15 * column,
-        column,
-    }));
-    map.extend((10..12).map(|column| ColumnMap::Indicators {
-        start: 214 + 7 * (column - 10),
-        column,
-    }));
-    map.push(ColumnMap::Flags {
-        start: 228,
-        columns: vec![18, 19, 20],
-    });
-    map
-}
-
 fn weights() -> Vec<Vec<F128>> {
     (0..3)
         .map(|support| {
@@ -460,7 +440,7 @@ fn main() -> Result<(), RunnerError> {
     println!("tail_driver_note raw_runner_rounds_include_batch_finish=true raw_runner_finish_is_noop=true actual_four_phases=tail_phases challenge_source=seeded_blake2b_batch column_gathers=fused_with_products loaded_machine=true");
     let cache = Mutex::new(None);
     let records = Mutex::new(Vec::with_capacity(4096));
-    let map = map();
+    let map = SyntheticTrace::column_map();
     let weights = weights();
     run_core(
         "tail",

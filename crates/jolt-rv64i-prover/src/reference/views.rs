@@ -354,17 +354,37 @@ pub fn ram_val_with_lift(
         *ram.get_mut(address)
             .ok_or(Rv64iProverError::InitialRam { index })? = value;
     }
-    let mut values = Vec::with_capacity(count * witness.bits.len());
+    let cycles = witness.bits.len();
+    let size_error = || Rv64iProverError::RamViewSize {
+        words: count,
+        cycles,
+    };
+    let elements = count.checked_mul(cycles).ok_or_else(size_error)?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<F128>())
+        .ok_or_else(size_error)?;
+    let maximum_bytes = usize::try_from(isize::MAX).map_err(|_| size_error())?;
+    if bytes > maximum_bytes {
+        return Err(size_error());
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(elements)
+        .map_err(|source| Rv64iProverError::RamViewAllocation {
+            words: count,
+            cycles,
+            source,
+        })?;
     for (j, bits) in witness.bits.iter().enumerate() {
         for &word in &ram {
             values.push(lift.evaluate(word));
         }
         if fetched(witness, j)?.variant.is_some_and(|v| v.is_store()) {
             let index = witness.layout.ram_index(bits);
-            let address =
-                usize::try_from(index).map_err(|_| Rv64iProverError::InitialRam { index })?;
+            let address = usize::try_from(index)
+                .map_err(|_| Rv64iProverError::StoreRam { cycle: j, index })?;
             *ram.get_mut(address)
-                .ok_or(Rv64iProverError::InitialRam { index })? ^= witness.layout.inc(bits);
+                .ok_or(Rv64iProverError::StoreRam { cycle: j, index })? ^= witness.layout.inc(bits);
         }
     }
     Ok(Polynomial::new(values))

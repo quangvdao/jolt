@@ -7,9 +7,10 @@
 //! precede measurement. Times are wall-clock nanoseconds per input cycle;
 //! allocator bytes and counts cover the four phases, excluding resident sources.
 
-mod allocator;
+pub mod allocator;
 pub mod arithmetic;
 pub mod example;
+pub mod fold_layout;
 pub mod word;
 
 use std::error::Error as StdError;
@@ -59,10 +60,22 @@ struct Options {
 
 impl Options {
     fn parse(probe: bool) -> Result<Self, RunnerError> {
+        Self::parse_with_defaults(
+            probe,
+            if probe { vec![22] } else { vec![20, 22] },
+            if probe { 5 } else { 1 },
+        )
+    }
+
+    fn parse_with_defaults(
+        probe: bool,
+        log_t: Vec<usize>,
+        samples: usize,
+    ) -> Result<Self, RunnerError> {
         let mut options = Self {
-            log_t: if probe { vec![22] } else { vec![20, 22] },
+            log_t,
             threads: vec![1, 12],
-            samples: if probe { 5 } else { 1 },
+            samples,
             units: Vec::new(),
         };
         let mut arguments = std::env::args().skip(1);
@@ -508,6 +521,10 @@ pub trait MachineryKernel: Send {
     fn plan_construction_ns(&self) -> Option<f64> {
         None
     }
+    /// Resident routing and pass scratch bytes, excluding the shared input source.
+    fn memory_bytes(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// Times packed passes under the same warmed pools, samples and allocator as
@@ -527,7 +544,7 @@ where
     E: StdError + Send,
     S: Send + Sync,
 {
-    let options = Options::parse(true)?;
+    let options = Options::parse_with_defaults(true, vec![20, 22], 5)?;
     let pools = warmed_pools(&options.threads)?;
     for (threads, pool) in &pools {
         for &log_t in &options.log_t {
@@ -541,10 +558,12 @@ where
                     continue;
                 }
                 let mut samples = Vec::with_capacity(options.samples);
+                let mut constructions = Vec::with_capacity(options.samples);
                 let mut operations = 0;
                 let mut plans = Vec::with_capacity(options.samples);
+                let mut memory = None;
                 for _ in 0..options.samples {
-                    let (sample, count, plan) =
+                    let (sample, construction, count, plan, resident) =
                         pool.install(|| {
                             let measurement = AllocationMeasurement::begin();
                             let start = Instant::now();
@@ -553,13 +572,16 @@ where
                                     message: error.to_string(),
                                 })?;
                             let construct_ns = start.elapsed().as_nanos() as f64;
+                            let construction_allocation = measurement.finish();
                             let count = kernel.operations();
                             let plan = kernel.plan_construction_ns();
+                            let resident = kernel.memory_bytes();
                             if count == 0 {
                                 return Err(RunnerError::WorkCount {
                                     variant: name.to_owned(),
                                 });
                             }
+                            let pass_measurement = AllocationMeasurement::begin();
                             let start = Instant::now();
                             let _ = black_box(kernel.run().map_err(|error| RunnerError::Core {
                                 message: error.to_string(),
@@ -567,25 +589,34 @@ where
                             let run_ns = start.elapsed().as_nanos() as f64;
                             Ok((
                                 Sample {
-                                    times: [construct_ns, run_ns, 0.0, 0.0],
-                                    allocation: measurement.finish(),
+                                    times: [0.0, run_ns, 0.0, 0.0],
+                                    allocation: pass_measurement.finish(),
+                                },
+                                Sample {
+                                    times: [construct_ns, 0.0, 0.0, 0.0],
+                                    allocation: construction_allocation,
                                 },
                                 count,
                                 plan,
+                                resident,
                             ))
                         })?;
                     samples.push(sample);
+                    constructions.push(construction);
                     operations = count;
+                    memory = resident;
                     if let Some(plan) = plan {
                         plans.push(plan / count as f64);
                     }
                 }
                 let pass = Sample::phase(&samples, 1, operations as f64);
-                let construction = Sample::phase(&samples, 0, (1_usize << log_t) as f64);
-                let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
+                let construction = Sample::phase(&constructions, 0, (1_usize << log_t) as f64);
+                let (peak_bytes, final_bytes, allocs) = Sample::allocations(&constructions);
+                let (pass_peak_bytes, pass_final_bytes, pass_allocs) =
+                    Sample::allocations(&samples);
                 if let Some(requirement) = requirement {
                     println!(
-                        "machinery/{name}/{threads}  {:.6}  requirement {requirement}  {}",
+                        "machinery/{name}/{log_t}/{threads}  {:.6}  requirement {requirement}  {}",
                         pass.median,
                         if pass.median <= requirement {
                             "PASS"
@@ -594,15 +625,19 @@ where
                         }
                     );
                 } else {
-                    println!("machinery/{name}/{threads}  {:.6}", pass.median);
+                    println!("machinery/{name}/{log_t}/{threads}  {:.6}", pass.median);
                 }
                 if !plans.is_empty() {
                     println!(
-                        "machinery/{name}_plan/{threads} construct_ns={:.6}",
+                        "machinery/{name}_plan/{log_t}/{threads} construct_ns={:.6}",
                         Summary::new(plans).median
                     );
                 }
-                println!("machinery/{name}_construction/{threads} construct_ns={:.6} pass_min_ns={:.6} pass_max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs}", construction.median, pass.min, pass.max, options.samples);
+                println!("machinery/{name}_construction/{log_t}/{threads} construct_ns={:.6} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs}", construction.median);
+                println!("machinery/{name}_pass/{log_t}/{threads} pass_min_ns={:.6} pass_max_ns={:.6} samples={} peak_bytes={pass_peak_bytes} final_bytes={pass_final_bytes} allocs={pass_allocs}", pass.min, pass.max, options.samples);
+                if let Some((plan_bytes, scratch_bytes)) = memory {
+                    println!("machinery/{name}_memory/{log_t}/{threads} plan_bytes={plan_bytes} scratch_bytes={scratch_bytes}");
+                }
             }
         }
     }

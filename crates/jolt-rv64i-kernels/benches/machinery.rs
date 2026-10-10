@@ -1,7 +1,7 @@
-//! Packed passes at log_t=22, five samples, on warmed one- and twelve-thread
+//! Packed passes at log_t=20 and 22, five samples, on warmed one- and twelve-thread
 //! pools. Lift prices one whole word. Bucket prices one nibble update in the
 //! complete no-byte-selector fold layout. Scatter prices one cycle, excluding
-//! plan construction and pair/output allocation. The requirement row uses
+//! plan construction and weight/output allocation. The requirement row uses
 //! consecutive `all_rows` destinations; `scatter_permuted` uses a fixed seeded
 //! permutation of all bytecode rows, repeated over cycles, with no requirement. Merge prices each of the
 //! `(2W - 1) * layout_len` zero-fill and tree-merge element operations.
@@ -21,19 +21,13 @@ use rayon::prelude::*;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
+use support::allocator::CountingAllocator;
+use support::fold_layout::FoldLayout;
 use support::{run_machinery, MachineryKernel, RunnerError};
 use thiserror::Error;
 
-// Five shape ranges, each selector's word slots followed by nibble positions;
-// the first shape also reserves eight 16-entry digit/flag positions per selector.
-const OFFSETS: [usize; 5] = [
-    0,
-    64 * (5 * 256 + 128),
-    64 * (5 * 256 + 128) + 512 * 256,
-    64 * (5 * 256 + 128) + 512 * 256 + 128 * 2 * 256,
-    64 * (5 * 256 + 128) + 512 * 256 + 128 * 2 * 256 + 512 * 3 * 256,
-];
-const LAYOUT: usize = OFFSETS[4] + 2 * 256;
+const FOLD: FoldLayout = FoldLayout::new(0);
+const LAYOUT: usize = FOLD.entries();
 const CHUNK: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -170,6 +164,7 @@ enum Machinery {
         inputs: Arc<Inputs>,
         plan: Box<ScatterPlan<MachinerySource>>,
         plan_ns: f64,
+        plan_bytes: usize,
         weights: Vec<F128>,
         output: Vec<F128>,
     },
@@ -228,15 +223,18 @@ impl Machinery {
                 } else {
                     &inputs.permuted
                 };
+                let before = CountingAllocator::live_bytes();
                 let start = Instant::now();
                 let plan = Box::new(ScatterPlan::new(Arc::clone(trace))?);
                 let plan_ns = start.elapsed().as_nanos() as f64;
+                let plan_bytes = CountingAllocator::live_bytes() - before;
                 Ok(Self::Scatter {
                     weights: vec![F128::from_raw(0); plan.cycles()],
                     output: vec![F128::from_raw(0); plan.bytecode_rows()],
                     inputs,
                     plan,
                     plan_ns,
+                    plan_bytes,
                 })
             }
             "merge" => Ok(Self::Merge {
@@ -253,12 +251,16 @@ impl Machinery {
     fn word(buckets: &mut NibbleBuckets<'_>, base: usize, slot: usize, word: u64, e: F128) {
         let start = base + slot * 16;
         let positions = &mut buckets.positions_mut()[start..start + 16];
-        for (positions, byte) in positions.as_chunks_mut::<2>().0.iter_mut().zip(word.to_le_bytes()) {
+        for (positions, byte) in positions
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(word.to_le_bytes())
+        {
             positions[0][usize::from(byte & 15)] += e;
             positions[1][usize::from(byte >> 4)] += e;
         }
     }
-
 }
 
 impl MachineryKernel for Machinery {
@@ -275,6 +277,24 @@ impl MachineryKernel for Machinery {
         match self {
             Self::Scatter { plan_ns, .. } => Some(*plan_ns),
             _ => None,
+        }
+    }
+    fn memory_bytes(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Scatter {
+                plan_bytes,
+                weights,
+                output,
+                ..
+            } => Some((
+                *plan_bytes,
+                (weights.capacity() + output.capacity()) * std::mem::size_of::<F128>(),
+            )),
+            Self::Bucket { .. } | Self::Merge { .. } => Some((
+                0,
+                rayon::current_num_threads() * LAYOUT * std::mem::size_of::<F128>(),
+            )),
+            Self::Lift { .. } => Some((std::mem::size_of::<WordLift>(), 0)),
         }
     }
     fn run(&mut self) -> Result<F128, MachineryError> {
@@ -321,7 +341,7 @@ impl MachineryKernel for Machinery {
                             for (slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 Self::word(
                                     &mut buckets,
-                                    selector * (5 * 16 + 8),
+                                    FOLD.variant_base(selector) / 16,
                                     slot,
                                     source.trace_word(word, cycle),
                                     e,
@@ -329,7 +349,7 @@ impl MachineryKernel for Machinery {
                             }
                             for (slot, column) in (5..12).enumerate() {
                                 buckets.xor(
-                                    selector * 88 + 80 + slot,
+                                    FOLD.variant_metadata_base(selector) / 16 + slot,
                                     source.digit(column, cycle).unwrap_or(0),
                                     e,
                                 )?;
@@ -337,13 +357,13 @@ impl MachineryKernel for Machinery {
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets.xor(selector * 88 + 87, flags, e)?;
+                            buckets.xor(FOLD.variant_metadata_base(selector) / 16 + 7, flags, e)?;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
                                 Self::word(
                                     &mut buckets,
-                                    OFFSETS[1] / 16 + (low + 8 * high + 64 * kind) * 16,
+                                    FOLD.shape_base(1, low + 8 * high + 64 * kind) / 16,
                                     0,
                                     source.trace_word(0, cycle),
                                     e,
@@ -353,7 +373,7 @@ impl MachineryKernel for Machinery {
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     Self::word(
                                         &mut buckets,
-                                        OFFSETS[2] / 16 + (low + 8 * kind) * 2 * 16,
+                                        FOLD.shape_base(2, low + 8 * kind) / 16,
                                         slot,
                                         source.trace_word(word, cycle),
                                         e,
@@ -370,7 +390,7 @@ impl MachineryKernel for Machinery {
                                     };
                                     Self::word(
                                         &mut buckets,
-                                        OFFSETS[3] / 16 + (low + 8 * high + 64 * kind) * 3 * 16,
+                                        FOLD.shape_base(3, low + 8 * high + 64 * kind) / 16,
                                         slot,
                                         word,
                                         e,
@@ -383,7 +403,7 @@ impl MachineryKernel for Machinery {
                                 for slot in 0..2 {
                                     Self::word(
                                         &mut buckets,
-                                        OFFSETS[4] / 16,
+                                        FOLD.shape_base(4, 0) / 16,
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         e,

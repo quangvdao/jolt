@@ -14,6 +14,11 @@ static MEASURING: AtomicBool = AtomicBool::new(false);
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 impl CountingAllocator {
+    /// Requested bytes currently live, including storage outside a measurement.
+    pub fn live_bytes() -> usize {
+        LIVE.load(Ordering::Relaxed)
+    }
+
     fn added(bytes: usize) {
         let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
         if MEASURING.load(Ordering::Relaxed) {

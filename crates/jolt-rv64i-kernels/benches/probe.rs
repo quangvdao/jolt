@@ -14,7 +14,7 @@
 //! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
 //! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
 //! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
-//! | sct | sct/partitioned_emit_rows_20/all_rows | cycle-order pair emission and buffered range application |
+//! | sct | sct/partitioned_emit_rows_20/all_rows | cached-slot weight emission and buffered range application |
 //! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
 //! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
 //! | w | arithmetic/word_monomial_hot | two live transforms, two coefficient shifts, AND, gather; 30 logical word operations |
@@ -67,6 +67,8 @@
 //! stream assignments, computed before timing. It is not an empirical hit or
 //! cache-residency count; sparse one-hot bytes and high zero RAM digits remain sparse.
 //!
+//! Lookup and bucket records price their calibration loops, rather than library
+//! lift or bucket calls; partitioned scatter and pool merges call the library.
 //! Column bucket updates use 32 row bytes and 128 KiB per worker. Fold updates
 //! mirror fold_pass's five cycle banks: five Variant words, seven chunk buckets
 //! and combined flags, plus active Shift, Memory, Compare and Branch words.
@@ -76,14 +78,14 @@
 //! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
 //! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
 //!
-//! sct counts destinations outside timing. The timed stream writes rows and
-//! weights in cycle order through sparse per-chunk cursors into chunk-contiguous
-//! pair segments grouped by range, then applies buffered pairs without source reads or a worker-table
-//! merge. The scatter group's direct atomic halves, worker tables with merge,
+//! sct calls the library ScatterPlan: construction caches each cycle's u16 slot
+//! and each slot's u16 row offset. Timing emits weights through those slots into
+//! chunk-contiguous range segments and applies them through cached offsets, with
+//! no source index reads, cursors, row buffer or worker-table merge. The scatter group's direct atomic halves, worker tables with merge,
 //! and destination-ordered gather are comparisons; none prices sct. Coverage at
 //! log_t=22 is 2^16 local and 2^20 all_rows destinations in a 2^20-row output;
-//! shorter streams visit at most their cycle count. Rows/weights cost 20 bytes
-//! per cycle. Counts and offsets are u32; only active cursors are initialized.
+//! shorter streams visit at most their cycle count. Persistent routing costs
+//! four bytes per cycle plus u32 range descriptors; pass scratch is 16 bytes per cycle.
 //!
 //! Fixed-size readout/merge cases generate no trace and run once per thread count,
 //! under independent/fixed. Zero-fill is W*N operations on 10 MiB arrays;
@@ -114,6 +116,7 @@ use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
 use support::arithmetic::HotArithmetic;
+use support::fold_layout::{FoldLayout, SELECTORS, WORD_SETS};
 use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
@@ -734,16 +737,8 @@ impl BucketLayout {
         match self {
             BucketLayout::Column => (32 * 256, [0; 5]),
             BucketLayout::Fold { byte_selectors, .. } => {
-                let variant = byte_selectors * 5 * 8 * 256 + (64 - byte_selectors) * 5 * 16 * 16;
-                let metadata = variant;
-                let shift = metadata + 64 * 8 * 16;
-                let memory = shift + 512 * 16 * 16;
-                let compare = memory + 128 * 2 * 16 * 16;
-                let branch = compare + 512 * 3 * 16 * 16;
-                (
-                    branch + 2 * 16 * 16,
-                    [metadata, shift, memory, compare, branch],
-                )
+                let layout = FoldLayout::new(byte_selectors);
+                (layout.entries(), layout.offsets())
             }
         }
     }
@@ -753,14 +748,13 @@ struct Bucket {
     source: Arc<SyntheticTrace>,
     layout: BucketLayout,
     scratch: Vec<Mutex<Vec<F128>>>,
-    offsets: [usize; 5],
     selectors: Vec<u8>,
     operations: usize,
 }
 
 impl Bucket {
     fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
-        let (entries, offsets) = layout.geometry();
+        let entries = layout.geometry().0;
         let selectors: Vec<u8> = match layout {
             BucketLayout::Column => Vec::new(),
             BucketLayout::Fold { share, .. } => (0..CycleSource::cycles(source.as_ref()))
@@ -800,7 +794,6 @@ impl Bucket {
             scratch: (0..threads)
                 .map(|_| Mutex::new(vec![F128::from_raw(0); entries]))
                 .collect(),
-            offsets,
             selectors,
             operations,
         }
@@ -843,12 +836,8 @@ impl Bucket {
                         BucketLayout::Fold { byte_selectors, .. } => {
                             let selector = usize::from(selectors[cycle]);
                             let by_byte = selector < byte_selectors;
-                            let variant_base = if by_byte {
-                                selector * 5 * 8 * 256
-                            } else {
-                                byte_selectors * 5 * 8 * 256
-                                    + (selector - byte_selectors) * 5 * 16 * 16
-                            };
+                            let fold = FoldLayout::new(byte_selectors);
+                            let variant_base = fold.variant_base(selector);
                             for (word_slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 bucket_word(
                                     &mut buckets,
@@ -861,17 +850,17 @@ impl Bucket {
                             }
                             for (slot, column) in (5..12).enumerate() {
                                 let digit = source.digit(column, cycle).unwrap_or(0);
-                                buckets[self.offsets[0] + (selector * 8 + slot) * 16 + digit] +=
+                                buckets[fold.variant_metadata_base(selector) + slot * 16 + digit] +=
                                     weight;
                             }
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets[self.offsets[0] + (selector * 8 + 7) * 16 + flags] += weight;
+                            buckets[fold.variant_metadata_base(selector) + 7 * 16 + flags] += weight;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
-                                let base = self.offsets[1] + (low + 8 * high + 64 * kind) * 16 * 16;
+                                let base = fold.shape_base(1, low + 8 * high + 64 * kind);
                                 bucket_word(
                                     &mut buckets,
                                     base,
@@ -882,7 +871,7 @@ impl Bucket {
                                 );
                             }
                             if let Some(kind) = source.digit(14, cycle) {
-                                let base = self.offsets[2] + (low + 8 * kind) * 2 * 16 * 16;
+                                let base = fold.shape_base(2, low + 8 * kind);
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     bucket_word(
                                         &mut buckets,
@@ -897,7 +886,7 @@ impl Bucket {
                             let row = source.bytecode_index(cycle);
                             if let Some(kind) = source.digit(15, cycle) {
                                 let base =
-                                    self.offsets[3] + (low + 8 * high + 64 * kind) * 3 * 16 * 16;
+                                    fold.shape_base(3, low + 8 * high + 64 * kind);
                                 for slot in 0..3 {
                                     let word = if slot < 2 {
                                         source.trace_word(slot, cycle)
@@ -913,7 +902,7 @@ impl Bucket {
                                 for slot in 0..2 {
                                     bucket_word(
                                         &mut buckets,
-                                        self.offsets[4],
+                                        fold.shape_base(4, 0),
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         false,
@@ -1189,18 +1178,15 @@ impl Readout {
         match layout {
             BucketLayout::Column => Self::word(&mut specs, 0, 4, 8),
             BucketLayout::Fold { byte_selectors, .. } => {
-                for selector in 0..64 {
+                let fold = FoldLayout::new(byte_selectors);
+                for selector in 0..SELECTORS[0] {
                     let by_byte = selector < byte_selectors;
-                    let base = if by_byte {
-                        selector * 5 * 8 * 256
-                    } else {
-                        byte_selectors * 5 * 8 * 256 + (selector - byte_selectors) * 5 * 16 * 16
-                    };
-                    Self::word(&mut specs, base, 5, if by_byte { 8 } else { 4 });
+                    let base = fold.variant_base(selector);
+                    Self::word(&mut specs, base, WORD_SETS[0], if by_byte { 8 } else { 4 });
                     for digit in 0..7 {
                         for value in 1..if digit < 5 { 16 } else { 8 } {
                             specs.push(ReadSpec {
-                                base: offsets[0] + (selector * 8 + digit) * 16 + value,
+                                base: fold.variant_metadata_base(selector) + digit * 16 + value,
                                 width: 1,
                                 bit: None,
                             });
@@ -1208,7 +1194,7 @@ impl Readout {
                     }
                     for bit in 0..3 {
                         specs.push(ReadSpec {
-                            base: offsets[0] + (selector * 8 + 7) * 16,
+                            base: fold.variant_metadata_base(selector) + 7 * 16,
                             width: 8,
                             bit: Some(bit),
                         });
@@ -1219,13 +1205,17 @@ impl Readout {
                         bit: None,
                     });
                 }
-                Self::word(&mut specs, offsets[1], 512, 4);
-                Self::word(&mut specs, offsets[2], 128 * 2, 4);
-                Self::word(&mut specs, offsets[3], 512 * 3, 4);
-                Self::word(&mut specs, offsets[4], 2, 4);
-                for selector in 0..512 {
+                for shape in 1..SELECTORS.len() {
+                    Self::word(
+                        &mut specs,
+                        offsets[shape],
+                        SELECTORS[shape] * WORD_SETS[shape],
+                        4,
+                    );
+                }
+                for selector in 0..SELECTORS[3] {
                     specs.push(ReadSpec {
-                        base: offsets[3] + selector * 3 * 16 * 16,
+                        base: fold.shape_base(3, selector),
                         width: 16,
                         bit: None,
                     });
@@ -1379,10 +1369,8 @@ impl Merge {
 struct PartitionedScatter {
     source: Arc<SyntheticTrace>,
     plan: ScatterPlan<SyntheticTrace>,
-    rows: Vec<u32>,
     weights: Vec<F128>,
     output: Vec<F128>,
-    cursors: Vec<u32>,
 }
 
 impl PartitionedScatter {
@@ -1390,8 +1378,6 @@ impl PartitionedScatter {
         let validated = Arc::new(ValidatedTrace::new(Arc::clone(&source))?);
         let plan = ScatterPlan::new(validated)?;
         Ok(Self {
-            cursors: vec![0; plan.cursor_len()],
-            rows: vec![0; plan.cycles()],
             weights: vec![F128::from_raw(0); plan.cycles()],
             output: vec![F128::from_raw(0); plan.bytecode_rows()],
             source,
@@ -1410,10 +1396,8 @@ impl PartitionedScatter {
         self.plan
             .scatter_into(
                 |cycle| trace_value(source, cycle),
-                &mut self.rows,
                 &mut self.weights,
                 &mut self.output,
-                &mut self.cursors,
             )
             .unwrap();
         let _ = black_box(&self.output);

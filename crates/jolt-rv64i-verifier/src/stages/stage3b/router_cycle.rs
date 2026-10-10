@@ -199,7 +199,7 @@ impl<F: JoltField> RouterCycleVariant<F> {
         r_1: Arc<Vec<F>>,
         x: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleVariantSymbolic::new(r_1.len());
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Variant)?,
@@ -293,7 +293,7 @@ impl<F: JoltField> RouterCycleShift<F> {
         r_1: Arc<Vec<F>>,
         x: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleShiftSymbolic::new(r_1.len());
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Shift)?,
@@ -390,7 +390,7 @@ impl<F: JoltField> RouterCycleMemory<F> {
         r_1: Arc<Vec<F>>,
         x: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleMemorySymbolic::new(r_1.len());
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Memory)?,
@@ -493,7 +493,7 @@ impl<F: JoltField> RouterCycleCompare<F> {
         r_1: Arc<Vec<F>>,
         x: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleCompareSymbolic::new(r_1.len());
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Compare)?,
@@ -625,7 +625,7 @@ impl<F: JoltField> RouterCycleBranch<F> {
         r_1: Arc<Vec<F>>,
         x: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleBranchSymbolic::new(r_1.len());
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Branch)?,
@@ -716,31 +716,61 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleBranch<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterCycleVariant<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterCycleVariantSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleVariantSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterCycleShift<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterCycleShiftSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleShiftSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterCycleMemory<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterCycleMemorySymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleMemorySymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterCycleCompare<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterCycleCompareSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleCompareSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterCycleBranch<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterCycleBranchSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleBranchSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

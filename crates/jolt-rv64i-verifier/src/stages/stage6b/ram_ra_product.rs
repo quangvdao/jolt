@@ -69,7 +69,7 @@ impl<F: JoltField> RamRaProduct<F> {
             offset = end;
         }
         Ok(Self {
-            symbolic: RamRaProductSymbolic::new((r_4.len(), chunks.len())),
+            symbolic: Self::symbolic_for(r_4.len(), layout),
             chunks,
             a_ram,
             r_4,
@@ -175,7 +175,13 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamRaProduct<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RamRaProduct<F> {
-    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
-        RamRaProductSymbolic::new((log_T, layout.ram_ra().len()))
+    type Dimensions = (usize, usize);
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamRaProductSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions {
+        (log_T, layout.ram_ra().len())
     }
 }

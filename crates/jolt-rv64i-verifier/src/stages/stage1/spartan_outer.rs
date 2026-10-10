@@ -75,12 +75,9 @@ macro_rules! outer {
                     });
                 }
                 Ok(Self {
-                    symbolic: Self::symbolic_with_width(log_T, row_variables),
+                    symbolic: Self::symbolic_with((log_T, row_variables)),
                     instance,
                 })
-            }
-            fn symbolic_with_width(log_T: usize, row_variables: usize) -> $symbolic {
-                $symbolic::new(log_T + row_variables)
             }
             /// The batch-1 equality point in row-then-cycle order, low variable first in each part.
             pub fn tau(&self) -> &[F] {
@@ -96,13 +93,19 @@ macro_rules! outer {
             }
         }
         impl<F: JoltField> DimensionedRelation<F> for $name<F> {
-            fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
+            type Dimensions = (usize, usize);
+
+            fn symbolic_with((log_T, row_variables): Self::Dimensions) -> Self::Symbolic {
+                $symbolic::new(log_T + row_variables)
+            }
+
+            fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions {
                 let row_variables = if RowBlock::$block == RowBlock::F2 {
                     8
                 } else {
                     RowMatrices::f128_row_variables_for(layout)
                 };
-                Self::symbolic_with_width(log_T, row_variables)
+                (log_T, row_variables)
             }
         }
         impl<F: JoltField> ConcreteSumcheck<F> for $name<F> {

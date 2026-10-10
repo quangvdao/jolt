@@ -57,7 +57,7 @@ impl<F: JoltField> RamOutputCheck<F> {
         }
         validate_io(&io, tau.len())?;
         Ok(Self {
-            symbolic: RamOutputCheckSymbolic::new(tau.len()),
+            symbolic: Self::symbolic_with(tau.len()),
             tau,
             r_bit,
             io,
@@ -147,8 +147,14 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RamOutputCheck<F> {
-    fn symbolic_for(_log_T: usize, layout: &Layout) -> Self::Symbolic {
-        RamOutputCheckSymbolic::new(layout.log_K_ram())
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamOutputCheckSymbolic::new(dimensions)
+    }
+
+    fn dimensions(_log_T: usize, layout: &Layout) -> Self::Dimensions {
+        layout.log_K_ram()
     }
 
     fn point_offset(rounds: usize, batch_num_vars: usize) -> Result<usize, VerifierError> {

@@ -34,7 +34,7 @@ impl<F: JoltField> RouterShort<F> {
         }
         let columns = equality_table(&w)?;
         Ok(Self {
-            symbolic: RouterShortSymbolic::new(()),
+            symbolic: Self::symbolic_with(()),
             w,
             r_1,
             routes,
@@ -112,7 +112,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterShort<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RouterShort<F> {
-    fn symbolic_for(_log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RouterShortSymbolic::new(())
+    type Dimensions = ();
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterShortSymbolic::new(dimensions)
     }
+
+    fn dimensions(_log_T: usize, _layout: &Layout) -> Self::Dimensions {}
 }

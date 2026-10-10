@@ -161,7 +161,14 @@ pub struct Rv64iProof<S: BitsCommitmentScheme> {
 }
 
 pub(crate) trait DimensionedRelation<F: JoltField>: ConcreteSumcheck<F> {
-    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic;
+    type Dimensions;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic;
+    fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions;
+
+    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
+        Self::symbolic_with(Self::dimensions(log_T, layout))
+    }
 
     fn point_offset(rounds: usize, batch_num_vars: usize) -> Result<usize, VerifierError> {
         batch_num_vars

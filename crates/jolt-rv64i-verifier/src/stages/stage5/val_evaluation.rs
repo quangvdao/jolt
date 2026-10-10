@@ -44,7 +44,7 @@ impl<F: JoltField> RegistersValEvaluation<F> {
             }
         }
         Ok(Self {
-            symbolic: RegistersValEvaluationSymbolic::new(r_4.len()),
+            symbolic: Self::symbolic_with(r_4.len()),
             a_reg,
             r_bit,
             r_4,
@@ -184,7 +184,7 @@ impl<F: JoltField> RamValEvaluation<F> {
             });
         }
         Ok(Self {
-            symbolic: RamValEvaluationSymbolic::new(r_4.len()),
+            symbolic: Self::symbolic_with(r_4.len()),
             a_ram,
             r_bit,
             r_4,
@@ -291,13 +291,25 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamValEvaluation<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RegistersValEvaluation<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RegistersValEvaluationSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RegistersValEvaluationSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RamValEvaluation<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RamValEvaluationSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamValEvaluationSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

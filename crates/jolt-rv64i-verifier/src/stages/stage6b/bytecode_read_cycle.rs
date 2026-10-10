@@ -79,7 +79,7 @@ impl<F: JoltField> BytecodeReadCycle<F> {
             offset = end;
         }
         Ok(Self {
-            symbolic: BytecodeReadCycleSymbolic::new((r_4.len(), chunks.len())),
+            symbolic: Self::symbolic_for(r_4.len(), layout),
             chunks,
             a_bc,
             h,
@@ -221,7 +221,13 @@ impl<F: JoltField> BytecodeReadCycle<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for BytecodeReadCycle<F> {
-    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
-        BytecodeReadCycleSymbolic::new((log_T, layout.bytecode_ra().len()))
+    type Dimensions = (usize, usize);
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        BytecodeReadCycleSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions {
+        (log_T, layout.bytecode_ra().len())
     }
 }

@@ -35,7 +35,7 @@ impl<F: JoltField> RegistersReadChecking<F> {
     pub(crate) fn new_shared(r_bit: Arc<Vec<F>>, r_3: Arc<Vec<F>>) -> Result<Self, PointsError> {
         check_read_points(&r_bit, &r_3)?;
         Ok(Self {
-            symbolic: RegistersReadCheckingSymbolic::new(r_3.len()),
+            symbolic: Self::symbolic_with(r_3.len()),
             r_bit,
             r_3,
         })
@@ -143,7 +143,13 @@ impl<F: JoltField> ConcreteSumcheck<F> for RegistersReadChecking<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RegistersReadChecking<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        RegistersReadCheckingSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RegistersReadCheckingSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

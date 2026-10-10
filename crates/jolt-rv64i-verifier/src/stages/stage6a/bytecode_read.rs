@@ -52,7 +52,7 @@ impl<F: JoltField> BytecodeReadAddress<F> {
                 value * *coordinate
             });
         Ok(Self {
-            symbolic: BytecodeReadAddressSymbolic::new(log_K_bytecode),
+            symbolic: Self::symbolic_with(log_K_bytecode),
             points,
             lift,
             entry_pc,
@@ -134,7 +134,13 @@ impl<F: JoltField> ConcreteSumcheck<F> for BytecodeReadAddress<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for BytecodeReadAddress<F> {
-    fn symbolic_for(_log_T: usize, layout: &Layout) -> Self::Symbolic {
-        BytecodeReadAddressSymbolic::new(layout.log_K_bytecode())
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        BytecodeReadAddressSymbolic::new(dimensions)
+    }
+
+    fn dimensions(_log_T: usize, layout: &Layout) -> Self::Dimensions {
+        layout.log_K_bytecode()
     }
 }

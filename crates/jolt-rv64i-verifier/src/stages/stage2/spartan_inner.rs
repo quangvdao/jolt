@@ -69,7 +69,7 @@ impl<F: JoltField> SpartanInner<F> {
             });
         }
         Ok(Self {
-            symbolic: SpartanInnerSymbolic,
+            symbolic: Self::symbolic_with(()),
             matrices,
             rho_f2,
             rho_f128,
@@ -204,7 +204,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for SpartanInner<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for SpartanInner<F> {
-    fn symbolic_for(_log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        SpartanInnerSymbolic::new(())
+    type Dimensions = ();
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        SpartanInnerSymbolic::new(dimensions)
     }
+
+    fn dimensions(_log_T: usize, _layout: &Layout) -> Self::Dimensions {}
 }

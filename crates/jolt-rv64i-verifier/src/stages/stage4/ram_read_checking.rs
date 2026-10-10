@@ -46,7 +46,7 @@ impl<F: JoltField> RamReadChecking<F> {
             });
         }
         Ok(Self {
-            symbolic: RamReadCheckingSymbolic::new((a, r_3.len())),
+            symbolic: Self::symbolic_for(r_3.len(), layout),
             r_bit,
             r_3,
             a,
@@ -151,7 +151,13 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamReadChecking<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for RamReadChecking<F> {
-    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
-        RamReadCheckingSymbolic::new((layout.log_K_ram(), log_T))
+    type Dimensions = (usize, usize);
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamReadCheckingSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions {
+        (layout.log_K_ram(), log_T)
     }
 }

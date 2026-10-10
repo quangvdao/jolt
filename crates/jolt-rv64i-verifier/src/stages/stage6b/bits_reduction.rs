@@ -170,7 +170,7 @@ impl<F: JoltField> BitsReduction<F> {
             branch.push((layout.should_branch(), F::one()));
         }
         Ok(Self {
-            symbolic: BitsReductionSymbolic::new(r_1.len()),
+            symbolic: Self::symbolic_for(r_1.len(), layout),
             r_1,
             r_3,
             r_5,
@@ -402,7 +402,13 @@ impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
 }
 
 impl<F: JoltField> DimensionedRelation<F> for BitsReduction<F> {
-    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
-        BitsReductionSymbolic::new(log_T)
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        BitsReductionSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

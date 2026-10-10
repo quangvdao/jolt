@@ -13,7 +13,7 @@ The front end of the binary-field RV64I experiment (`specs/rv64i-binary-protocol
 
 The scheme is hash-based. The bits are packed 64 to a symbol of `F64`, the `2^(t+2)` symbols are encoded with an interleaved Reed-Solomon code on an additive domain of `F64` and committed with a Merkle tree, and the commitment carries one out-of-domain evaluation of every lane of the code so that after the commit phase one table is bound and not a list of tables. The opening is a WHIR recursion over the cubic extension `F192` of `F64`, analysed in the list-decoding regime up to the Johnson bound with proven proximity gaps and no conjecture. The evaluation claim lives in `F128`, which is not a subfield of `F192`; a tensor reduction (ring switching) of shape 64 by 128 turns the 64 partial evaluations that the front end already publishes into one inner-product claim over `F192`. No element of `F128` is ever multiplied inside `F192`, so the missing embedding costs nothing.
 
-At the reference size `t = 22` the table has `2^30` bits and `2^24` symbols. The parameter set is rate 1/2, fold schedule 6, 4, 4, 4, 4, query counts 260, 65, 37, 26, 20 and no grinding. Every error term of the scheme is at most `2^-128`; the weakest is the query term of the first level at `2^-128.00`, followed by its proximity-gap term at `2^-129.33`. The opening proof is 326,252 bytes in expectation and 430,024 at most, and the commitment is 1,568 bytes. The existing public implementation of the same recursion, at this geometry and for a claim in `F192`, measures 311 ms to commit and 730 ms to open on one thread and 67.8 ms and 142.6 ms on twelve, on a loaded host. The model of this spec for the scheme with the `F128` bridge and the commit-time sample is 198 ns per cycle on one thread, which gives a threshold of 247 ns per cycle, 12% of the prover's 2,100.
+At the reference size `t = 22` the table has `2^30` bits and `2^24` symbols. The parameter set is rate 1/2, fold schedule 6, 4, 4, 4, 4, query counts 260, 65, 37, 26, 20 and no grinding. Every error term of the scheme is at most `2^-128`; the weakest is the query term of the first level at `2^-128.00`, followed by its proximity-gap term at `2^-129.33`. The opening proof is 326,252 bytes in expectation and 430,024 at most, and the commitment is 1,568 bytes. The existing public implementation of the same recursion, at this geometry and for a claim in `F192`, measures 311 ms to commit and 730 ms to open on one thread and 67.8 ms and 142.6 ms on twelve, on a loaded host. The model of this spec for the scheme with the `F128` bridge and the commit-time sample is 198 ns per cycle on one thread, which gives thresholds of 94 ns for commit and 154 ns for open, together 248 ns per cycle and 11.8% of the prover's 2,100.
 
 The spec compares two opening fields side by side, `F192` with the bridge and a field that contains `F128`, and recommends `F192`. That recommendation is for the owner to confirm.
 
@@ -45,6 +45,155 @@ Notation used throughout. `K = F64`, `H = F128` and `E = F192` are the types of 
 - A general polynomial commitment scheme for `jolt-openings`. The generalisation of those traits is a separate later item (Execution, item 9).
 - Recursion-friendliness of the verifier, batching of several tables or several points, and streaming commitment.
 - A proof of the proximity-gap theorem or of the round-by-round theorem. The spec states which published results it rests on and with what constants.
+
+## Evaluation
+
+### Acceptance Criteria
+
+Section numbers refer to Architecture.
+
+**Parameters.**
+
+- [ ] For every `1 ≤ t ≤ 32` the schedule function returns the `k_i`, `c_i`, `d_i`, `R` and `res` of §5; the rows for `t = 1`, `6`, `10` and `22` are literals in the test: `(1; 2; 3)`, `(6; 2; 3)`, `(6, 4; 6, 2; 7, 6)` and the table of §5.
+- [ ] The exact-arithmetic test of item 1 confirms every query count and asserts every ledger row at most `2^-128` for every `t`.
+
+**Field.**
+
+- [ ] `F192Accumulator::fmadd_base(a, b)` followed by `reduce` equals `a.mul_base(b)` summed, on operands supported on single coefficients for every pair of positions, and on 1,024 random pairs.
+
+**Code.**
+
+- [ ] The encoder by definition gives, for `c = 1`, `d = 2` and `f = (f_0, f_1)`: `f_0`, `f_0 + f_1`, `f_0 + β_1·f_1`, `f_0 + (β_1 + 1)·f_1` at positions 0 to 3. For `c = 2`, `d = 3`, where `s_1(β_1) = x^2 + x` and `Ŵ_1` takes the values 0, 0, 1, 1, `x^2 + x` at positions 0 to 4: position 2 gives `f_0 + x·f_1 + f_2 + x·f_3` and position 4 gives `f_0 + x^2·f_1 + (x^2 + x)·f_2 + (x^4 + x^3)·f_3`. These are written in the test as raw words: no product in them reaches degree 64.
+- [ ] The transform equals the encoder by definition for every `1 ≤ c < d ≤ 8`, for 1, 2, 16 and 64 lanes, over `F64` and over `F192`; the transposed transform satisfies `⟨Enc(f), g⟩ = ⟨f, Enc^T(g)⟩` on random `f`, `g`.
+- [ ] `W~_x(q)` equals `Σ_w eq_E(q, w)·X_w(x)` computed from the definition, for every `x` at `d ≤ 6`.
+
+**Merkle.**
+
+- [ ] The root of a tree of 4 leaves equals `H(H(H(l_0) ‖ H(l_1)) ‖ H(H(l_2) ‖ H(l_3)))` computed with `blake2::Blake2s256` in the test; the batched tree builder equals the tree built by that definition for every depth up to 10 and leaf sizes 8, 64, 384 and 512 bytes.
+- [ ] For every nonempty subset of positions at depth 4, the multiproof written verifies, its digest count equals the count that the verifier derives, and it is rejected with any digest altered, with one digest removed, and with one digest appended.
+
+**Bridge.**
+
+- [ ] For a table with one nonzero symbol `p[z_0] = β_i`: with `r = 0` and `z_0 = 0`, `τ = β_i`; with `r = (x, 0, …)` and `z_0 = 1`, `τ = β_i·α`. Both are literals for a fixed `α`.
+- [ ] For `μ = 1`, `r = (x)`: `w~((q_0)) = 1 + q_0 + α`, checked for a fixed `q_0` and `α`.
+- [ ] For `μ ≤ 10`, random `p`, `r`, `α`: `s_i` computed bit by bit from the table and `eq_table`, then `τ = Σ_z p[z]·Φ_α(eq_H(r, z))`; the recurrence equals `Σ_z eq_E(q, z)·Φ_α(eq_H(r, z))` computed directly; the prover's weight equals `Φ_α(eq_H(r, z))` computed bit by bit.
+
+**Wire.**
+
+- [ ] `read(write(x)) = x` for commitments and openings of every `t ≤ 14` used in the tests; every proper prefix and every extension by one byte of an accepted string is rejected; `n_i = 0`, `n_i > Q_i` and `g_i > n_i·d_i` are rejected before allocation, shown by a test that feeds lengths of `2^32 − 1`.
+- [ ] `read` and the two verifier functions return without panicking on 10,000 random strings and on every single-byte mutation of an accepted proof at `t = 6`.
+
+**Transcript.**
+
+- [ ] A recording transcript sees exactly the calls of §6, in order, for `t = 6` and `t = 11`; the six labels are disjoint from the nine of the front end; prover and verifier states are equal after `commit` and after `open`.
+- [ ] For a fixed transcript state, the positions of a level with `d = 7`, `Q = 5` equal a literal computed in the test from the squeezed bytes by the rule of §6.
+
+**Completeness.**
+
+- [ ] For `t ∈ {1, 2, 5, 6, 9, 10, 11, 14}` and random tables, with `C` and the points produced as the front end produces them, `verify_commit` and `verify_opening` accept the output of `commit` and `open`, and `BitsOpening::value()` equals the evaluation of the table computed bit by bit.
+- [ ] The existing contract tests of the two traits pass with `WhirBits` in place of `TransparentBits`.
+
+**Rejections.** Each of the following makes `verify_opening` or `read` return an error, at `t = 6` and `t = 11`:
+
+- [ ] one byte changed in each of: `root_0`, an element of `y_0`, each round coefficient, each later root, each `y_i`, each element of `f_R`, a leaf, a sibling digest, `n_i`, `g_i`;
+- [ ] an opening produced for a table that differs from the committed one in one bit;
+- [ ] `C` changed in two entries so that `value()` is unchanged and some `s_i` is not (this is the stronger claim of invariant 3);
+- [ ] `C` changed in one entry; one coordinate of `rho[6..8)` or of `r_6` changed; the geometry changed;
+- [ ] an opening verified against a transcript that differs before the commit phase.
+
+**Determinism.**
+
+- [ ] The commitment and the opening bytes are identical on 1 and on 12 threads and across runs, and for the fixed table and transcript of the test at `t = 6` their Blake2b-256 digests equal literals fixed in item 7.
+
+**Front end.**
+
+- [ ] `prove` and `verify` of the experiment accept the counting loop at `t = 6` with `WhirBits`, and the tamper tests of the front end that target the commitment and the opening reject.
+
+**Hygiene.**
+
+- [ ] `jolt-rv64i-verifier` keeps `#![forbid(unsafe_code)]`; `jolt-rv64i-pcs` has `unsafe` only under `src/arch/`; `cargo clippy` with `-D warnings` passes for the features of the experiment; each file derived from the port carries its source's header.
+
+### Testing Strategy
+
+Ground truth is independent of the code under test. The encoder is tested against the definition of the code, evaluated with field operations and one inversion per basis polynomial; the tree against the `blake2` crate applied by the definition; the bridge against bits read from the table; the claim against a bit-by-bit evaluation. The optimised transform and the batched hash are tested against those definitions and not against each other. The smallest cases are literals written out in this spec. The ported implementation is not used as an oracle: its lane order, wire and transcript differ, and it lives outside the repository. Tests run with `cargo nextest`, in the crates of the items that own them. The exact-arithmetic test of the parameters is the only place where the ledger is computed in the repository.
+
+Soundness is not tested by any of this. The rejection tests show that single faults are caught, and the ledger of §8 is an argument on paper with the open points listed at the end.
+
+### Performance
+
+Benchmarks follow the kernels spec: an Apple M4 Max, `-C target-cpu=native`, one thread and a `rayon` pool of 12, `log_t = 20` and `22`, through the runner of `crates/jolt-rv64i-prover/benches/support/`. The benchmark is `bits_whir` with the cases `commit` and `open` and the phases of the table below; the table is random bits from a seeded generator, since no kernel of the scheme depends on the data.
+
+Every figure below is marked *counted* (derived from the algorithm), *estimated* (a count times a unit price that has not been measured for this code) or *measured*.
+
+**Measured: the existing implementation at this geometry.** A separate harness ran the public leanVM implementation unchanged at `2^24` symbols of `F64`, rate 1/2, initial fold 6, later folds 4, no grinding, query counts 260, 65, 37, 26, 20, BLAKE2s-256, on the benchmark machine while it was loaded with other builds, five runs per configuration. Medians, in milliseconds:
+
+| Phase | 12 threads | 1 thread |
+|---|---:|---:|
+| Packed copy of the rows | 9.75 | 12.07 |
+| Level-0 encode (allocation, transposition, transform) | 37.71 | 161.58 |
+| Level-0 tree | 19.86 | 136.82 |
+| Ring switch, weights, bit slices, first round message | 81.65 | 447.19 |
+| Rounds, folds, final message | 28.23 | 122.78 |
+| Induced weights | 3.51 | 6.98 |
+| Later encodes | 11.74 | 65.37 |
+| Later trees | 14.79 | 88.57 |
+| Samples of later levels | 0.85 | 1.49 |
+| Queries and proof assembly | 0.76 | 0.78 |
+| **Commit** | 67.77 | 311.27 |
+| **Open** | 142.61 | 729.88 |
+| Verify | 1.79 | 1.78 |
+| Proof bytes (its own serialisation, pruned paths) | 332,112 | 332,112 |
+| Peak resident memory, rows and packed copy included | 1,325 MiB | 1,319 MiB |
+
+What these figures do not measure: the bridge of §3, since the harness opens a claim whose point is in `F192` through the source's own 64 by 192 ring switch and computes the 64 slice values that this scheme reads from `C`; the commit sample, since the source commits a root alone; the lane order and wire of this spec; and an idle host. The twelve threads were eight performance and four efficiency cores. They are evidence for the ported phases and an upper reference for the rest.
+
+**Unit prices.** In nanoseconds, added to the table of the kernels spec.
+
+| Symbol | Operation | Point 1 | Point 2 | Source |
+|---|---|---:|---:|---|
+| `c` | one carry-less multiplication of 64-bit words with its share of the reduction | 0.305 | 0.15 | estimated: M/6 of the kernels spec's unit table, to be measured by item 2 |
+| `Lw` | lookup of a 24-byte entry and its XOR, tables of 96 KiB | 0.6 | 0.6 | estimated: 1.5 L, to be measured by item 5 |
+| `nb0` | one level-0 butterfly, with allocation and copy | 0.535 | 0.535 | measured, loaded host: 161.58 ms over 301,989,888 |
+| `nb1` | one later-level butterfly, with allocation and domain set-up | 1.50 | 1.50 | measured, loaded host: 65.37 ms over 43,515,904 |
+| `hb0`, `hb1` | one BLAKE2s compression in a tree of 512-byte, 384-byte leaves | 29.0, 25.7 | the same | measured, loaded host: 136.82 ms over 4,718,591; 88.57 ms over 3,440,636 |
+
+**Model, at `t = 22`, one thread.**
+
+| Phase | Operations (counted) | Point 1, ms | Status |
+|---|---|---:|---|
+| Level-0 encode | 301,989,888 `nb0` | 161.6 | measured unit; includes a transposition that §2 removes |
+| Level-0 tree | 4,718,591 `hb0` | 136.8 | measured unit |
+| Commit sample | `(3·2^24 + 12·2^18) c` = 53,477,376 `c` | 16.3 | estimated |
+| **Commit** | | **314.7** | |
+| Bridge weight and round 1 | 327,155,712 `c` + 268,435,456 `Lw` | 99.8 + 161.1 = 260.8 | estimated |
+| Rounds 2 to 24 | 301,989,852 `c` | 92.1 | estimated |
+| Induced weights | 7,405,568 butterflies | 7.0 | measured phase |
+| Later encodes | 43,515,904 `nb1` | 65.4 | measured unit |
+| Later trees | 3,440,636 `hb1` | 88.6 | measured unit |
+| Samples of later levels | | 1.5 | measured phase |
+| Queries and assembly | 408 positions | 0.8 | measured phase |
+| **Open** | | **516.1** | |
+
+Per cycle that is 75.03 ns for commit and 123.06 ns for open, 198.09 ns together. At point 2, where only `c` changes, 73.06 and 99.81. The two estimated phases of the opening, 352.9 ms, stand where the source's measured ring switch and rounds take `447.2 + 122.8 = 570.0` ms; the difference is the slices that this scheme does not compute and a first round that is modelled and not built, and it is the least certain part of the model.
+
+**Thresholds.** A threshold is single-thread nanoseconds per cycle at `log_t = 22`, the unrounded model times 1.25 to the nearest nanosecond, as in the kernels spec.
+
+| Benchmark | Model, point 1 | Threshold | Model, point 2 | Threshold at point 2 |
+|---|---:|---:|---:|---:|
+| `bits_whir/commit` | 75.03 | 94 | 73.06 | 91 |
+| `bits_whir/open` | 123.06 | 154 | 99.81 | 125 |
+
+The thresholds of point 1 are in force. They move only when a row of the unit table is replaced by a measurement of the operation that the row names, on a quiet host and on this scheme's code, and then every model and threshold is recomputed in the same PR; no threshold moves to meet a result. The measured rows above are provisional in that sense: they come from a loaded host and from the source. At `log_t = 20` the benchmark reports and has no threshold: the schedule has four levels and a different final message, and no measurement exists at that size.
+
+On twelve threads at `log_t = 22` the house rule divides the threshold by 9.6: 9.8 ns per cycle for commit and 16.0 for open, 41 ms and 67 ms. The measurement does not support that factor for this workload. The source reaches 16.2 and 34.0 ns per cycle, 67.8 ms and 142.6 ms, which is a speed-up of 4.6 and 5.1 over its single thread and not 9.6. The data cannot separate the load on the host from the memory traffic of the transform and the hashing and from the four efficiency cores. The requirement stays as the rule gives it, it is recorded as at risk, and item 8 measures the scaling on a quiet host before anyone relies on it (Open, 6).
+
+**Budget.** The prover's budget is 2,100 ns per cycle on one core, 918 ms at `2^22` cycles on twelve threads at the factor 9.6. The scheme takes `94 + 154 = 248` ns of it, 11.8%; with the 745 ns of the kernels' thresholds, 993 ns are allotted and 1,107 remain. In wall time on twelve threads that is 108 ms if the factor of 9.6 holds and `248·2^22/5.02 = 207` ms at the scaling measured for the source. The earlier proposal of 400 ms, 180 for commit and 220 for open, is not adopted: the existing implementation measures 210 ms for both on a loaded host, and the model with the bridge and the commit sample is below the source on one thread. The budget is the thresholds above and nothing looser.
+
+**Memory.** Counted, §9: 864 MiB owned at the peak, 992 MiB with the rows, against 1,325 MiB measured for the source with its packed copy. The benchmark reports the peak of owned allocations through the recorder of the bench support; the requirement is that it does not exceed the counted 864 MiB by more than 5% at `log_t = 22`.
+
+**Verifier.** Counted at `t = 22`: at most `Σ Q_i·(leaf compressions + d_i) = 10,423` BLAKE2s compressions, 3,072 products in `E` for the recurrence, and 408 lane combinations and weight evaluations. The source verifies in 1.78 ms (measured). The benchmark reports the verifier's time; it has no threshold.
+
+**Proof size.** Counted, §6: 326,252 bytes expected, 430,024 at most, for the opening, and 1,568 for the commitment. Item 8 reports the distribution over 1,000 transcripts.
 
 ## Design
 
@@ -383,3 +532,72 @@ The peak is in round 1 of `open`: `256 + 32 + 384 + 192 = 864` MiB owned by the 
 **In the repository already.** `F64`, `F128` and `F192` with carry-less kernels and accumulators, `F192: ExtField<F64>` with `mul_base`, `F128::mul_x`, the Blake2b transcript with `squeeze_bytes`, the `blake2` crate (which provides BLAKE2s-256 for the verifier), `rayon`, and the two traits with their contract tests.
 
 **New.** An accumulator method for an element of `F192` times an element of `F64` (three carry-less multiplications, no reduction); the additive transform; the Merkle tree and multiproof; the bridge on both sides; the protocol, its wire format and its parameter table.
+
+**Where the code lives.** The verifier's half is a module `whir` of `jolt-rv64i-verifier`, in safe code, hashing with the `blake2` crate. The prover's kernels (transform, tree, bridge weights, rounds, induced weights) are a new crate, `crates/jolt-rv64i-pcs`, because `jolt-rv64i-prover` and `jolt-rv64i-kernels` forbid `unsafe` and a batched BLAKE2s needs vector intrinsics; the new crate denies `unsafe` outside `src/arch/`, where each use carries a `SAFETY:` comment naming the `cfg` that guarantees the instruction, as `jolt-field` does. `jolt-rv64i-prover` implements `BitsCommitmentProver` in `src/commitment/whir.rs` by calling it.
+
+### Alternatives Considered
+
+**An opening field that contains `F128`.** §7. Rejected on a total of 2,053,898,184 carry-less multiplications against 2,043,740,124, with a field and kernels that do not exist. Reopened by a measurement that the lookups of `Φ` dominate the opening.
+
+**A commitment that is a root alone.** This is what the existing implementation does. It saves the commit sample: 53,477,376 carry-less multiplications, an estimated 16 ms on one thread, and 1,536 bytes. It leaves the commitment binding a list of up to `L_0 = 187` tables, and every round of the front end, whose errors are of the form `δ/2^128`, is then paid once per list member: 7.55 bits lost on each, with no way to recover them in the scheme. Rejected. It would be reopened only by a front end whose challenge field has that margin.
+
+**One sample of the whole table instead of one per lane.** A single value `p~(z_0)` at `z_0 ∈ E^μ` makes the commitment 56 bytes instead of 1,568. Its weight has `2^24` entries at level 0: merged into the bridge weight it costs `12·2^24 = 201,326,592` carry-less multiplications, and carried as a separate term through the six lane rounds about `6·2^23 + 12·(2^23 − 2^18) = 147,849,216`. The per-lane sample costs `12·2^18` in the opening. Rejected on that count; 1,512 bytes are 0.46% of the proof.
+
+**Grinding.** §8. At 17 bits: 57,760 bytes fewer at most, the position terms at `2^-111` as errors. Rejected because the target is an error bound. Reopened if the owner accepts a work factor in place of an error for those rounds.
+
+**Rate 1/4 at level 0.** Halves the queries of level 0 (130 for 260) and doubles the level-0 codeword and tree. On the existing implementation, measured in one sweep on the loaded host at twelve threads: 219,192 bytes against 332,112, and 442.5 ms against 300.0 ms for commit and open together, with 1,611 MiB against 1,326 MiB of resident memory at the peak. Rejected while the prover's time is the binding budget. Reopened if proof size becomes the objective.
+
+**An initial fold of 4 or 8 instead of 6.** Measured in the same sweep: 385.7 ms and 309,056 bytes at 4, 349.1 ms and 676,912 bytes at 8, against 300.0 ms and 332,112 bytes at 6. Rejected on both columns at 8 and on time at 4.
+
+**Ligerito.** The recursion of this spec is of the same family: interleaved codes, partial sumchecks, one new commitment per level. The alternative is its analysis within the unique-decoding radius, with no list and so no commit sample, no samples at later levels and no proximity-gap term. Its position term is `(1 − (1 − ϱ)/2)^Q`: 309 queries at rate 1/2 for 260 and 141 at rate 1/16 for 65, which is `49·1,120 + 76·960 = 127,840` more bytes at most on the first two levels alone. Rejected on proof size. Reopened if the proximity-gap constant of assumption 1 is found not to apply as transcribed, since it is the one assumption that the unique-decoding analysis does not need.
+
+**BaseFold-style folding of the codeword.** Fold the level-0 codeword itself, with one tree per fold of the same schedule and every oracle at rate 1/2. The prover saves every later encoding (43,515,904 butterflies, 65.4 ms measured on one thread) and most of the later hashing. Every query then opens a path in every oracle at the level-0 query count: `260·(1,120 + 864 + 736 + 608 + 480) = 990,080` bytes at most against 428,512, since the oracles have `2^19`, `2^15`, `2^11`, `2^7` and `2^3` leaves. Rejected on proof size, a factor of 2.31. Reopened if the proof is not transmitted or its size does not matter and the 154 ms of later encodings and trees do.
+
+**A wider field for the code.** Symbols in `F128`, 128 bits each, halve the number of symbols and of lookups of `Φ` and leave the level-0 transform at the same 905,969,664 carry-less multiplications (§7). It is only useful with an opening field above `F128`, which is design (b). Symbols in `F192` with 64 bits each, to avoid mixed arithmetic, would triple the level-0 leaf bytes and the 4,194,304 leaf compressions of the first tree. Rejected.
+
+**A weight that is never materialised.** Build `w` twice from the split tables, once for the first round message and once for the fold, and keep no vector of `2^24` elements of `E`: the peak falls by 192 MiB to 672 MiB, and the first round costs a second pass of `12·2^23` carry-less multiplications and 268,435,456 lookups, an estimated 192 ms on one thread at the unit prices of Performance. Rejected on time. Reopened if the prover's memory budget is set below the peak of §9.
+
+## Documentation
+
+The module documentation of `whir` in `jolt-rv64i-verifier` states the protocol of §2 to §6 in the order of the code and links this spec. The contract comment of `commitment.rs` is unchanged. The sentence of `BitsCommitmentProver` that neither phase copies a trace-sized buffer gains the precision of invariant 9: the codeword is a new buffer, the rows are shared. `specs/rv64i-binary-protocol.md` gains, in its performance section, the proof size with this scheme in place of the size "plus the scheme's bytes". No book page changes.
+
+## Execution
+
+Items 1 to 5 have no dependency on one another and touch disjoint files, apart from one `mod` line each in a module root; they are done in parallel. Item 6 needs the verifier halves of 1, 3, 4 and 5; item 7 needs 6 and the prover halves; item 8 needs 7. Item 9 is separate and later. No item leaves a function that is declared and not implemented: each item's files compile and are tested by its own criteria, and no item adds a public function whose body waits for a later item.
+
+1. **Parameters.** `crates/jolt-rv64i-verifier/src/whir/params.rs`: the schedule of §5 as a function of `t`, the table of query counts as constants for `1 ≤ t ≤ 32`. A test re-derives every entry with exact rational arithmetic on certified bounds of the square roots and logarithms (an entry stands if the count is provably sufficient and the count minus one provably insufficient or the choice of `m` provably worse), and asserts every row of the ledger of §8 at most `2^-128` for every `t`. If an entry of §5 is not confirmed, the table in the code and in this spec is corrected in the same PR. Criteria: "Parameters".
+2. **Field.** `crates/jolt-field/src/binary/accumulator.rs`: `F192Accumulator::fmadd_base(F192, F64)`. `crates/jolt-field/benches/binary_kernels.rs`: groups that time one carry-less product chain in `F64`, `F192` times `F64` reduced and into the accumulator, `F192` times `F192` reduced and into the accumulator. Criteria: "Field". Measurement obligation: the unit rows `c` and the products of §7, on a quiet host.
+3. **Code and transform.** `crates/jolt-rv64i-verifier/src/whir/code.rs`: `Ŵ_l(x)`, `W~_x(q)`, and the encoder by its definition for tests. `crates/jolt-rv64i-pcs/src/ntt.rs`: the position-major transform of level 0 over `F64`, the transform over `F192` with twiddles in `F64`, and its transpose; ported, with the source's headers. Criteria: "Code". Measurement obligation: `nb0` and `nb1`.
+4. **Merkle.** `crates/jolt-rv64i-verifier/src/whir/merkle.rs`: leaf and node hashing with the `blake2` crate, the multiproof verifier. `crates/jolt-rv64i-pcs/src/{merkle.rs, arch/}`: the tree builder with batched hashing, and the multiproof writer; ported. Criteria: "Merkle". Measurement obligation: `hb`, and whether a safe scalar hash reaches it, which decides whether `arch/` is needed.
+5. **Bridge.** `crates/jolt-rv64i-verifier/src/whir/bridge.rs`: `s_i`, `t_b`, `τ`, the recurrence. `crates/jolt-rv64i-pcs/src/bridge.rs`: the tables of `Φ_α`, the weight and the fused first round. New. Needs item 2 for its price, not for its correctness. Criteria: "Bridge". Measurement obligation: `Lw`, and the first-round phase.
+6. **Verifier.** `crates/jolt-rv64i-verifier/src/whir/{mod.rs, wire.rs, verify.rs}`: the type `WhirBits`, its `BitsWire` implementations, `verify_commit`, `verify_opening`. Criteria: "Wire", "Transcript", and the rejections that need no prover (malformed bytes).
+7. **Prover.** `crates/jolt-rv64i-pcs/src/{commit.rs, open.rs, rounds.rs, induce.rs}` and `crates/jolt-rv64i-prover/src/commitment/whir.rs`. Criteria: "Completeness", "Rejections", "Determinism", "Front end".
+8. **Benchmarks.** `crates/jolt-rv64i-prover/benches/bits_whir.rs` through the runner of `benches/support/`, with the phases of Performance as named phases. Measurement obligations: every row of the phase table on a quiet host at one and twelve threads, the peak of owned memory, the proof size distribution over 1,000 transcripts, and the replacement of the unit rows under the thresholds rule.
+9. **Later, separate: the shared opening traits.** `crates/jolt-openings/src/schemes.rs` has one associated `Field` per scheme, sources that are multilinear polynomials over that field, `commit` and `prove` without a transcript between them, and batching that assumes an additive homomorphism. The generalisation gives the scheme trait a typed packed source, a claim field distinct from the opening field, a commit phase and an opening that both take the transcript, and no homomorphism bound on the base trait, with homomorphic batching as an extension trait. It is one self-contained change with `WhirBits` as its first caller, made after item 7, so that the shape of the trait is taken from a working scheme. Nothing in items 1 to 8 depends on it.
+
+Risks carried by the items. The port changes the lane order (item 3 and item 7); the source's round kernels assume lanes in the high variables, and whether they carry over or are rewritten is decided in item 7. The first-round kernel of item 5 is new and is the largest estimated phase. The table of item 1 comes from a double-precision search.
+
+## References
+
+- `specs/rv64i-binary-protocol.md`: §3 (order of variables), §6 and §13 (transcript and bytes), §11 (the commitment contract).
+- `specs/rv64i-binary-prover-kernels.md`: the unit table, the thresholds rule and the benchmark runner.
+- `specs/binary-field.md`, `specs/binary-accumulators.md`: the fields and their accumulators.
+- `crates/jolt-rv64i-verifier/src/commitment.rs`, `crates/jolt-rv64i-prover/src/commitment/mod.rs`: the two traits.
+- G. Arnon, A. Chiesa, G. Fenzi, E. Yogev, "WHIR: Reed-Solomon Proximity Testing with Super-Fast Verification".
+- B. Diamond, J. Posen, "Polylogarithmic Proofs for Multilinears over Binary Towers" (FRI-Binius; ring switching).
+- H. Zeilberger, B. Chen, B. Fisch, "BaseFold: Efficient Field-Agnostic Polynomial Commitment Schemes from Foldable Codes".
+- A. Novakovic, G. Angeris, "Ligerito: A Small and Concretely Fast Polynomial Commitment Scheme".
+- E. Ben-Sasson, D. Carmon, U. Haböck, S. Kopparty, S. Saraf, "On Proximity Gaps for Reed-Solomon Codes" (2025), Theorem 4.6.
+- The public leanVM repository, `crates/pcs` and the commitment-scheme annex of its documentation: the implementation that is ported and the round-by-round analysis of assumption 2.
+
+## Open
+
+1. **The proximity-gap constant.** The formula for `a` in §8 is taken from the analysis that accompanies the ported implementation and has not been checked against the statement of the theorem in the paper. The fold terms of the ledger, and through the search every `η` and query count, depend on it.
+2. **The round-by-round theorem with the modifications.** The per-lane commit sample, its lane-combination term and the direct checks of the last level are argued in this spec and are not covered by the source's theorem. A written proof is owed before the ledger is cited outside this experiment.
+3. **The table of §5.** Computed in double precision outside the repository. The entry for `t = 22` agrees with the query counts measured on the existing implementation; the others are unconfirmed until item 1.
+4. **The hash.** BLAKE2s-256 is kept from the source. Whether BLAKE3 or SHA-256 with hardware support is cheaper at 512-byte and 384-byte leaves on the benchmark host is not measured; a change is a change of the wire format.
+5. **Unit prices.** `c` and `Lw` are estimates. The measured rows were taken on a loaded host, on the source and not on this scheme. No phase of the bridge has been measured.
+6. **Scaling to twelve threads.** The house factor of 9.6 is not supported by the one measurement available, which gives 4.6 for commit and 5.1 for open on a loaded host with eight performance and four efficiency cores. Whether the cause is the load, memory bandwidth in the transform and the hashing, or the core mix is not known.
+7. **The lane order in the port.** Whether the source's round and fold kernels can be used with lanes in the low variables has not been established by reading them through.
+8. **The trace of `x^121`.** Computed once by a script outside the repository. It matters only if design (b) is taken up.
+9. **Small tables.** For `t ≤ 10` every position of level 0 is opened. The proof is then larger than the table for the smallest `t`, which is accepted for sizes used only in tests; whether the front end ever runs a production instance below `t = 11` is the owner's to say.

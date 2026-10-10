@@ -4,9 +4,11 @@
 // Notices: crates/jolt-rv64i-pcs/THIRD_PARTY_NOTICES.md.
 //! Contiguous Merkle trees: leaf hashes first, then successive parent layers.
 
+#[cfg(not(feature = "arch"))]
+use jolt_rv64i_verifier::whir::merkle::{hash_leaf, hash_node};
 use jolt_rv64i_verifier::whir::{
     error::{checked_product, try_vec, WhirError, WhirPart},
-    merkle::{hash_leaf, hash_node, sibling_indices, Digest},
+    merkle::{sibling_indices, Digest},
 };
 use rayon::prelude::*;
 
@@ -29,6 +31,21 @@ impl MerkleTree {
                 actual: data.len(),
             });
         }
+        #[cfg(feature = "arch")]
+        {
+            let mut tree = Self::empty(data.len() / leaf_bytes)?;
+            tree.nodes[..tree.num_leaves]
+                .par_chunks_mut(1024)
+                .enumerate()
+                .try_for_each(|(group, outputs)| {
+                    let start = group * 1024 * leaf_bytes;
+                    let input = &data[start..start + outputs.len() * leaf_bytes];
+                    crate::arch::hash_many(input, leaf_bytes, outputs)
+                })?;
+            tree.fill_parents()?;
+            Ok(tree)
+        }
+        #[cfg(not(feature = "arch"))]
         Self::from_leaves(data.len() / leaf_bytes, |index| {
             hash_leaf(&data[index * leaf_bytes..(index + 1) * leaf_bytes])
         })
@@ -41,6 +58,16 @@ impl MerkleTree {
         num_leaves: usize,
         leaf: impl Fn(usize) -> Digest + Sync,
     ) -> Result<Self, WhirError> {
+        let mut tree = Self::empty(num_leaves)?;
+        tree.nodes[..num_leaves]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, slot)| *slot = leaf(index));
+        tree.fill_parents()?;
+        Ok(tree)
+    }
+
+    fn empty(num_leaves: usize) -> Result<Self, WhirError> {
         if !num_leaves.is_power_of_two() {
             return Err(WhirError::Shape {
                 part: WhirPart::Leaves,
@@ -51,14 +78,23 @@ impl MerkleTree {
         let len = checked_product(WhirPart::Digests, &[num_leaves, 2])? - 1;
         let mut nodes = try_vec(WhirPart::Digests, len)?;
         nodes.resize(len, [0; 32]);
-        nodes[..num_leaves]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(index, slot)| *slot = leaf(index));
+        Ok(Self { nodes, num_leaves })
+    }
+
+    fn fill_parents(&mut self) -> Result<(), WhirError> {
         let mut start = 0;
-        let mut width = num_leaves;
+        let mut width = self.num_leaves;
         while width > 1 {
-            let (read, write) = nodes.split_at_mut(start + width);
+            let (read, write) = self.nodes.split_at_mut(start + width);
+            #[cfg(feature = "arch")]
+            write[..width / 2]
+                .par_chunks_mut(1024)
+                .enumerate()
+                .try_for_each(|(group, outputs)| {
+                    let first = start + group * 2048;
+                    crate::arch::hash_pairs(&read[first..first + outputs.len() * 2], outputs)
+                })?;
+            #[cfg(not(feature = "arch"))]
             read[start..]
                 .par_chunks_exact(2)
                 .zip(write[..width / 2].par_iter_mut())
@@ -66,7 +102,7 @@ impl MerkleTree {
             start += width;
             width /= 2;
         }
-        Ok(Self { nodes, num_leaves })
+        Ok(())
     }
 
     /// The root authenticates the exact byte leaves supplied to the builder.
@@ -148,27 +184,29 @@ mod tests {
 
     #[test]
     fn roots_match_definition_all_depths_and_leaf_widths() {
-        ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .unwrap()
-            .install(|| {
-                for depth in 0..=10 {
-                    for width in [16, 64, 192, 384, 512] {
-                        let leaves: Vec<Vec<u8>> = (0..1usize << depth)
-                            .map(|p| {
-                                (0..width)
-                                    .map(|i| (p * 37 + i * 131 + (p >> 8)) as u8)
-                                    .collect()
-                            })
-                            .collect();
-                        let expected = definition_tree(&leaves);
-                        let tree = MerkleTree::build(&leaves.concat(), width).unwrap();
-                        assert_eq!(tree.root(), &expected.last().unwrap()[0]);
-                        assert_eq!(tree.nodes, expected.concat());
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    for depth in 0..=12 {
+                        for width in [16, 64, 192, 384, 512] {
+                            let leaves: Vec<Vec<u8>> = (0..1usize << depth)
+                                .map(|p| {
+                                    (0..width)
+                                        .map(|i| (p * 37 + i * 131 + (p >> 8)) as u8)
+                                        .collect()
+                                })
+                                .collect();
+                            let expected = definition_tree(&leaves);
+                            let tree = MerkleTree::build(&leaves.concat(), width).unwrap();
+                            assert_eq!(tree.root(), &expected.last().unwrap()[0]);
+                            assert_eq!(tree.nodes, expected.concat());
+                        }
                     }
-                }
-            });
+                });
+        }
         let leaves = [b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()];
         let h = |data: &[u8]| -> Digest { Blake2s256::digest(data).into() };
         let left = h(&[h(b"a"), h(b"b")].concat());

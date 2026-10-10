@@ -16,7 +16,7 @@ identifies its source path, revision and modifications.
 - `crates/pcs/src/ntt/additive_ntt_f64.rs`
 - `crates/pcs/src/merkle.rs`
 - `crates/fiat_shamir/src/merkle.rs`
-- `crates/primitives/src/hash.rs` (only if an architectural hash kernel is added)
+- `crates/primitives/src/hash.rs` (batched BLAKE2s in `src/arch/`)
 
 ## Source copyright and credit lines
 

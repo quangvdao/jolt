@@ -9,6 +9,7 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
+use jolt_rv64i_arith::rows::TailError;
 use jolt_rv64i_arith::words::F2Words;
 use jolt_rv64i_arith::{FormError, RowSystem, Sources};
 use jolt_rv64i_kernels::outer_f2::{OuterF2Core, OuterF2Options};
@@ -33,6 +34,8 @@ pub enum LanesError {
     Cycles { cycles: usize },
     #[error(transparent)]
     Geometry(#[from] ParError),
+    #[error(transparent)]
+    Tail(#[from] TailError),
     #[error("cycle {cycle} evaluation failed: {source}")]
     Evaluation { cycle: usize, source: FormError },
 }
@@ -69,7 +72,7 @@ impl WitnessLanes {
             .into());
         }
         let chunks = CycleChunks::new(cycles.ilog2() as usize, 0)?;
-        let rows = RowSystem::new(&witness.layout);
+        let rows = RowSystem::try_new(&witness.layout)?;
         let view = witness.cycles();
         let mut lanes = vec![[[0; 3]; 2]; cycles];
         let mut tail = vec![0; cycles];
@@ -108,14 +111,7 @@ impl WitnessLanes {
         let sources = Sources::from_parts(parts.fetched, &parts.base, parts.sources);
         let evaluated = F2Words::compute(parts.fetched, &sources, parts.sources.pos)
             .map_err(|source| LanesError::Evaluation { cycle, source })?;
-        let (lanes, packed) = rows.f2_values(&evaluated, parts.sources.keys_differ);
-        let mut tail = 0;
-        for (row, values) in packed.into_iter().enumerate() {
-            for (column, value) in values.into_iter().enumerate() {
-                tail |= (value.to_raw() as u8) << (2 * column + row);
-            }
-        }
-        Ok((lanes, tail))
+        Ok(rows.f2_values(&evaluated, parts.sources.keys_differ)?)
     }
 }
 

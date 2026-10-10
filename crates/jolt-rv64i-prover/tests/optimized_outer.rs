@@ -106,6 +106,53 @@ fn lanes_match_row_definitions_on_programs_and_separating_jalr() {
     assert_eq!(after.0[0], rows.lane_rows()[0].values(&row));
 }
 
+#[test]
+fn lanes_read_decoded_keys_differ_without_reading_committed_bits() {
+    let (_, _, witness) = support::separating_fixture();
+    let rows = RowSystem::new(&witness.layout);
+    let cycles = witness.cycles();
+    let key_cycle = (0..witness.bits.len())
+        .find(|&cycle| cycles.parts(cycle).unwrap().variant.key_kind().is_some())
+        .unwrap();
+    let mut changed = witness.clone();
+    let column = witness.layout.keys_differ();
+    Arc::make_mut(&mut changed.bits)[key_cycle][column / 64] ^= 1u64 << (column % 64);
+    assert!(Arc::ptr_eq(&witness.decoded, &changed.decoded));
+    assert_eq!(witness.decoded, changed.decoded);
+    let changed_cycles = changed.cycles();
+    assert_ne!(
+        rows.packed_rows()[0].values(&cycles.row(key_cycle).unwrap()),
+        rows.packed_rows()[0].values(&changed_cycles.row(key_cycle).unwrap()),
+        "the committed KeysDiffer mutation must distinguish the full evaluator",
+    );
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let original = pool.install(|| WitnessLanes::new(&witness)).unwrap();
+        let altered = pool.install(|| WitnessLanes::new(&changed)).unwrap();
+        for cycle in 0..witness.bits.len() {
+            let expected = (original.lanes(cycle), original.tail(cycle));
+            assert_eq!(
+                (altered.lanes(cycle), altered.tail(cycle)),
+                expected,
+                "cycle {cycle}, pool with {threads} threads",
+            );
+            assert_eq!(
+                WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap(),
+                WitnessLanes::cycle(&cycles, &rows, cycle).unwrap(),
+                "public cycle {cycle}",
+            );
+            assert_eq!(
+                WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap(),
+                expected,
+                "public cycle {cycle}, pool with {threads} threads",
+            );
+        }
+    }
+}
+
 fn assert_distinct(values: &[F128], name: &str) {
     for (index, value) in values.iter().enumerate() {
         assert!(

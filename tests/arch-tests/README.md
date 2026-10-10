@@ -79,17 +79,17 @@ the job.
 
 ## RV64I cycle-row checks
 
-`make arch-tests-rv64i RV64I_ARCH_EXPECT=<n>` reuses the existing generation,
+`make arch-tests-rv64i` reuses the existing generation,
 then runs `rv64i-arch-check` on ELF basenames matching `I-*` in data-hole decode
 mode. The checker adapts the execution trace to cycle facts and checks the
 replayed witness rows and the final `tohost` word. The runner requires exactly
-`n` matches before applying the skip list and rejects an empty selection.
+51 matches before applying the skip list and rejects an empty selection.
 
-The count is not known yet: the pinned ACT4 commit is
-`a7c99303516f4e668f7488f172043392e23b9dfd`, and its suite has not been generated
-for this check. `RV64I_ARCH_EXPECT` remains unset in the Makefile and the target
-fails with a first-generation pinning instruction until a count is supplied.
-The full ACT4 RV64I acceptance criterion has not been shown.
+The first generation at ACT4 commit
+`a7c99303516f4e668f7488f172043392e23b9dfd`, on Ubuntu 24.04 x86-64 at branch
+commit `b23ba5ba3`, produced 51 `I-*` ELFs. The Makefile pins this count as
+`RV64I_ARCH_EXPECT ?= 51`. All 51 passed the cycle-row checker with no failures
+or skips. The strict smoke also passed, reporting HTIF-failure exit status 1.
 
 `make arch-tests-rv64i-smoke` assembles the existing deliberate-failure program
 with `-march=rv64i`, decodes it strictly, and requires the checker's HTIF-failure

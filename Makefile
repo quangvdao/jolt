@@ -18,9 +18,9 @@ SMOKE_ELF         := $(SMOKE_DIR)/fail.elf
 RV64I_TARGET_DIR  := $(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(MAKEFILE_DIR)/target)
 RV64I_CHECK_BIN   := $(RV64I_TARGET_DIR)/debug/rv64i-arch-check
 RV64I_SMOKE_ELF   := $(RV64I_TARGET_DIR)/arch-tests-smoke/rv64i-fail.elf
-# Pin this count at the first generation of ACT4 commit
-# a7c99303516f4e668f7488f172043392e23b9dfd; no generated count is available yet.
-RV64I_ARCH_EXPECT ?=
+# I-* ELF count from the first generation at ACT4 commit
+# a7c99303516f4e668f7488f172043392e23b9dfd.
+RV64I_ARCH_EXPECT ?= 51
 
 # Number of parallel jobs for the ACT4 generator. Falls back to 1 when
 # neither `nproc` nor `sysctl` is available.

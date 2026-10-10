@@ -117,7 +117,7 @@ The nextest run needs the crate's `emulator` feature for `trace` and `tracer`'s 
 
 *ACT4, what is added.* Generation and the model directory are reused unchanged. `run.sh` gains `--match <glob>` on the base name and `--expect <n>`, and fails when no ELF matches or when the number that match is not `n`; `n` is fixed in the Makefile beside the submodule commit at the first generation. The checking binary `rv64i-arch-check` exits 0 when its argument meets the ACT4 criterion, with one status for an HTIF word other than 1 and another for every other failure; the smoke target asserts the first, so that a decode failure does not pass for it. Its `MemoryConfig` takes `program_size` from `preprocess` and a stack that covers the 4 KiB of the linker script. The workflow's triggers gain the paths of this crate, of `jolt-rv64i-arith`, of the two protocol crates and of `jolt-program`.
 
-*ACT4, what is not shown.* No file of the repository shows how many I tests the pinned suite generates, that their ELFs, built under a configuration that declares M, A and C, execute only RV64I encodings, that their text sections hold data, or that their accesses clear the stack canary of the device layout under the backend. The first generation decides each, and each failure is visible: a wrong count, `PcOutsideProgram`, a strict-decode error, an abort.
+*ACT4, what the first generation showed.* At pinned commit `a7c99303516f4e668f7488f172043392e23b9dfd`, the first generation produced 51 I tests. All 51 executed only RV64I encodings under the data-hole mode with the configuration that declares M, A and C. Their accesses satisfied the device layout, including its stack canary checks. All 51 passed the cycle-row checker, with none failed or skipped.
 
 ### Performance
 

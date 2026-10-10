@@ -269,10 +269,36 @@ impl GroupData {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GroupColumns<'a> {
+    RunFive(usize),
+    RunEight(usize),
+    Five([usize; 5]),
+    Eight([usize; 8]),
+    General(&'a [usize]),
+}
+
+impl<'a> GroupColumns<'a> {
+    #[expect(
+        clippy::expect_used,
+        reason = "the matching length fixes the array width"
+    )]
+    fn new(columns: &'a [usize]) -> Self {
+        let contiguous = columns.windows(2).all(|pair| pair[0] + 1 == pair[1]);
+        match columns.len() {
+            5 if contiguous => Self::RunFive(columns[0]),
+            8 if contiguous => Self::RunEight(columns[0]),
+            5 => Self::Five(columns.try_into().expect("five columns")),
+            8 => Self::Eight(columns.try_into().expect("eight columns")),
+            _ => Self::General(columns),
+        }
+    }
+}
+
 struct GroupChunk<'a> {
     bytes: &'a mut [u8],
-    columns: &'a [usize],
-    optional: bool,
+    columns: &'a GroupColumns<'a>,
+    bias: u16,
 }
 
 const ROW_CHUNK: usize = 4096;
@@ -287,6 +313,299 @@ struct RowColumn {
 struct RowRun {
     columns: Range<usize>,
     cache: Range<usize>,
+    compare: fn(&[u16], &[u16]) -> bool,
+}
+
+fn compare_general(values: &[u16], expected: &[u16]) -> bool {
+    values
+        .iter()
+        .zip(expected)
+        .fold(0_u16, |bad, (a, b)| bad | (a ^ b))
+        != 0
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the row plan selects this function from the checked run width"
+)]
+fn compare_run<const N: usize>(values: &[u16], expected: &[u16]) -> bool {
+    let values: &[u16; N] = values.try_into().expect("compiled row run");
+    let expected: &[u16; N] = expected.try_into().expect("compiled cache run");
+    values
+        .iter()
+        .zip(expected)
+        .fold(0_u16, |bad, (a, b)| bad | (a ^ b))
+        != 0
+}
+
+trait Writer {
+    type Plan: Copy;
+    fn plan(&self) -> Self::Plan;
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize);
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan);
+}
+struct EmptyWriter;
+impl Writer for EmptyWriter {
+    type Plan = ();
+    fn plan(&self) {}
+    fn check(&self, &(): &(), _: usize, _: usize) {}
+    fn write(&mut self, _: &[u16], _: usize, &(): &()) {}
+}
+struct FixedWriter<'a, const N: usize> {
+    indices: [usize; N],
+    bytes: &'a mut [[u8; N]],
+    bias: u16,
+}
+impl<'a, const N: usize> FixedWriter<'a, N> {
+    #[expect(
+        clippy::expect_used,
+        reason = "chunk descriptors cover all cycles and tile ranges partition each chunk"
+    )]
+    fn new(
+        indices: [usize; N],
+        bytes: &'a mut [u8],
+        bias: u16,
+        offset: usize,
+        cycles: usize,
+    ) -> Self {
+        Self {
+            indices,
+            bytes: bytes
+                .as_chunks_mut::<N>()
+                .0
+                .get_mut(offset..offset + cycles)
+                .expect("compiled output extent"),
+            bias,
+        }
+    }
+}
+impl<const N: usize> Writer for FixedWriter<'_, N> {
+    type Plan = ([usize; N], u16);
+    #[inline(always)]
+    fn plan(&self) -> Self::Plan {
+        (self.indices, self.bias)
+    }
+    #[inline(always)]
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize) {
+        assert!(!plan.0.iter().any(|&index| index >= columns));
+        assert!(self.bytes.len() >= cycles);
+    }
+    #[inline(always)]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        for (slot, &column) in self.bytes[offset].iter_mut().zip(&plan.0) {
+            *slot = digits[column].wrapping_sub(plan.1) as u8;
+        }
+    }
+}
+struct RunWriter<'a, const N: usize> {
+    start: usize,
+    bytes: &'a mut [[u8; N]],
+    bias: u16,
+}
+impl<'a, const N: usize> RunWriter<'a, N> {
+    fn new(start: usize, bytes: &'a mut [u8], bias: u16, offset: usize, cycles: usize) -> Self {
+        let writer = FixedWriter::<N>::new([0; N], bytes, bias, offset, cycles);
+        Self {
+            start,
+            bytes: writer.bytes,
+            bias,
+        }
+    }
+}
+impl<const N: usize> Writer for RunWriter<'_, N> {
+    type Plan = (usize, u16);
+    #[inline(always)]
+    fn plan(&self) -> Self::Plan {
+        (self.start, self.bias)
+    }
+    #[inline(always)]
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize) {
+        assert!(plan.0.checked_add(N).is_some_and(|end| end <= columns));
+        assert!(self.bytes.len() >= cycles);
+    }
+    #[inline(always)]
+    #[expect(
+        clippy::expect_used,
+        reason = "run width is fixed and its extent is checked before the cycle loop"
+    )]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        let values: &[u16; N] = digits[plan.0..plan.0 + N]
+            .try_into()
+            .expect("compiled contiguous run");
+        self.bytes[offset] = (*values).map(|digit| digit.wrapping_sub(plan.1) as u8);
+    }
+}
+
+struct GeneralWriter<'a> {
+    columns: &'a [usize],
+    bytes: &'a mut [u8],
+    bias: u16,
+}
+impl<'a> GeneralWriter<'a> {
+    fn new(
+        columns: &'a [usize],
+        bytes: &'a mut [u8],
+        bias: u16,
+        offset: usize,
+        cycles: usize,
+    ) -> Self {
+        let width = columns.len();
+        Self {
+            columns,
+            bytes: &mut bytes[offset * width..(offset + cycles) * width],
+            bias,
+        }
+    }
+}
+impl<'a> Writer for GeneralWriter<'a> {
+    type Plan = (&'a [usize], u16);
+    fn plan(&self) -> Self::Plan {
+        (self.columns, self.bias)
+    }
+    fn check(&self, plan: &Self::Plan, columns: usize, _: usize) {
+        assert!(!plan.0.iter().any(|&index| index >= columns));
+    }
+    #[inline]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        let width = plan.0.len();
+        for (slot, &column) in self.bytes[offset * width..(offset + 1) * width]
+            .iter_mut()
+            .zip(plan.0)
+        {
+            *slot = digits[column].wrapping_sub(plan.1) as u8;
+        }
+    }
+}
+struct ManyWriter<'a, 'b> {
+    output: &'a mut [Option<GroupChunk<'b>>],
+    offset: usize,
+}
+impl Writer for ManyWriter<'_, '_> {
+    type Plan = ();
+    fn plan(&self) {}
+    fn check(&self, &(): &(), _: usize, _: usize) {}
+    fn write(&mut self, digits: &[u16], offset: usize, &(): &()) {
+        let offset = self.offset + offset;
+        for group in self.output.iter_mut().flatten() {
+            match *group.columns {
+                GroupColumns::RunFive(start) => {
+                    for (slot, &digit) in group.bytes[offset * 5..(offset + 1) * 5]
+                        .iter_mut()
+                        .zip(&digits[start..start + 5])
+                    {
+                        *slot = digit.wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::RunEight(start) => {
+                    for (slot, &digit) in group.bytes[offset * 8..(offset + 1) * 8]
+                        .iter_mut()
+                        .zip(&digits[start..start + 8])
+                    {
+                        *slot = digit.wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::Five(columns) => {
+                    for (slot, column) in group.bytes[offset * 5..(offset + 1) * 5]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::Eight(columns) => {
+                    for (slot, column) in group.bytes[offset * 8..(offset + 1) * 8]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::General(columns) => {
+                    let width = columns.len();
+                    for (slot, &column) in group.bytes[offset * width..(offset + 1) * width]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
+trait RowChecker {
+    fn check(&self, columns: usize, rows: usize, cache: &[u16]);
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool;
+}
+
+struct FixedRows<const A: usize, const B: usize, const WIDTH: usize> {
+    first: usize,
+    second: usize,
+}
+impl<const A: usize, const B: usize, const WIDTH: usize> RowChecker for FixedRows<A, B, WIDTH> {
+    #[inline(always)]
+    fn check(&self, columns: usize, rows: usize, cache: &[u16]) {
+        if let Some(cached_rows) = cache.len().checked_div(WIDTH) {
+            assert!(cached_rows >= rows);
+            assert!(self.first.checked_add(A).is_some_and(|end| end <= columns));
+            if B != 0 {
+                assert!(self.second.checked_add(B).is_some_and(|end| end <= columns));
+            }
+        }
+    }
+    #[inline(always)]
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool {
+        if WIDTH == 0 {
+            return false;
+        }
+        let expected = &cache.as_chunks::<WIDTH>().0[row];
+        let mut difference = if A == 1 {
+            digits[self.first] ^ expected[0]
+        } else {
+            digits[self.first..self.first + A]
+                .iter()
+                .zip(&expected[..A])
+                .fold(0_u16, |difference, (a, b)| difference | (a ^ b))
+        };
+        if B != 0 {
+            difference |= if B == 1 {
+                digits[self.second] ^ expected[A]
+            } else {
+                digits[self.second..self.second + B]
+                    .iter()
+                    .zip(&expected[A..A + B])
+                    .fold(0_u16, |difference, (a, b)| difference | (a ^ b))
+            };
+        }
+        difference != 0
+    }
+}
+
+struct GeneralRows<'a> {
+    runs: &'a [RowRun],
+    width: usize,
+}
+impl RowChecker for GeneralRows<'_> {
+    fn check(&self, _: usize, _: usize, _: &[u16]) {}
+    #[inline]
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool {
+        let cache = &cache[row * self.width..(row + 1) * self.width];
+        self.runs.iter().fold(false, |bad, run| {
+            let difference = (run.compare)(&digits[run.columns.clone()], &cache[run.cache.clone()]);
+            bad || difference
+        })
+    }
+}
+
+struct TilePass<'a> {
+    source: &'a dyn CycleSource,
+    start: usize,
+    rows: usize,
+    tile: &'a [u16],
+    maxima: &'a mut [u16; MAX_COLUMNS],
+    minima: &'a mut [u16; MAX_COLUMNS],
+    rejected: &'a mut bool,
 }
 
 struct CycleValidation<'a> {
@@ -318,48 +637,20 @@ impl CycleValidation<'_> {
             if columns == 0 {
                 rejected = (start..end).any(|cycle| source.bytecode_index(cycle) >= rows);
             } else {
-                for (offset, digits) in tile.chunks_exact(columns).enumerate() {
-                    let cycle = start + offset;
-                    let row = source.bytecode_index(cycle);
-                    if self.row_columns.is_empty() {
-                        rejected |= row >= rows;
-                    } else if let Some(cache) =
-                        self.row_cache.chunks_exact(self.row_columns.len()).nth(row)
-                    {
-                        for run in self.row_runs {
-                            for (&value, &expected) in digits[run.columns.clone()]
-                                .iter()
-                                .zip(&cache[run.cache.clone()])
-                            {
-                                rejected |= value != expected;
-                            }
-                        }
-                    } else {
-                        rejected = true;
-                    }
-                    for ((maximum, minimum), &value) in maxima[..columns]
-                        .iter_mut()
-                        .zip(&mut minima[..columns])
-                        .zip(digits)
-                    {
-                        *maximum = (*maximum).max(value);
-                        *minimum = (*minimum).min(value);
-                    }
-                    for group in output.iter_mut().flatten() {
-                        let stride = group.columns.len();
-                        let output = &mut group.bytes
-                            [(cycle - cycles.start) * stride..(cycle - cycles.start + 1) * stride];
-                        if group.optional {
-                            for (slot, &column) in output.iter_mut().zip(group.columns) {
-                                *slot = digits[column] as u8;
-                            }
-                        } else {
-                            for (slot, &column) in output.iter_mut().zip(group.columns) {
-                                *slot = digits[column].wrapping_sub(1) as u8;
-                            }
-                        }
-                    }
-                }
+                self.fast_source_tile(
+                    source,
+                    TilePass {
+                        source,
+                        start,
+                        rows,
+                        tile,
+                        maxima: &mut maxima,
+                        minima: &mut minima,
+                        rejected: &mut rejected,
+                    },
+                    output,
+                    start - cycles.start,
+                );
             }
             rejected |= maxima[..columns]
                 .iter()
@@ -374,6 +665,267 @@ impl CycleValidation<'_> {
             }
         }
         Ok(())
+    }
+
+    fn fast_source_tile<S: CycleSource>(
+        &self,
+        source: &S,
+        pass: TilePass<'_>,
+        output: &mut [Option<GroupChunk<'_>>],
+        offset: usize,
+    ) {
+        match self.row_runs {
+            [run] if run.columns.len() == 1 => self.fast_tile_rows(
+                pass,
+                output,
+                offset,
+                FixedRows::<1, 0, 1> {
+                    first: run.columns.start,
+                    second: 0,
+                },
+                source,
+            ),
+            [first, second] if first.columns.len() == 5 && second.columns.len() == 6 => self
+                .fast_tile_rows(
+                    pass,
+                    output,
+                    offset,
+                    FixedRows::<5, 6, { 5 + 6 }> {
+                        first: first.columns.start,
+                        second: second.columns.start,
+                    },
+                    source,
+                ),
+            _ => self.fast_tile(pass, output, offset),
+        }
+    }
+
+    fn fast_tile(&self, pass: TilePass<'_>, output: &mut [Option<GroupChunk<'_>>], offset: usize) {
+        let source = pass.source;
+        macro_rules! dispatch {
+            ($checker:expr) => {
+                self.fast_tile_rows(pass, output, offset, $checker, source)
+            };
+        }
+        macro_rules! pair {
+            ($first:expr, $second:expr; $($a:literal),*) => {
+                match $first.columns.len() {
+                    $($a => match $second.columns.len() {
+                        1 => dispatch!(FixedRows::<$a, 1, {$a + 1}> { first: $first.columns.start, second: $second.columns.start }),
+                        5 => dispatch!(FixedRows::<$a, 5, {$a + 5}> { first: $first.columns.start, second: $second.columns.start }),
+                        6 => dispatch!(FixedRows::<$a, 6, {$a + 6}> { first: $first.columns.start, second: $second.columns.start }),
+                        _ => dispatch!(GeneralRows { runs: self.row_runs, width: self.row_columns.len() }),
+                    },)*
+                    _ => dispatch!(GeneralRows { runs: self.row_runs, width: self.row_columns.len() }),
+                }
+            };
+        }
+        match self.row_runs {
+            [] => dispatch!(FixedRows::<0, 0, 0> {
+                first: 0,
+                second: 0
+            }),
+            [run] => match run.columns.len() {
+                1 => dispatch!(FixedRows::<1, 0, 1> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                5 => dispatch!(FixedRows::<5, 0, 5> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                6 => dispatch!(FixedRows::<6, 0, 6> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                _ => dispatch!(GeneralRows {
+                    runs: self.row_runs,
+                    width: self.row_columns.len()
+                }),
+            },
+            [first, second] => {
+                pair!(first, second; 1, 5, 6);
+            }
+            _ => dispatch!(GeneralRows {
+                runs: self.row_runs,
+                width: self.row_columns.len()
+            }),
+        }
+    }
+
+    fn fast_tile_rows<R: RowChecker, S: CycleSource + ?Sized>(
+        &self,
+        pass: TilePass<'_>,
+        output: &mut [Option<GroupChunk<'_>>],
+        offset: usize,
+        checker: R,
+        source: &S,
+    ) {
+        macro_rules! tails {
+            ($a:expr, $b:expr, $c:expr; $($tail:literal),*) => {
+                match self.bounds.len() % 16 {
+                    $($tail => self.healthy::<$tail, _, _, _, _, _>(source, pass.start, pass.rows, pass.tile, pass.maxima, pass.minima, pass.rejected, $a, $b, $c, checker),)*
+                    _ => unreachable!("remainder is below sixteen"),
+                }
+            };
+            ($a:expr, $b:expr, $c:expr) => {
+                tails!($a, $b, $c; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+            };
+        }
+        macro_rules! writer {
+            ($group:expr, $name:ident, $body:block) => {{
+                let group = $group;
+                match group.map(|g| (*g.columns, &mut *g.bytes, g.bias)) {
+                    None => {
+                        let $name = EmptyWriter;
+                        $body
+                    }
+                    Some((GroupColumns::RunFive(start), bytes, bias)) => {
+                        let $name = RunWriter::<5>::new(
+                            start,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::RunEight(start), bytes, bias)) => {
+                        let $name = RunWriter::<8>::new(
+                            start,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::Five(indices), bytes, bias)) => {
+                        let $name = FixedWriter::<5>::new(
+                            indices,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::Eight(indices), bytes, bias)) => {
+                        let $name = FixedWriter::<8>::new(
+                            indices,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::General(columns), bytes, bias)) => {
+                        let $name = GeneralWriter::new(
+                            columns,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                }
+            }};
+        }
+        if output.len() <= 3 {
+            let mut groups = output.iter_mut();
+            writer!(groups.next().and_then(Option::as_mut), a, {
+                writer!(groups.next().and_then(Option::as_mut), b, {
+                    writer!(groups.next().and_then(Option::as_mut), c, {
+                        tails!(a, b, c);
+                    });
+                });
+            });
+        } else {
+            let a = ManyWriter { output, offset };
+            tails!(a, EmptyWriter, EmptyWriter);
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "tail dispatch fixes the conversion widths before the cycle loop"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "separate slice references preserve LLVM noalias for the vectorized accumulator loop"
+    )]
+    fn healthy<
+        const TAIL: usize,
+        A: Writer,
+        B: Writer,
+        C: Writer,
+        R: RowChecker,
+        S: CycleSource + ?Sized,
+    >(
+        &self,
+        source: &S,
+        start: usize,
+        rows: usize,
+        tile: &[u16],
+        maxima: &mut [u16; MAX_COLUMNS],
+        minima: &mut [u16; MAX_COLUMNS],
+        rejected: &mut bool,
+        mut a: A,
+        mut b: B,
+        mut c: C,
+        checker: R,
+    ) {
+        let columns = self.bounds.len();
+        let prefix = columns - TAIL;
+        let (max_prefix, max_tail) = maxima[..columns].split_at_mut(prefix);
+        let (min_prefix, min_tail) = minima[..columns].split_at_mut(prefix);
+        let max_tail: &mut [u16; TAIL] = max_tail.try_into().expect("compiled tail width");
+        let min_tail: &mut [u16; TAIL] = min_tail.try_into().expect("compiled tail width");
+        let max_prefix = max_prefix.as_chunks_mut::<16>().0;
+        let min_prefix = min_prefix.as_chunks_mut::<16>().0;
+        let tile_cycles = tile.len() / columns;
+        // Local copies keep source calls and output writes from invalidating
+        // the index checks made before this loop.
+        let a_plan = a.plan();
+        let b_plan = b.plan();
+        let c_plan = c.plan();
+        a.check(&a_plan, columns, tile_cycles);
+        b.check(&b_plan, columns, tile_cycles);
+        c.check(&c_plan, columns, tile_cycles);
+        checker.check(columns, rows, self.row_cache);
+        for (offset, digits) in (0..tile_cycles).zip(tile.chunks_exact(columns)) {
+            let row = source.bytecode_index(start + offset);
+            if row >= rows {
+                *rejected = true;
+            } else {
+                *rejected |= checker.compare(row, digits, self.row_cache);
+            }
+            let (values, tail) = digits.split_at(prefix);
+            for ((maximum, minimum), values) in max_prefix
+                .iter_mut()
+                .zip(min_prefix.iter_mut())
+                .zip(values.as_chunks::<16>().0)
+            {
+                for ((maximum, minimum), &value) in
+                    maximum.iter_mut().zip(minimum.iter_mut()).zip(values)
+                {
+                    *maximum = (*maximum).max(value);
+                    *minimum = (*minimum).min(value);
+                }
+            }
+            let tail: &[u16; TAIL] = tail.try_into().expect("compiled tail width");
+            for ((maximum, minimum), &value) in
+                max_tail.iter_mut().zip(min_tail.iter_mut()).zip(tail)
+            {
+                *maximum = (*maximum).max(value);
+                *minimum = (*minimum).min(value);
+            }
+            a.write(digits, offset, &a_plan);
+            b.write(digits, offset, &b_plan);
+            c.write(digits, offset, &c_plan);
+        }
     }
 
     #[cold]
@@ -463,7 +1015,9 @@ impl<S: CycleSource> ValidatedTrace<S> {
     /// Validates once and writes requested byte groups in that same parallel
     /// walk. Request columns and widths are rejected before any digit read.
     /// Group buffers have exactly `cycles * columns` bytes; row caches and
-    /// chunk descriptors are temporary, with no allocation per chunk.
+    /// chunk descriptors are temporary, with no allocation per chunk. Group
+    /// indices and row runs are compiled before the cycle walk; fixed-width
+    /// writers and comparisons are selected outside its cycle loop.
     /// At most 128 digit columns of at most 15 bits are accepted. Each active
     /// worker uses an 8 KiB stack tile and two 256-byte column accumulators.
     pub fn prepare(
@@ -580,8 +1134,17 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 row_runs.push(RowRun {
                     columns: row.column..row.column + 1,
                     cache: position..position + 1,
+                    compare: compare_general,
                 });
             }
+        }
+        for run in &mut row_runs {
+            run.compare = match run.columns.len() {
+                1 => compare_run::<1>,
+                5 => compare_run::<5>,
+                6 => compare_run::<6>,
+                _ => compare_general,
+            };
         }
         let validation = CycleValidation {
             bounds: &bounds,
@@ -619,30 +1182,39 @@ impl<S: CycleSource> ValidatedTrace<S> {
             check_validation_size::<Option<GroupChunk<'_>>>(len, "group chunk metadata")?;
             let mut chunks: Vec<Option<GroupChunk<'_>>> =
                 std::iter::repeat_with(|| None).take(len).collect();
-            let mut group_index = 0;
-            for (group, optional) in groups
+            let views: Vec<_> = groups
                 .present
                 .iter_mut()
-                .map(|group| (&mut group.0, false))
-                .chain(groups.optional.iter_mut().map(|group| (&mut group.0, true)))
+                .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], false))
+                .chain(
+                    groups
+                        .optional
+                        .iter_mut()
+                        .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], true)),
+                )
+                .filter(|(columns, _, _)| !columns.is_empty())
+                .collect();
+            check_validation_size::<GroupColumns<'_>>(views.len(), "group plans")?;
+            let plans: Vec<_> = views
+                .iter()
+                .map(|(columns, _, _)| GroupColumns::new(columns))
+                .collect();
+            for (group_index, ((columns, bytes, optional), plan)) in
+                views.into_iter().zip(&plans).enumerate()
             {
-                let stride = group.columns.len();
-                if stride == 0 {
-                    continue;
-                }
+                let stride = columns.len();
                 for (slot, bytes) in chunks
                     .iter_mut()
                     .skip(group_index)
                     .step_by(group_count)
-                    .zip(group.bytes.chunks_mut(geometry.chunk_len() * stride))
+                    .zip(bytes.chunks_mut(geometry.chunk_len() * stride))
                 {
                     *slot = Some(GroupChunk {
                         bytes,
-                        columns: &group.columns,
-                        optional,
+                        columns: plan,
+                        bias: u16::from(!optional),
                     });
                 }
-                group_index += 1;
             }
             chunks
                 .par_chunks_mut(group_count)

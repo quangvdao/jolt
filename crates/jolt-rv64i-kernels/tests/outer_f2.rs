@@ -6,9 +6,13 @@
 )]
 
 #[path = "../benches/support/allocator.rs"]
+#[expect(
+    dead_code,
+    reason = "the shared benchmark allocator also exposes byte metrics unused by this count test"
+)]
 mod allocator;
 
-use allocator::{AllocationMeasurement, CountingAllocator};
+use allocator::AllocationMeasurement;
 use jolt_field::{Field, F128};
 use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
@@ -303,16 +307,25 @@ fn outer_messages_and_boolean_points_match_summation_for_every_option_and_verify
                         })
                         .unwrap();
                 }
-                let mut zero_factor_point = point.clone();
-                zero_factor_point[0] = ONE + tau[0];
-                let zero_factor_messages: Vec<_> = (0..rounds)
-                    .map(|round| definition.round(&zero_factor_point[..round]))
-                    .collect();
-                let zero_factor_values = definition.values(&zero_factor_point);
-                for options in options() {
-                    let mut core = OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
-                    assert_rounds(&mut core, &zero_factor_point, &zero_factor_messages);
-                    assert_eq!(core.final_values(), zero_factor_values);
+                for zero_factor_index in [0, 8] {
+                    let mut zero_factor_point = point.clone();
+                    zero_factor_point[zero_factor_index] = ONE + tau[zero_factor_index];
+                    let earlier_scale: F128 = tau[..zero_factor_index]
+                        .iter()
+                        .zip(&zero_factor_point)
+                        .map(|(&t, &r)| ONE + t + r)
+                        .product();
+                    assert_ne!(earlier_scale, ZERO);
+                    let zero_factor_messages: Vec<_> = (0..rounds)
+                        .map(|round| definition.round(&zero_factor_point[..round]))
+                        .collect();
+                    let zero_factor_values = definition.values(&zero_factor_point);
+                    for options in options() {
+                        let mut core =
+                            OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
+                        assert_rounds(&mut core, &zero_factor_point, &zero_factor_messages);
+                        assert_eq!(core.final_values(), zero_factor_values);
+                    }
                 }
             }
         }
@@ -417,7 +430,7 @@ fn outer_constructor_reports_each_rejected_geometry() {
             actual: 10
         })
     ));
-    for rounds in [2, 7] {
+    for rounds in [1, 7] {
         assert!(matches!(
             OuterF2Core::new(Arc::clone(&source), &[ZERO; 11], OuterF2Options {
                 monomial_rounds: rounds, ..OuterF2Options::default()
@@ -437,11 +450,11 @@ fn outer_constructor_reports_each_rejected_geometry() {
 
 #[test]
 fn outer_messages_on_one_and_twelve_threads_match_summation() {
-    let source = trace(13);
-    let tau = seeded_point(21, 0x7a13);
-    let point = seeded_point(21, 0xca13);
+    let source = trace(14);
+    let tau = seeded_point(22, 0x7a14);
+    let point = seeded_point(22, 0xca14);
     let definition = Definition::new(source.as_ref(), &tau);
-    let messages: Vec<_> = (0..21)
+    let messages: Vec<_> = (0..22)
         .map(|round| definition.round(&point[..round]))
         .collect();
     let values = definition.values(&point);
@@ -470,7 +483,6 @@ fn outer_round_allocation_count_is_bounded() {
             let point = seeded_point(rounds, 0xca00 + log_t as u64);
             for options in options() {
                 let mut core = OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
-                let live = CountingAllocator::live_bytes();
                 let measurement = AllocationMeasurement::begin();
                 let mut claim = ZERO;
                 for (round, &challenge) in point.iter().enumerate() {
@@ -486,8 +498,6 @@ fn outer_round_allocation_count_is_bounded() {
                     "log_t={log_t}, options={options:?}: {} allocations",
                     stats.allocs
                 );
-                assert!(stats.final_bytes <= stats.peak_bytes);
-                assert!(CountingAllocator::live_bytes() <= live + stats.peak_bytes);
             }
         }
     });

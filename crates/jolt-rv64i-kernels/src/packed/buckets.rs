@@ -94,13 +94,7 @@ macro_rules! buckets {
                     position,
                     positions: self.positions.len(),
                 })?;
-                Ok(std::array::from_fn(|bit| {
-                    bucket
-                        .iter()
-                        .enumerate()
-                        .filter(|(value, _)| value & (1 << bit) != 0)
-                        .fold(F128::from_raw(0), |sum, (_, &e)| sum + e)
-                }))
+                Ok(std::array::from_fn(|bit| bit_sum(bucket, bit)))
             }
 
             /// Returns one bit's sum, rejecting a bit outside the value width.
@@ -108,7 +102,11 @@ macro_rules! buckets {
                 if bit >= $bits {
                     return Err(BucketError::Bit { bit, bits: $bits });
                 }
-                Ok(self.bits(position)?[bit])
+                let bucket = self.positions.get(position).ok_or(BucketError::Position {
+                    position,
+                    positions: self.positions.len(),
+                })?;
+                Ok(bit_sum(bucket, bit))
             }
 
             /// XOR of every value bucket at a position, including value zero.
@@ -175,4 +173,13 @@ impl<'a> DigitHistogram<'a> {
     pub fn sums(&self) -> &[F128] {
         self.sums
     }
+}
+
+fn bit_sum(bucket: &[F128], bit: usize) -> F128 {
+    let half = 1 << bit;
+    bucket
+        .chunks_exact(2 * half)
+        .flat_map(|period| &period[half..])
+        .copied()
+        .fold(F128::from_raw(0), |sum, e| sum + e)
 }

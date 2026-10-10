@@ -1,6 +1,7 @@
 //! Shared packed inputs for sum-check kernels. Digits are absent or smaller than
 //! `2^bits(column)`; a row-based column is a function of the bytecode row alone.
 
+use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -246,5 +247,23 @@ impl<S: CycleSource> DigitColumns<S> {
     #[inline]
     pub fn index_bound(&self, column: usize) -> Option<usize> {
         self.columns.get(column).map(|&c| 1 << self.trace.widths[c])
+    }
+}
+
+impl<S: CycleSource> ChunkIndexSource for DigitColumns<S> {
+    fn num_polys(&self) -> usize {
+        self.num_polys()
+    }
+
+    fn cycles(&self) -> usize {
+        self.cycles()
+    }
+
+    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
+        self.index(column, cycle)
+    }
+
+    fn index_bound(&self, column: usize) -> Option<usize> {
+        self.index_bound(column)
     }
 }

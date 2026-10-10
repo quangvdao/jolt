@@ -355,6 +355,7 @@ pub struct FoldOutput {
 )]
 #[inline]
 fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
+    // word_total reads only the first position; read_word ignores zero-valued buckets.
     if bytes {
         let storage: &mut [F128; BucketPlacement::Byte.word_entries()] =
             storage.try_into().expect("whole byte word");
@@ -363,6 +364,9 @@ fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
             storage[base + (word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] +=
                 weight;
             word >>= ByteBuckets::BITS_PER_POSITION;
+            if word == 0 {
+                break;
+            }
         }
     } else {
         let mut buckets = NibbleBuckets::new(&mut storage[..NibbleBuckets::ELEMENTS_PER_WORD])
@@ -370,6 +374,9 @@ fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
         for position in buckets.positions_mut() {
             position[(word & (NibbleBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
             word >>= NibbleBuckets::BITS_PER_POSITION;
+            if word == 0 {
+                break;
+            }
         }
     }
 }

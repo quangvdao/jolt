@@ -9,7 +9,7 @@ use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_verifier::ids::{
     DerivedId, OpeningId, OutputCheckDerived, ReadCheckingDerived, RelationId, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, lift};
+use jolt_rv64i_verifier::points::{eq_index, WordLift};
 use jolt_rv64i_verifier::public::io::word_at;
 use jolt_rv64i_verifier::stages::stage4::{
     ram_output_check::RamOutputCheck, ram_read_checking::RamReadChecking,
@@ -147,7 +147,8 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
         inputs: ProverInputs<'_, F128, RamOutputCheck<F128>>,
     ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RamOutputCheck<F128>>>, KernelError<F128>>
     {
-        let final_ram = views::ram_val_final(witness, inputs.relation.r_bit()).map_err(geometry)?;
+        let lift = WordLift::new(inputs.relation.r_bit()).map_err(geometry)?;
+        let final_ram = views::ram_val_final_with_lift(witness, &lift).map_err(geometry)?;
         let count = final_ram.len();
         let openings = [(
             OpeningId::virtual_polynomial(
@@ -169,9 +170,7 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
                 ))
             })
             .collect();
-        let values = (0..count)
-            .map(|k| lift(word_at(io, k), inputs.relation.r_bit()).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = (0..count).map(|k| lift.evaluate(word_at(io, k))).collect();
         let derived: BTreeMap<_, _> = [
             (
                 DerivedId::RamOutputCheck(OutputCheckDerived::EqTau),

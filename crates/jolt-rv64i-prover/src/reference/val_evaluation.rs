@@ -17,9 +17,21 @@ use jolt_rv64i_verifier::{
         CommittedPolynomial, DerivedId, OpeningId, RelationId, ValEvaluationDerived,
         VirtualPolynomial,
     },
-    points,
+    points::{self, PointsError},
 };
 use std::collections::BTreeMap;
+
+fn less_than_table(point: &[F128], cycles: usize) -> Result<Vec<F128>, PointsError> {
+    let mut vertex = vec![F128::from_u64(0); point.len()];
+    let mut values = Vec::with_capacity(cycles);
+    for cycle in 0..cycles {
+        for (bit, coordinate) in vertex.iter_mut().enumerate() {
+            *coordinate = F128::from_u64(((cycle >> bit) & 1) as u64);
+        }
+        values.push(points::lt(&vertex, point)?);
+    }
+    Ok(values)
+}
 
 #[derive(Default)]
 pub struct RegistersValEvaluationPrepare;
@@ -60,16 +72,11 @@ impl PrepareKernel<F128, RegistersValEvaluation<F128>, Rv64iPlane>
                 views::inc(witness, relation.r_bit()).map_err(geometry_error)?,
             ),
         ]);
-        let weights = (0..witness.bits.len())
-            .map(|j| {
-                let point: Vec<_> = (0..relation.r_4().len())
-                    .map(|i| F128::from_u64(((j >> i) & 1) as u64))
-                    .collect();
-                points::lt(&point, relation.r_4()).map_err(|error| KernelError::InvalidGeometry {
-                    reason: error.to_string(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let weights = less_than_table(relation.r_4(), witness.bits.len()).map_err(|error| {
+            KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            }
+        })?;
         let derived = BTreeMap::from([(
             DerivedId::RegistersValEvaluation(ValEvaluationDerived::Lt),
             Polynomial::new(weights),
@@ -116,16 +123,11 @@ impl PrepareKernel<F128, RamValEvaluation<F128>, Rv64iPlane> for RamValEvaluatio
                 views::inc(witness, relation.r_bit()).map_err(geometry_error)?,
             ),
         ]);
-        let weights = (0..witness.bits.len())
-            .map(|j| {
-                let point: Vec<_> = (0..relation.r_4().len())
-                    .map(|i| F128::from_u64(((j >> i) & 1) as u64))
-                    .collect();
-                points::lt(&point, relation.r_4()).map_err(|error| KernelError::InvalidGeometry {
-                    reason: error.to_string(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let weights = less_than_table(relation.r_4(), witness.bits.len()).map_err(|error| {
+            KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            }
+        })?;
         let derived = BTreeMap::from([(
             DerivedId::RamValEvaluation(ValEvaluationDerived::Lt),
             Polynomial::new(weights),

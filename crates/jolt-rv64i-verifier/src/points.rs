@@ -67,7 +67,7 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
 }
 
 /// Allocates one equality table in low-variable-first index order, expanding it
-/// serially with `2^n - 2` multiplications. Rejects dimensions that cannot be
+/// serially with `2^n - 2` multiplications for a nonempty point. Rejects dimensions that cannot be
 /// shifted on this host before allocating.
 #[expect(
     clippy::indexing_slicing,
@@ -199,29 +199,50 @@ pub fn chunk<F: JoltField>(
     point: &[F],
     columns: &[F],
 ) -> Result<F, PointsError> {
-    let expected = usize::from(descriptor.bits());
-    if point.len() != expected {
-        return Err(PointsError::Dimension {
-            expected,
-            actual: point.len(),
-        });
+    ChunkWeights::new(descriptor, point)?.evaluate(columns)
+}
+
+/// Prepared digit weights shared by a pass over stored chunk indicators.
+pub struct ChunkWeights<F: JoltField> {
+    descriptor: Chunk,
+    weights: Vec<F>,
+}
+
+impl<F: JoltField> ChunkWeights<F> {
+    /// Checks the digit width before building its equality table.
+    pub fn new(descriptor: Chunk, point: &[F]) -> Result<Self, PointsError> {
+        let expected = usize::from(descriptor.bits());
+        if point.len() != expected {
+            return Err(PointsError::Dimension {
+                expected,
+                actual: point.len(),
+            });
+        }
+        Ok(Self {
+            descriptor,
+            weights: eq_table(point)?,
+        })
     }
-    let weights = eq_table(point)?;
-    let zero = weights.first().copied().ok_or(PointsError::Index {
-        index: 0,
-        variables: expected,
-    })?;
-    (1..=descriptor.indicators()).try_fold(zero, |sum, digit| {
-        let column = usize::from(descriptor.start()) + digit - 1;
-        let value = columns
-            .get(column)
-            .ok_or(PointsError::MissingColumn { column })?;
-        let weight = weights.get(digit).copied().ok_or(PointsError::Index {
-            index: digit,
-            variables: expected,
+
+    /// Reconstructs digit zero from the stored indicators; missing columns return an error.
+    pub fn evaluate(&self, columns: &[F]) -> Result<F, PointsError> {
+        let variables = usize::from(self.descriptor.bits());
+        let zero = self.weights.first().copied().ok_or(PointsError::Index {
+            index: 0,
+            variables,
         })?;
-        Ok(sum + (weight + zero) * *value)
-    })
+        (1..=self.descriptor.indicators()).try_fold(zero, |sum, digit| {
+            let column = usize::from(self.descriptor.start()) + digit - 1;
+            let value = columns
+                .get(column)
+                .ok_or(PointsError::MissingColumn { column })?;
+            let weight = self.weights.get(digit).copied().ok_or(PointsError::Index {
+                index: digit,
+                variables,
+            })?;
+            Ok(sum + (weight + zero) * *value)
+        })
+    }
 }
 
 #[cfg(test)]

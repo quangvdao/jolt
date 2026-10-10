@@ -7,7 +7,7 @@
 #[path = "../benches/support/allocator.rs"]
 mod allocator;
 
-use allocator::AllocationMeasurement;
+use allocator::{AllocationMeasurement, CountingAllocator};
 use jolt_field::{Field, F128};
 use jolt_rv64i_kernels::column_pass::{column_pass, ColumnPassError};
 use jolt_rv64i_kernels::oracle::mle_at;
@@ -68,30 +68,35 @@ fn malformed_cycle_point_length_is_rejected() {
 #[test]
 fn scratch_is_bounded_and_released_on_return() {
     for (threads, log_t) in [(1, 8), (1, 14), (12, 14)] {
-        let pool = ThreadPoolBuilder::new()
+        ThreadPoolBuilder::new()
             .num_threads(threads)
-            .build()
+            .build_scoped(
+                |thread| thread.run(),
+                |pool| {
+                    let _ = pool.broadcast(|_| ());
+                    let trace = pool
+                        .install(|| SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0xc011))
+                        .unwrap();
+                    let point = vec![F128::from_raw(0x713); log_t];
+                    let _ = pool.install(|| column_pass(trace.rows(), &point).unwrap());
+                    // The worker invocation must return before checking release;
+                    // Rayon frees completed scheduling jobs after their bodies return.
+                    let baseline = CountingAllocator::live_bytes();
+                    let measurement = AllocationMeasurement::begin();
+                    let columns = pool.install(|| column_pass(trace.rows(), &point).unwrap());
+                    let stats = measurement.finish();
+                    assert_eq!(columns.len(), 256);
+                    assert!(stats.allocs <= 256, "{} allocations", stats.allocs);
+                    let allowance = 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16;
+                    assert!(
+                        stats.peak_bytes <= allowance,
+                        "{} peak bytes",
+                        stats.peak_bytes
+                    );
+                    assert_eq!(stats.final_bytes, 0);
+                    assert_eq!(CountingAllocator::live_bytes(), baseline);
+                },
+            )
             .unwrap();
-        let _ = pool.broadcast(|_| ());
-        let trace = pool
-            .install(|| SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0xc011))
-            .unwrap();
-        let point = vec![F128::from_raw(0x713); log_t];
-        pool.install(|| {
-            let baseline = allocator::CountingAllocator::live_bytes();
-            let measurement = AllocationMeasurement::begin();
-            let columns = column_pass(trace.rows(), &point).unwrap();
-            let stats = measurement.finish();
-            assert_eq!(columns.len(), 256);
-            assert!(stats.allocs <= 256, "{} allocations", stats.allocs);
-            let allowance = 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16;
-            assert!(
-                stats.peak_bytes <= allowance,
-                "{} peak bytes",
-                stats.peak_bytes
-            );
-            assert_eq!(stats.final_bytes, 0);
-            assert_eq!(allocator::CountingAllocator::live_bytes(), baseline);
-        });
     }
 }

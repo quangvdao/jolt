@@ -67,8 +67,11 @@ impl Prepared {
                 for (block, &high) in rows.chunks_exact(block_len).zip(high) {
                     for (row, &low) in block.iter().zip(&self.low) {
                         let e = low * high;
-                        let positions = buckets.positions_mut();
-                        for (&word, positions) in row.iter().zip(positions.chunks_exact_mut(8)) {
+                        let positions: &mut [[F128; 256]; 32] = buckets
+                            .positions_mut()
+                            .try_into()
+                            .expect("fixed 32-position layout");
+                        for (&word, positions) in row.iter().zip(positions.as_chunks_mut::<8>().0) {
                             for (value, bucket) in word.to_le_bytes().into_iter().zip(positions) {
                                 bucket[usize::from(value)] += e;
                             }

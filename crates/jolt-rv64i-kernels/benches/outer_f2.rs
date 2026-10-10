@@ -107,7 +107,7 @@ impl Reports {
                 );
             }
             report(
-                &format!("{prefix}/materialisation_groups"),
+                &format!("{prefix}/materialisation_row7_bind"),
                 samples
                     .iter()
                     .map(|sample| sample.times[6] + sample.times[7])
@@ -116,7 +116,7 @@ impl Reports {
                 Some(37.21),
             );
             report(
-                &format!("{prefix}/cycles"),
+                &format!("{prefix}/row8_bind_cycles"),
                 samples
                     .iter()
                     .map(|sample| sample.times[8..8 + log_t].iter().sum::<u128>() + sample.finish)
@@ -184,11 +184,22 @@ fn main() -> Result<(), RunnerError> {
         return Comparison::parse()?.run();
     }
     println!(
-        "outer_f2/local loaded_machine=true threshold_1_thread_ns=268 threshold_12_threads_log22_ns=28 model_point1_ns=214.3 model_point2_ns=173.9 tail_histogram_in_round1=true materialisation_in_round7=true"
+        "outer_f2/local loaded_machine=true threshold_1_thread_ns=268 threshold_12_threads_log22_ns=28 model_point1_ns=214.3 model_point2_ns=173.9 tail_histogram_in_round1=true materialisation_in_round7=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true"
     );
     let default = OuterF2Options::default();
     let variants = [
         ("outer_f2", default),
+        (
+            if default.monomial_rounds == 3 {
+                "outer_f2/monomial_rounds2"
+            } else {
+                "outer_f2/monomial_rounds3"
+            },
+            OuterF2Options {
+                monomial_rounds: if default.monomial_rounds == 3 { 2 } else { 3 },
+                ..default
+            },
+        ),
         (
             "outer_f2/nibble_round_2",
             OuterF2Options {
@@ -344,7 +355,7 @@ impl Comparison {
         reason = "paired order and phase attribution are benchmark output"
     )]
     fn run(&self) -> Result<(), RunnerError> {
-        println!("outer_f2/compare_monomial loaded_machine=true folded_group_weights=true nibble_round_2=false alternating_sample_order=true samples={} histogram_in_round1=true materialisation_in_round7=true cycle_model_includes_final_row_bind=true", self.samples);
+        println!("outer_f2/compare_monomial loaded_machine=true folded_group_weights=true nibble_round_2=false alternating_sample_order=true samples={} histogram_in_round1=true materialisation_in_round7=true cycle_model_includes_final_row_bind=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true", self.samples);
         let pools = self
             .threads
             .iter()

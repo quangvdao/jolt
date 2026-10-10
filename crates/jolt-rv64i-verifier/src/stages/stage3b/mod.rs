@@ -16,6 +16,7 @@ pub use router_cycle::{
     RouterCycleShift, RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims,
     RouterCycleVariant, RouterCycleVariantInputClaims, RouterCycleVariantOutputClaims,
 };
+use std::sync::Arc;
 
 /// Generated member order and low-variable-first geometry of this batch.
 #[derive(SumcheckBatch)]
@@ -31,12 +32,14 @@ impl<F: JoltField> Stage3bSumchecks<F> {
     /// Checks the seventeen short slots `x` and the cycle point `r_1` from stage 1.
     /// Every member binds cycle variables low first; invalid dimensions return `PointsError`.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        let r_1 = Arc::new(r_1);
+        let x = Arc::new(x);
         Ok(Self {
-            variant: RouterCycleVariant::new(layout, r_1.clone(), x.clone())?,
-            shift: RouterCycleShift::new(layout, r_1.clone(), x.clone())?,
-            memory: RouterCycleMemory::new(layout, r_1.clone(), x.clone())?,
-            compare: RouterCycleCompare::new(layout, r_1.clone(), x.clone())?,
-            branch: RouterCycleBranch::new(layout, r_1, x)?,
+            variant: RouterCycleVariant::new_shared(layout, Arc::clone(&r_1), Arc::clone(&x))?,
+            shift: RouterCycleShift::new_shared(layout, Arc::clone(&r_1), Arc::clone(&x))?,
+            memory: RouterCycleMemory::new_shared(layout, Arc::clone(&r_1), Arc::clone(&x))?,
+            compare: RouterCycleCompare::new_shared(layout, Arc::clone(&r_1), Arc::clone(&x))?,
+            branch: RouterCycleBranch::new_shared(layout, r_1, x)?,
         })
     }
     pub fn input_points(&self) -> Result<Stage3bInputPoints<F>, PointsError> {

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
@@ -28,14 +29,19 @@ use crate::public::routes;
 
 #[derive(Clone)]
 struct CycleGeometry<F: JoltField> {
-    r_1: Vec<F>,
-    x: Vec<F>,
+    r_1: Arc<Vec<F>>,
+    x: Arc<Vec<F>>,
     word_slots: [F; 8],
     one_slot: F,
 }
 
 impl<F: JoltField> CycleGeometry<F> {
-    fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>, router: Router) -> Result<Self, PointsError> {
+    fn new(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+        router: Router,
+    ) -> Result<Self, PointsError> {
         if x.len() != 17 {
             return Err(PointsError::Dimension {
                 expected: 17,
@@ -183,6 +189,13 @@ impl<F: JoltField> RouterCycleVariant<F> {
     /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
     /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         let symbolic = RouterCycleVariantSymbolic::new(r_1.len());
         Ok(Self {
             symbolic,
@@ -266,6 +279,13 @@ impl<F: JoltField> RouterCycleShift<F> {
     /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
     /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         let symbolic = RouterCycleShiftSymbolic::new(r_1.len());
         Ok(Self {
             symbolic,
@@ -352,6 +372,13 @@ impl<F: JoltField> RouterCycleMemory<F> {
     /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
     /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         let symbolic = RouterCycleMemorySymbolic::new(r_1.len());
         Ok(Self {
             symbolic,
@@ -444,6 +471,13 @@ impl<F: JoltField> RouterCycleCompare<F> {
     /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
     /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         let symbolic = RouterCycleCompareSymbolic::new(r_1.len());
         Ok(Self {
             symbolic,
@@ -565,6 +599,13 @@ impl<F: JoltField> RouterCycleBranch<F> {
     /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
     /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         let symbolic = RouterCycleBranchSymbolic::new(r_1.len());
         Ok(Self {
             symbolic,

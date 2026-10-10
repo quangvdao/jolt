@@ -201,8 +201,8 @@ impl<S: LaneSource> OuterF2Core<S> {
                 .then(|| ScratchPool::new(64))
                 .transpose()?;
             macro_rules! pass {
-                ($k:literal, $n:literal, $tables:literal) => {
-                    form.pass::<$k, AT_ONE, $n, $tables, S>(
+                ($k:literal, $n:literal, $tables:literal, $count:literal, $squared:literal) => {
+                    form.pass::<$k, AT_ONE, $n, $tables, $count, $squared, S>(
                         &*self.source,
                         self.chunks,
                         &self.lo,
@@ -212,13 +212,13 @@ impl<S: LaneSource> OuterF2Core<S> {
                 };
             }
             let sums = match k {
-                0 => pass!(0, 256, 4),
-                1 if self.options.nibble_round_2 => pass!(1, 16, 4),
-                1 => pass!(1, 256, 2),
-                2 => pass!(2, 16, 2),
-                3 => pass!(3, 16, 1),
-                4 => pass!(4, 4, 1),
-                _ => pass!(5, 2, 1),
+                0 => pass!(0, 256, 4, 1, 0),
+                1 if self.options.nibble_round_2 => pass!(1, 16, 4, 3, 1),
+                1 => pass!(1, 256, 2, 3, 1),
+                2 => pass!(2, 16, 2, 9, 5),
+                3 => pass!(3, 16, 1, 27, 19),
+                4 => pass!(4, 4, 1, 81, 65),
+                _ => pass!(5, 2, 1, 243, 211),
             };
             if let Some(pool) = pool {
                 self.histogram.copy_from_slice(&pool.merge()?);
@@ -319,8 +319,9 @@ impl<S: LaneSource> OuterF2Core<S> {
         let weights = eq_table(&self.point, None);
         let lift = WordLift::new(&std::array::from_fn(|index| weights[index]));
         self.tail_values = std::array::from_fn(|byte| self.tail_at(byte));
-        self.groups =
-            std::array::from_fn(|_| std::array::from_fn(|_| unsafe_allocate_zero_vec(self.chunks.len())));
+        self.groups = std::array::from_fn(|_| {
+            std::array::from_fn(|_| unsafe_allocate_zero_vec(self.chunks.len()))
+        });
         self.tail = vec![0; self.chunks.len()];
         let [group0, group1] = &mut self.groups;
         let [a0, b0, c0] = group0;

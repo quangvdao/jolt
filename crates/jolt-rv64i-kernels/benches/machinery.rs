@@ -13,6 +13,7 @@ use jolt_rv64i_kernels::packed::buckets::{BucketError, NibbleBuckets};
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
+use jolt_rv64i_kernels::router::fold::FoldLayout;
 use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
@@ -22,11 +23,10 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 use support::allocator::CountingAllocator;
-use support::fold_layout::FoldLayout;
 use support::{run_machinery, MachineryKernel, RunnerError};
 use thiserror::Error;
 
-const FOLD: FoldLayout = FoldLayout::new(0);
+static FOLD: FoldLayout = FoldLayout::calibration(0);
 const LAYOUT: usize = FOLD.entries();
 const CHUNK: usize = 4096;
 

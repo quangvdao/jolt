@@ -10,7 +10,6 @@
 pub mod allocator;
 pub mod arithmetic;
 pub mod example;
-pub mod fold_layout;
 pub mod word;
 
 use std::error::Error as StdError;

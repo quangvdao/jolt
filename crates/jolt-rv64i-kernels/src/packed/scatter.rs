@@ -79,7 +79,9 @@ pub struct ScatterPlan<S: CycleSource> {
 }
 
 impl<S: CycleSource> ScatterPlan<S> {
-    /// Count and place destinations in [`CycleChunks`] at round zero.
+    /// Count and place destinations in parallel over [`CycleChunks`] at round
+    /// zero, independently of the thread count. Each chunk owns disjoint slot
+    /// and row-offset slices; only one prefix array per chunk is temporary.
     /// Rejects more than 2^24 rows or chunks longer than 2^16 cycles before
     /// allocation. One row and fewer than 256 rows use one-row ranges.
     #[expect(
@@ -117,27 +119,44 @@ impl<S: CycleSource> ScatterPlan<S> {
         let mut slots = vec![0_u16; cycles];
         let mut row_offsets = vec![0_u16; cycles];
         let mut segments = vec![Segment::default(); chunks * RANGES];
-        for chunk in 0..chunks {
-            let start = chunk * chunk_len;
-            let mut counts = [0_u32; RANGES];
-            for cycle in start..start + chunk_len {
-                counts[source.bytecode_index(cycle) >> range_shift] += 1;
-            }
-            let mut cursors = [0_u32; RANGES];
-            let mut next = 0_u32;
-            for (range, &len) in counts.iter().enumerate() {
-                segments[range * chunks + chunk] = Segment { start: next, len };
-                cursors[range] = next;
-                next += len;
-            }
-            for (cycle, slot) in slots[start..start + chunk_len].iter_mut().enumerate() {
-                let row = source.bytecode_index(start + cycle);
-                let cursor = &mut cursors[row >> range_shift];
-                *slot = *cursor as u16;
-                row_offsets[start + *cursor as usize] = (row & (range_len - 1)) as u16;
-                *cursor += 1;
-            }
-        }
+        let mut prefixes = vec![[0_u32; RANGES]; chunks];
+        slots
+            .par_chunks_mut(chunk_len)
+            .zip(row_offsets.par_chunks_mut(chunk_len))
+            .zip(prefixes.par_iter_mut())
+            .enumerate()
+            .for_each(|(chunk, ((slots, row_offsets), counts))| {
+                let start = chunk * chunk_len;
+                for cycle in start..start + chunk_len {
+                    counts[source.bytecode_index(cycle) >> range_shift] += 1;
+                }
+                let mut cursors = [0_u32; RANGES];
+                let mut next = 0_u32;
+                for (cursor, count) in cursors.iter_mut().zip(counts.iter_mut()) {
+                    *cursor = next;
+                    next += *count;
+                    *count = next;
+                }
+                for (cycle, slot) in slots.iter_mut().enumerate() {
+                    let row = source.bytecode_index(start + cycle);
+                    let cursor = &mut cursors[row >> range_shift];
+                    *slot = *cursor as u16;
+                    row_offsets[*cursor as usize] = (row & (range_len - 1)) as u16;
+                    *cursor += 1;
+                }
+            });
+        segments
+            .par_chunks_mut(chunks)
+            .enumerate()
+            .for_each(|(range, segments)| {
+                for (segment, counts) in segments.iter_mut().zip(&prefixes) {
+                    let start = if range == 0 { 0 } else { counts[range - 1] };
+                    *segment = Segment {
+                        start,
+                        len: counts[range] - start,
+                    };
+                }
+            });
         Ok(Self {
             _trace: trace,
             slots,
@@ -157,6 +176,34 @@ impl<S: CycleSource> ScatterPlan<S> {
     /// Number of output elements, including unvisited bytecode rows.
     pub fn bytecode_rows(&self) -> usize {
         self.rows
+    }
+
+    /// Cycle-to-slot indices for emission fused into another cycle pass.
+    ///
+    /// The returned slice has [`Self::cycles`] entries in cycle order. Its
+    /// chunks are exactly those of `CycleChunks::new(log_t, 0)`. In chunk `c`,
+    /// entry `slots[i]` is below the chunk length and identifies where the
+    /// weight of cycle `c * chunk_len + i` belongs in that chunk's disjoint
+    /// segment of the weight buffer. Every slot is written exactly once.
+    ///
+    /// A buffer of exactly [`Self::cycles`] weights and emission through these
+    /// slots are required of the caller; the emission itself is not checked.
+    /// [`Self::apply_buffer`] checks the buffer lengths before application;
+    /// incorrect folded claims are detected by the verifier.
+    pub fn slots(&self) -> &[u16] {
+        &self.slots
+    }
+
+    /// Apply a previously emitted chunk-major buffer, XORing into `output`.
+    ///
+    /// Checks both exact lengths before changing the output. The caller must
+    /// have written each weight into the slot specified by [`Self::slots`];
+    /// this weight-to-cycle association is required of the caller, not checked
+    /// here, and incorrect folded claims are detected by the verifier.
+    pub fn apply_buffer(&self, weights: &[F128], output: &mut [F128]) -> Result<(), ScatterError> {
+        self.check_buffers(weights.len(), output.len())?;
+        self.apply(weights, output);
+        Ok(())
     }
 
     /// Return `out[k] = Σ_{j: bytecode_index(j) = k} weight(j)`.
@@ -183,9 +230,16 @@ impl<S: CycleSource> ScatterPlan<S> {
         weights: &mut [F128],
         output: &mut [F128],
     ) -> Result<(), ScatterError> {
+        self.check_buffers(weights.len(), output.len())?;
+        self.emit(&weight, weights);
+        self.apply(weights, output);
+        Ok(())
+    }
+
+    fn check_buffers(&self, weights: usize, output: usize) -> Result<(), ScatterError> {
         for (buffer, expected, actual) in [
-            ("weights", self.cycles, weights.len()),
-            ("output", self.rows, output.len()),
+            ("weights", self.cycles, weights),
+            ("output", self.rows, output),
         ] {
             if actual != expected {
                 return Err(ScatterError::BufferLength {
@@ -195,8 +249,6 @@ impl<S: CycleSource> ScatterPlan<S> {
                 });
             }
         }
-        self.emit(&weight, weights);
-        self.apply(weights, output);
         Ok(())
     }
 

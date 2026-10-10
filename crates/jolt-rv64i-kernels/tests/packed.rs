@@ -14,6 +14,7 @@ mod tests {
     use jolt_rv64i_kernels::packed::lift::{LiftError, NibbleLift, WordLift};
     use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
     use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
+    use jolt_rv64i_kernels::par::CycleChunks;
     use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
     use rand_chacha::rand_core::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -313,6 +314,79 @@ mod tests {
                 }
                 previous = Some(result);
             }
+        }
+    }
+
+    #[test]
+    fn scatter_fused_chunk_emission_equals_cycle_summation() {
+        let mut rng = ChaCha20Rng::seed_from_u64(176);
+        for (cycles, rows, visited) in [(1_usize, 1, 1), (8192, 64, 16), (16384, 1 << 20, 1 << 20)] {
+            let source = Arc::new(Rows {
+                indices: (0..cycles)
+                    .map(|_| rng.next_u32() as usize & (visited - 1))
+                    .collect(),
+                rows,
+            });
+            let weights: Vec<_> = (0..cycles).map(|_| field(&mut rng)).collect();
+            let initial: Vec<_> = (0..rows).map(|_| field(&mut rng)).collect();
+            let mut expected = initial.clone();
+            for (cycle, &weight) in weights.iter().enumerate() {
+                expected[source.bytecode_index(cycle)] += weight;
+            }
+            let trace = Arc::new(ValidatedTrace::new(source).unwrap());
+            let chunk_len = CycleChunks::new(cycles.ilog2() as usize, 0)
+                .unwrap()
+                .chunk_len();
+            for threads in [1, 12] {
+                ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| {
+                        let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+                        let mut emitted = vec![F128::from_raw(0); cycles];
+                        emitted
+                            .par_chunks_mut(chunk_len)
+                            .zip(plan.slots().par_chunks(chunk_len))
+                            .zip(weights.par_chunks(chunk_len))
+                            .for_each(|((emitted, slots), weights)| {
+                                for (&slot, &weight) in slots.iter().zip(weights) {
+                                    emitted[usize::from(slot)] = weight;
+                                }
+                            });
+                        let mut output = initial.clone();
+                        plan.apply_buffer(&emitted, &mut output).unwrap();
+                        assert_eq!(output, expected);
+                    });
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_fused_application_rejects_lengths_before_mutation() {
+        let source = Arc::new(
+            ValidatedTrace::new(Arc::new(Rows {
+                indices: vec![0, 1, 0, 1],
+                rows: 2,
+            }))
+            .unwrap(),
+        );
+        let plan = ScatterPlan::new(source).unwrap();
+        let sentinel = F128::from_raw(13);
+        for (weight_len, output_len, buffer, expected, actual) in
+            [(3, 2, "weights", 4, 3), (4, 1, "output", 2, 1)]
+        {
+            let weights = vec![sentinel; weight_len];
+            let mut output = vec![sentinel; output_len];
+            assert_eq!(
+                plan.apply_buffer(&weights, &mut output),
+                Err(ScatterError::BufferLength {
+                    buffer,
+                    expected,
+                    actual
+                })
+            );
+            assert!(output.iter().all(|&value| value == sentinel));
         }
     }
 

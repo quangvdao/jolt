@@ -114,9 +114,9 @@ use thiserror::Error;
 
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
+use jolt_rv64i_kernels::router::fold::FoldLayout;
 use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
 use support::arithmetic::HotArithmetic;
-use support::fold_layout::{FoldLayout, SELECTORS, WORD_SETS};
 use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
@@ -737,7 +737,7 @@ impl BucketLayout {
         match self {
             BucketLayout::Column => (32 * 256, [0; 5]),
             BucketLayout::Fold { byte_selectors, .. } => {
-                let layout = FoldLayout::new(byte_selectors);
+                let layout = FoldLayout::calibration(byte_selectors);
                 (layout.entries(), layout.offsets())
             }
         }
@@ -836,7 +836,7 @@ impl Bucket {
                         BucketLayout::Fold { byte_selectors, .. } => {
                             let selector = usize::from(selectors[cycle]);
                             let by_byte = selector < byte_selectors;
-                            let fold = FoldLayout::new(byte_selectors);
+                            let fold = FoldLayout::calibration(byte_selectors);
                             let variant_base = fold.variant_base(selector);
                             for (word_slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 bucket_word(
@@ -1178,11 +1178,16 @@ impl Readout {
         match layout {
             BucketLayout::Column => Self::word(&mut specs, 0, 4, 8),
             BucketLayout::Fold { byte_selectors, .. } => {
-                let fold = FoldLayout::new(byte_selectors);
-                for selector in 0..SELECTORS[0] {
+                let fold = FoldLayout::calibration(byte_selectors);
+                for selector in 0..FoldLayout::CALIBRATION_SELECTORS[0] {
                     let by_byte = selector < byte_selectors;
                     let base = fold.variant_base(selector);
-                    Self::word(&mut specs, base, WORD_SETS[0], if by_byte { 8 } else { 4 });
+                    Self::word(
+                        &mut specs,
+                        base,
+                        FoldLayout::CALIBRATION_WORD_SETS[0],
+                        if by_byte { 8 } else { 4 },
+                    );
                     for digit in 0..7 {
                         for value in 1..if digit < 5 { 16 } else { 8 } {
                             specs.push(ReadSpec {
@@ -1205,15 +1210,16 @@ impl Readout {
                         bit: None,
                     });
                 }
-                for shape in 1..SELECTORS.len() {
+                for (shape, &offset) in offsets.iter().enumerate().skip(1) {
                     Self::word(
                         &mut specs,
-                        offsets[shape],
-                        SELECTORS[shape] * WORD_SETS[shape],
+                        offset,
+                        FoldLayout::CALIBRATION_SELECTORS[shape]
+                            * FoldLayout::CALIBRATION_WORD_SETS[shape],
                         4,
                     );
                 }
-                for selector in 0..SELECTORS[3] {
+                for selector in 0..FoldLayout::CALIBRATION_SELECTORS[3] {
                     specs.push(ReadSpec {
                         base: fold.shape_base(3, selector),
                         width: 16,

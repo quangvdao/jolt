@@ -2,7 +2,8 @@
 
 #[expect(
     clippy::unwrap_used,
-    reason = "test setup and contract failures must fail the test"
+    clippy::panic,
+    reason = "test setup and contract failures must fail the test; guard return is tested by unwinding"
 )]
 mod tests {
     use jolt_field::F128;
@@ -19,6 +20,7 @@ mod tests {
     use rayon::prelude::*;
     use rayon::ThreadPoolBuilder;
 
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Arc;
 
     fn field(rng: &mut ChaCha20Rng) -> F128 {
@@ -43,7 +45,7 @@ mod tests {
                 .fold(F128::from_raw(0), |sum, (_, &weight)| sum + weight);
             assert_eq!(lift.lift(word), expected);
         }
-        for significant in [0, 1, 2, 4, 8, 16, 32, 64] {
+        for significant in [0, 1, 2, 3, 4, 5, 8, 16, 32, 64] {
             let lift = NibbleLift::new(&weights[..significant]).unwrap();
             for &word in &words {
                 let expected = weights[..significant]
@@ -348,7 +350,7 @@ mod tests {
         assert_eq!(buckets.bit(0, 4), Err(BucketError::Bit { bit: 4, bits: 4 }));
         assert!(matches!(
             DigitHistogram::new(&mut storage, usize::BITS as usize),
-            Err(BucketError::Width { .. })
+            Err(BucketError::Width { bits }) if bits == usize::BITS as usize
         ));
         assert!(matches!(
             DigitHistogram::new(&mut storage, 3),
@@ -394,22 +396,106 @@ mod tests {
     fn scatter_rejects_buffer_lengths_before_mutation() {
         let source = Arc::new(
             ValidatedTrace::new(Arc::new(Rows {
-                indices: vec![0],
-                rows: 1,
+                indices: vec![0, 1, 0, 1],
+                rows: 2,
             }))
             .unwrap(),
         );
         let plan = ScatterPlan::new(source).unwrap();
-        let mut weights = [F128::from_raw(13)];
-        let mut output = [];
-        assert_eq!(
-            plan.scatter_into(|_| F128::from_raw(1), &mut weights, &mut output),
-            Err(ScatterError::BufferLength {
-                buffer: "output",
-                expected: 1,
-                actual: 0
-            })
+        let sentinel = F128::from_raw(13);
+        for (weight_len, output_len, buffer, expected, actual) in
+            [(3, 2, "weights", 4, 3), (4, 1, "output", 2, 1)]
+        {
+            let mut weights = vec![sentinel; weight_len];
+            let mut output = vec![sentinel; output_len];
+            assert_eq!(
+                plan.scatter_into(|_| F128::from_raw(1), &mut weights, &mut output),
+                Err(ScatterError::BufferLength {
+                    buffer,
+                    expected,
+                    actual
+                })
+            );
+            assert!(weights.iter().all(|&value| value == sentinel));
+            assert!(output.iter().all(|&value| value == sentinel));
+        }
+    }
+
+    #[test]
+    fn scatter_retains_nonzero_output_across_repeated_passes() {
+        let mut rng = ChaCha20Rng::seed_from_u64(77);
+        let indices: Vec<_> = (0..8192).map(|_| rng.next_u32() as usize & 255).collect();
+        let source = Arc::new(Rows { indices, rows: 256 });
+        let plan =
+            ScatterPlan::new(Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap())).unwrap();
+        let mut output: Vec<_> = (0..256).map(|_| field(&mut rng)).collect();
+        let mut expected = output.clone();
+        let mut scratch = vec![F128::from_raw(99); 8192];
+        for _ in 0..2 {
+            let weights: Vec<_> = (0..8192).map(|_| field(&mut rng)).collect();
+            for (cycle, &weight) in weights.iter().enumerate() {
+                expected[source.bytecode_index(cycle)] += weight;
+            }
+            plan.scatter_into(|cycle| weights[cycle], &mut scratch, &mut output)
+                .unwrap();
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    fn scratch_guard_returns_its_contribution_during_unwinding() {
+        ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                let pool = ScratchPool::new(3).unwrap();
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let mut guard = pool.take().unwrap();
+                    guard[1] = F128::from_raw(123);
+                    panic!("unwind with a scratch loan");
+                }));
+                assert!(result.is_err());
+                assert_eq!(
+                    pool.merge().unwrap(),
+                    [F128::from_raw(0), F128::from_raw(123), F128::from_raw(0)]
+                );
+            });
+    }
+
+    #[test]
+    fn partial_nibble_lifts_ignore_padding_above_the_weight_width() {
+        let weights = [
+            F128::from_raw(1),
+            F128::from_raw(2),
+            F128::from_raw(4),
+            F128::from_raw(8),
+            F128::from_raw(16),
+        ];
+        for width in [3, 5] {
+            let lift = NibbleLift::new(&weights[..width]).unwrap();
+            let word = 0b10101;
+            let expected = if width == 3 {
+                F128::from_raw(5)
+            } else {
+                F128::from_raw(21)
+            };
+            assert_eq!(lift.lift(word), expected);
+            assert_eq!(lift.lift(word | (u64::MAX << width)), expected);
+        }
+    }
+
+    #[test]
+    fn scatter_rejects_row_domains_above_the_layout_limit() {
+        let source = Arc::new(
+            ValidatedTrace::new(Arc::new(Rows {
+                indices: vec![0; 16],
+                rows: 1 << 25,
+            }))
+            .unwrap(),
         );
-        assert_eq!(weights, [F128::from_raw(13)]);
+        assert!(
+            matches!(ScatterPlan::new(source), Err(ScatterError::RowCount { rows, limit }) if rows == 1 << 25 && limit == 1 << 24)
+        );
     }
 }

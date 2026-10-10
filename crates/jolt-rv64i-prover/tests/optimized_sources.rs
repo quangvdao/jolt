@@ -18,7 +18,7 @@ use jolt_rv64i_kernels::{
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
     error::Rv64iProverError,
-    optimized::source::{GroupState, SharedSource, SourceGroup, WitnessColumns, WitnessSource},
+    optimized::source::{SharedSource, WitnessColumns, WitnessSource},
     plane::{DecodedCycle, DigitFields, Rv64iWitness},
     prover::{prove, ProverPreprocessing},
 };
@@ -402,13 +402,6 @@ fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     let selectors = selector_columns(&columns);
     let mut session = ProofSession::default();
     let shared = session.state_or_insert_with(SharedSource::default);
-    for group in [
-        SourceGroup::BytecodeChunks,
-        SourceGroup::RamChunks,
-        SourceGroup::Selectors,
-    ] {
-        assert_eq!(shared.group_state(group), GroupState::NotRequested);
-    }
     assert!(matches!(
         shared.take_bytecode_group(),
         Err(KernelError::InvalidGeometry { .. })
@@ -430,23 +423,9 @@ fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     let router_warm = shared.prepare(&witness, Some(selectors.clone())).unwrap();
     assert!(Arc::ptr_eq(&trace, &warm));
     assert!(Arc::ptr_eq(&trace, &router_warm));
-    for group in [
-        SourceGroup::BytecodeChunks,
-        SourceGroup::RamChunks,
-        SourceGroup::Selectors,
-    ] {
-        assert_eq!(shared.group_state(group), GroupState::Held);
-    }
     let _bytecode = shared.take_bytecode_group().unwrap();
     let _ram = shared.take_ram_group().unwrap();
     let _selectors = shared.take_selector_group().unwrap();
-    for group in [
-        SourceGroup::BytecodeChunks,
-        SourceGroup::RamChunks,
-        SourceGroup::Selectors,
-    ] {
-        assert_eq!(shared.group_state(group), GroupState::Taken);
-    }
     assert!(matches!(
         shared.take_bytecode_group(),
         Err(KernelError::InvalidGeometry { .. })
@@ -479,13 +458,18 @@ fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     assert!(weak_plan.upgrade().is_none());
     let after_take = shared.prepare(&witness, Some(selectors.clone())).unwrap();
     assert!(Arc::ptr_eq(&trace, &after_take));
-    for group in [
-        SourceGroup::BytecodeChunks,
-        SourceGroup::RamChunks,
-        SourceGroup::Selectors,
-    ] {
-        assert_eq!(shared.group_state(group), GroupState::Taken);
-    }
+    assert!(matches!(
+        shared.take_bytecode_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_ram_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_selector_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
     let weak_trace = Arc::downgrade(&trace);
     let weak_source = Arc::downgrade(trace.source());
     drop(trace);
@@ -501,15 +485,6 @@ fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     let mut tail_session = ProofSession::default();
     let tail = tail_session.state_or_insert_with(SharedSource::default);
     let trace = tail.prepare(&witness, None).unwrap();
-    assert_eq!(
-        tail.group_state(SourceGroup::BytecodeChunks),
-        GroupState::Held
-    );
-    assert_eq!(tail.group_state(SourceGroup::RamChunks), GroupState::Held);
-    assert_eq!(
-        tail.group_state(SourceGroup::Selectors),
-        GroupState::NotRequested
-    );
     assert!(matches!(
         tail.take_selector_group(),
         Err(KernelError::InvalidGeometry { .. })
@@ -520,15 +495,12 @@ fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     ));
     let warm = tail.prepare(&witness, None).unwrap();
     assert!(Arc::ptr_eq(&trace, &warm));
-    assert_eq!(
-        tail.group_state(SourceGroup::BytecodeChunks),
-        GroupState::Held
-    );
-    assert_eq!(tail.group_state(SourceGroup::RamChunks), GroupState::Held);
-    assert_eq!(
-        tail.group_state(SourceGroup::Selectors),
-        GroupState::NotRequested
-    );
+    let _bytecode = tail.take_bytecode_group().unwrap();
+    let _ram = tail.take_ram_group().unwrap();
+    assert!(matches!(
+        tail.take_selector_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
 }
 
 #[test]

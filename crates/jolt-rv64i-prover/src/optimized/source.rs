@@ -513,9 +513,8 @@ impl CycleSource for WitnessSource {
     }
 }
 
-/// Byte groups retained for the router and tail adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SourceGroup {
+enum SourceGroup {
     BytecodeChunks,
     RamChunks,
     Selectors,
@@ -530,14 +529,6 @@ impl SourceGroup {
     }
 }
 
-/// Whether preparation requested a group and whether its core has taken it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GroupState {
-    NotRequested,
-    Held,
-    Taken,
-}
-
 #[cfg_attr(feature = "allocative", derive(Allocative), allocative(bound = ""))]
 enum OwnedGroup<G> {
     NotRequested,
@@ -545,14 +536,6 @@ enum OwnedGroup<G> {
     Taken,
 }
 impl<G> OwnedGroup<G> {
-    fn state(&self) -> GroupState {
-        match self {
-            Self::NotRequested => GroupState::NotRequested,
-            Self::Held(_) => GroupState::Held,
-            Self::Taken => GroupState::Taken,
-        }
-    }
-
     fn take(&mut self, group: SourceGroup) -> Result<G, KernelError<F128>> {
         match std::mem::replace(self, Self::Taken) {
             Self::Held(value) => Ok(value),
@@ -671,17 +654,6 @@ impl SharedSource {
             plan: SharedPlan::NotBuilt,
         });
         Ok(trace)
-    }
-
-    /// Reports a group's lifecycle; an empty preparation has requested none.
-    pub fn group_state(&self, group: SourceGroup) -> GroupState {
-        self.prepared
-            .as_ref()
-            .map_or(GroupState::NotRequested, |prepared| match group {
-                SourceGroup::BytecodeChunks => prepared.bytecode.state(),
-                SourceGroup::RamChunks => prepared.ram.state(),
-                SourceGroup::Selectors => prepared.selectors.state(),
-            })
     }
 
     fn prepared_mut(&mut self) -> Result<&mut PreparedSource, KernelError<F128>> {

@@ -12,6 +12,16 @@ mod arch;
 #[forbid(unsafe_code)]
 pub mod bridge;
 #[forbid(unsafe_code)]
+pub mod commit;
+#[forbid(unsafe_code)]
+mod induce;
+#[forbid(unsafe_code)]
+pub mod measure;
+#[forbid(unsafe_code)]
 pub mod merkle;
 #[forbid(unsafe_code)]
 pub mod ntt;
+#[forbid(unsafe_code)]
+pub mod open;
+#[forbid(unsafe_code)]
+mod rounds;

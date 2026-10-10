@@ -4,6 +4,7 @@
 // Notices: crates/jolt-rv64i-pcs/THIRD_PARTY_NOTICES.md.
 //! Contiguous Merkle trees: leaf hashes first, then successive parent layers.
 
+use jolt_field::CanonicalBytes;
 #[cfg(not(feature = "arch"))]
 use jolt_rv64i_verifier::whir::merkle::{hash_leaf, hash_node};
 use jolt_rv64i_verifier::whir::{
@@ -21,6 +22,52 @@ pub struct MerkleTree {
 }
 
 impl MerkleTree {
+    /// Hashes a position-major typed codeword with canonical serialization
+    /// bounded to one batch per worker. Leaves are at most 512 bytes.
+    pub fn build_canonical<F: CanonicalBytes + Sync>(
+        data: &[F],
+        entries_per_leaf: usize,
+    ) -> Result<Self, WhirError> {
+        let leaf_bytes = checked_product(WhirPart::Leaves, &[entries_per_leaf, F::NUM_BYTES])?;
+        if leaf_bytes == 0 || leaf_bytes > 512 {
+            return Err(WhirError::Shape {
+                part: WhirPart::Leaves,
+                expected: 512,
+                actual: leaf_bytes,
+            });
+        }
+        if !data.len().is_multiple_of(entries_per_leaf) {
+            return Err(WhirError::Shape {
+                part: WhirPart::Leaves,
+                expected: entries_per_leaf,
+                actual: data.len(),
+            });
+        }
+        let mut tree = Self::empty(data.len() / entries_per_leaf)?;
+        tree.nodes[..tree.num_leaves]
+            .par_chunks_mut(1024)
+            .enumerate()
+            .try_for_each(|(batch, outputs)| {
+                let bytes_len = checked_product(WhirPart::Leaves, &[outputs.len(), leaf_bytes])?;
+                let mut bytes = try_vec(WhirPart::Leaves, bytes_len)?;
+                bytes.resize(bytes_len, 0);
+                let first = batch * 1024 * entries_per_leaf;
+                let values = &data[first..first + outputs.len() * entries_per_leaf];
+                for (value, encoding) in values.iter().zip(bytes.chunks_exact_mut(F::NUM_BYTES)) {
+                    value.to_bytes_le(encoding);
+                }
+                #[cfg(feature = "arch")]
+                crate::arch::hash_many(&bytes, leaf_bytes, outputs)?;
+                #[cfg(not(feature = "arch"))]
+                for (leaf, digest) in bytes.chunks_exact(leaf_bytes).zip(outputs) {
+                    *digest = hash_leaf(leaf);
+                }
+                Ok::<_, WhirError>(())
+            })?;
+        tree.fill_parents()?;
+        Ok(tree)
+    }
+
     /// Build from equal-width canonical byte leaves. The input must contain a
     /// positive power of two leaves of nonzero width, including 512 and 384.
     pub fn build(data: &[u8], leaf_bytes: usize) -> Result<Self, WhirError> {
@@ -130,6 +177,7 @@ impl MerkleTree {
 mod tests {
     use super::MerkleTree;
     use blake2::{Blake2s256, Digest as BlakeDigest};
+    use jolt_field::{CanonicalBytes, ExtField, F192, F64};
     use jolt_rv64i_verifier::whir::{
         error::{WhirError, WhirPart},
         merkle::{sibling_indices, verify_multiproof, Digest},
@@ -152,6 +200,56 @@ mod tests {
             layers.push(parents);
         }
         layers
+    }
+
+    fn canonical_root<F: CanonicalBytes + Sync>(values: &[F], entries: usize) {
+        let leaves: Vec<Vec<u8>> = values
+            .chunks_exact(entries)
+            .map(|leaf| {
+                leaf.iter()
+                    .flat_map(CanonicalBytes::to_bytes_le_vec)
+                    .collect()
+            })
+            .collect();
+        let definition = definition_tree(&leaves);
+        assert_eq!(
+            MerkleTree::build_canonical(values, entries).unwrap().root(),
+            &definition.last().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn canonical_typed_codewords_match_independent_hash_definition() {
+        for leaves in [1, 2, 8, 1024, 2048] {
+            for width in [1, 2, 64] {
+                let values: Vec<_> = (0..leaves * width)
+                    .map(|i| F64::from_raw(i as u64 * 0x19a7))
+                    .collect();
+                canonical_root(&values, width);
+            }
+            for width in [1, 8, 16] {
+                let values: Vec<_> = (0..leaves * width)
+                    .map(|i| F192::from_base_fn(|c| F64::from_raw(i as u64 * 0x19a7 + c as u64)))
+                    .collect();
+                canonical_root(&values, width);
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_typed_codeword_shapes_fail_before_hashing() {
+        for (words, width, expected, actual) in [
+            (1, 0, 512, 0),
+            (65, 65, 512, 520),
+            (3, 2, 2, 3),
+            (0, 1, 1, 0),
+            (3, 1, 1, 3),
+        ] {
+            let values = vec![F64::from_raw(1); words];
+            assert!(
+                matches!(MerkleTree::build_canonical(&values, width), Err(WhirError::Shape { part: WhirPart::Leaves, expected: e, actual: a }) if e == expected && a == actual)
+            );
+        }
     }
 
     #[test]

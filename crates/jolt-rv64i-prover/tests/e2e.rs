@@ -23,10 +23,12 @@ use jolt_rv64i_prover::{
 };
 use jolt_rv64i_verifier::error::Rv64iVerifierError;
 use jolt_rv64i_verifier::verifier::verify_with_transcript;
+use jolt_rv64i_verifier::{preprocessing::VerifierPreprocessing, whir::WhirBits};
 use jolt_sumcheck::SumcheckError;
 use jolt_transcript::Transcript;
 use jolt_verifier::VerifierError;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 use support::{Program, ProvingFailure, ProvingFailureFixture, RecordedTranscript, PROGRAMS};
 
@@ -35,7 +37,7 @@ use support::{Program, ProvingFailure, ProvingFailureFixture, RecordedTranscript
     reason = "the acceptance corpus records per-program proving and verification timings"
 )]
 fn run_program(program: Program, log_T: u8) -> HashSet<Variant> {
-    let (statement, verifier, witness) = support::program_fixture(program, log_T);
+    let (statement, source, witness) = support::program_fixture(program, log_T);
     let variants = witness
         .bits
         .iter()
@@ -65,12 +67,17 @@ fn run_program(program: Program, log_T: u8) -> HashSet<Variant> {
         program.name()
     );
     let preprocessing = ProverPreprocessing {
-        verifier,
+        verifier: VerifierPreprocessing::<WhirBits>::new(
+            Arc::clone(source.shared_bytecode()),
+            source.image().to_vec(),
+            (),
+        )
+        .unwrap(),
         scheme: (),
     };
     let backend = Rv64iBackend::reference();
     let start = Instant::now();
-    let (proof, prover) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
+    let (proof, prover) = prove_with_transcript::<WhirBits, RecordedTranscript>(
         &preprocessing,
         &statement,
         &witness,
@@ -79,7 +86,7 @@ fn run_program(program: Program, log_T: u8) -> HashSet<Variant> {
     .unwrap();
     let prove_time = start.elapsed();
     let start = Instant::now();
-    let verifier = verify_with_transcript::<TransparentBits, RecordedTranscript>(
+    let verifier = verify_with_transcript::<WhirBits, RecordedTranscript>(
         &preprocessing.verifier,
         &statement,
         &proof,

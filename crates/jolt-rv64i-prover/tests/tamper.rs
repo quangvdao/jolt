@@ -9,13 +9,14 @@
     reason = "shared machine helpers serve the complete protocol corpus"
 )]
 mod support;
-use jolt_field::{One, Zero, F128};
+use jolt_field::{One, Zero, F128, F192};
 use jolt_poly::CompressedPoly;
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
     commitment::transparent::{TransparentBits, TransparentError},
     prover::{prove_with_transcript, ProverPreprocessing},
 };
+use jolt_rv64i_verifier::whir::{error::WhirError, WhirBits};
 use jolt_rv64i_verifier::{
     error::{ProofDecodeError, Rv64iVerifierError},
     preprocessing::VerifierPreprocessing,
@@ -466,5 +467,58 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
         },
         Err(error) => panic!("unexpected rejection: {error}"),
         Ok(_) => panic!("premature opening point was accepted"),
+    }
+}
+
+#[test]
+fn whir_counting_loop_and_front_end_commitment_opening_tampering() {
+    let (statement, source, witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier: VerifierPreprocessing::<WhirBits>::new(
+            Arc::clone(source.shared_bytecode()),
+            source.image().to_vec(),
+            (),
+        )
+        .unwrap(),
+        scheme: (),
+    };
+    let (proof, prover) = prove_with_transcript::<WhirBits, RecordedTranscript>(
+        &preprocessing,
+        &statement,
+        &witness,
+        &Rv64iBackend::reference(),
+    )
+    .unwrap();
+    let verifier = verify_with_transcript::<WhirBits, RecordedTranscript>(
+        &preprocessing.verifier,
+        &statement,
+        &proof,
+    )
+    .unwrap();
+    assert_eq!(prover.events, verifier.events);
+    assert_eq!(prover.state(), verifier.state());
+    assert_eq!(prover.label_count(b"whir_commit"), 1);
+    assert_eq!(prover.label_count(b"whir_open"), 1);
+    assert_eq!(prover.label_count(b"opening_claim"), 299);
+    let mut altered = Rv64iProof::<WhirBits>::from_bytes(&proof.to_bytes(), 6, 4).unwrap();
+    altered.bits_commitment.root[0] ^= 1;
+    assert!(verify::<WhirBits>(&preprocessing.verifier, &statement, &altered).is_err());
+    let mut altered = Rv64iProof::<WhirBits>::from_bytes(&proof.to_bytes(), 6, 4).unwrap();
+    altered.bits_commitment.lane_values[0] += F192::one();
+    assert!(verify::<WhirBits>(&preprocessing.verifier, &statement, &altered).is_err());
+    let mut altered = Rv64iProof::<WhirBits>::from_bytes(&proof.to_bytes(), 6, 4).unwrap();
+    altered.opening.levels[0].leaves[0][0] ^= 1;
+    match verify::<WhirBits>(&preprocessing.verifier, &statement, &altered) {
+        Err(Rv64iVerifierError::Batch {
+            batch: "6b",
+            source,
+        }) => match *source {
+            Rv64iVerifierError::Opening(error) => assert_eq!(
+                error.downcast_ref::<WhirError>(),
+                Some(&WhirError::MerkleAuthentication { level: 0 }),
+            ),
+            other => panic!("unexpected failure: {other}"),
+        },
+        other => panic!("expected changed WHIR leaf rejection, found {other:?}"),
     }
 }

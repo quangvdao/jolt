@@ -6,9 +6,9 @@ use crate::round::eq::{eq_table, split_eq};
 use crate::round::{
     coefficients_from_nodes, linear_at_nodes, quadratic, quadratic_at_nodes, RoundError,
 };
-use crate::source::{CycleSource, DigitColumns};
+use crate::source::PresentGroup;
 use jolt_field::{Accumulator, F128Accumulator, Zero, F128};
-use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
+use jolt_kernels::optimized::lazy_ra::{LazyFoldedRa, LazyRaError};
 use jolt_poly::{GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_utils::unsafe_allocate_zero_vec;
@@ -59,8 +59,6 @@ pub enum ChunkWeight {
 pub enum ChunkProductError {
     #[error("{columns} columns supplied; expected 1..=7")]
     Columns { columns: usize },
-    #[error("column {column} has {bits} bits; at most 8 are supported")]
-    ColumnWidth { column: usize, bits: usize },
     #[error("{buffer} allocation has an unrepresentable element count or byte size")]
     AllocationSize { buffer: &'static str },
     #[error("expected {expected} chunk points, got {actual}")]
@@ -79,8 +77,6 @@ pub enum ChunkProductError {
         expected: usize,
         actual: usize,
     },
-    #[error("column {column} has no digit at cycle {cycle}")]
-    MissingDigit { column: usize, cycle: usize },
     #[error("cycle exponent {log_t} cannot size a field table")]
     LogSize { log_t: usize },
     #[error(transparent)]
@@ -250,74 +246,12 @@ fn checked_len<T>(
     Ok(elements)
 }
 
-struct PresentDigits {
-    digits: Vec<u8>,
-    bits: [usize; 7],
-    d: usize,
-    cycles: usize,
-}
-
-impl PresentDigits {
-    fn new<S: CycleSource>(
-        columns: &DigitColumns<S>,
-        bits: [usize; 7],
-        geometry: CycleChunks,
-    ) -> Result<Self, ChunkProductError> {
-        let d = columns.num_polys();
-        let cycles = columns.cycles();
-        let len = checked_len::<u8>(cycles.checked_mul(d), "present digits")?;
-        let mut digits = unsafe_allocate_zero_vec(len);
-        let missing = digits
-            .par_chunks_mut(geometry.chunk_len() * d)
-            .enumerate()
-            .find_map_first(|(chunk, output)| {
-                let start = chunk * geometry.chunk_len();
-                for (offset, row) in output.chunks_exact_mut(d).enumerate() {
-                    let cycle = start + offset;
-                    for (column, digit) in row.iter_mut().enumerate() {
-                        match columns.index(column, cycle) {
-                            Some(index) => *digit = index as u8,
-                            None => return Some(ChunkProductError::MissingDigit { column, cycle }),
-                        }
-                    }
-                }
-                None
-            });
-        if let Some(error) = missing {
-            return Err(error);
-        }
-        Ok(Self {
-            digits,
-            bits,
-            d,
-            cycles,
-        })
-    }
-}
-
-impl ChunkIndexSource for PresentDigits {
-    fn num_polys(&self) -> usize {
-        self.d
-    }
-    fn cycles(&self) -> usize {
-        self.cycles
-    }
-    #[inline]
-    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        Some(self.digits[cycle * self.d + column] as usize)
-    }
-    fn index_bound(&self, column: usize) -> Option<usize> {
-        Some(1 << self.bits[column])
-    }
-}
-
 /// Degree `d+1` cycle sum-check for one through seven digit columns.
-/// The source must remain immutable under the `CycleSource` contract. All
-/// digits are checked present at construction; range validation is owned by
-/// `DigitColumns`. With `EqTerms`, honest individual weighted claims are
+/// Preparation validates presence and range before the core takes its group.
+/// With `EqTerms`, honest individual weighted claims are
 /// required of the caller, not checked, and detected by the verifier.
 pub struct ChunkProductCore {
-    columns: LazyFoldedRa<F128, PresentDigits>,
+    columns: LazyFoldedRa<F128, PresentGroup>,
     weight: WeightState,
     log_t: usize,
     d: usize,
@@ -329,17 +263,16 @@ impl ChunkProductCore {
     /// dimensions before constructing the lazy family. Use `combined_weight`
     /// to build a dense weight from equality and successor terms.
     ///
-    /// A column has at most 8 bits (`ColumnWidth` otherwise): the core copies
-    /// the selected digits into one byte per column and cycle, which is what
-    /// the first four rounds read. `columns` is not retained. The copy is
-    /// released at the fourth bind, when the columns become dense, and with
-    /// the core when `log_t < 4`.
-    pub fn new<S: CycleSource>(
-        columns: DigitColumns<S>,
+    /// Takes the group's buffer without reading or copying its digits. The
+    /// first four rounds read its adjacent bytes; the fourth bind releases
+    /// it when the family becomes dense, or core destruction does so when
+    /// `log_t < 4`. Preparation guarantees widths of at most eight bits.
+    pub fn new(
+        columns: PresentGroup,
         points: Vec<Vec<F128>>,
         weight: ChunkWeight,
     ) -> Result<Self, ChunkProductError> {
-        let d = columns.num_polys();
+        let d = columns.columns().len();
         if !(1..=7).contains(&d) {
             return Err(ChunkProductError::Columns { columns: d });
         }
@@ -349,16 +282,8 @@ impl ChunkProductCore {
                 actual: points.len(),
             });
         }
-        let mut bits = [0; 7];
         for (column, point) in points.iter().enumerate() {
-            let expected = columns.source().bits(columns.columns()[column]);
-            if expected > 8 {
-                return Err(ChunkProductError::ColumnWidth {
-                    column,
-                    bits: expected,
-                });
-            }
-            bits[column] = expected;
+            let expected = columns.widths()[column];
             if point.len() != expected {
                 return Err(ChunkProductError::PointLength {
                     column,
@@ -426,12 +351,9 @@ impl ChunkProductCore {
                 WeightState::Terms { terms, scratch }
             }
         };
-        let geometry =
-            CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
-        let present = PresentDigits::new(&columns, bits, geometry)?;
         let columns = LazyFoldedRa::try_new(
             points.iter().map(|point| eq_table(point, None)).collect(),
-            present,
+            columns,
         )?;
         let state = if log_t == 0 {
             let w = match &weight {
@@ -707,7 +629,7 @@ impl ChunkProductCore {
 }
 
 fn stack_term_sums<const D: usize, const N: usize, const M: usize>(
-    columns: &LazyFoldedRa<F128, PresentDigits>,
+    columns: &LazyFoldedRa<F128, PresentGroup>,
     terms: &[EqTermState],
     geometry: CycleChunks,
 ) -> Vec<[F128; 8]> {

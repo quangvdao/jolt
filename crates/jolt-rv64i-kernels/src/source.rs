@@ -480,8 +480,6 @@ impl CycleValidation<'_> {
 #[derive(Debug, Clone)]
 pub struct ValidatedTrace<S: CycleSource> {
     source: Arc<S>,
-    cycles: usize,
-    widths: Vec<usize>,
 }
 
 impl<S: CycleSource> ValidatedTrace<S> {
@@ -717,8 +715,6 @@ impl<S: CycleSource> ValidatedTrace<S> {
         Ok((
             Self {
                 source,
-                cycles,
-                widths,
             },
             groups,
         ))
@@ -729,74 +725,3 @@ impl<S: CycleSource> ValidatedTrace<S> {
     }
 }
 
-/// A checked column selection retaining shared ownership of its source.
-/// Multiple selections share a [`ValidatedTrace`] without repeating its scan.
-#[derive(Debug, Clone)]
-pub struct DigitColumns<S: CycleSource> {
-    trace: Arc<ValidatedTrace<S>>,
-    columns: Vec<usize>,
-}
-
-impl<S: CycleSource> DigitColumns<S> {
-    /// Checks the entire arbitrary source, including columns outside the selection.
-    pub fn new(source: Arc<S>, columns: Vec<usize>) -> Result<Self, SourceError> {
-        Self::from_validated(Arc::new(ValidatedTrace::new(source)?), columns)
-    }
-
-    /// Checks only the column list against an already validated source.
-    pub fn from_validated(
-        trace: Arc<ValidatedTrace<S>>,
-        columns: Vec<usize>,
-    ) -> Result<Self, SourceError> {
-        for &column in &columns {
-            if column >= trace.widths.len() {
-                return Err(SourceError::Column {
-                    column,
-                    columns: trace.widths.len(),
-                });
-            }
-        }
-        Ok(Self { trace, columns })
-    }
-
-    pub fn source(&self) -> &Arc<S> {
-        self.trace.source()
-    }
-    pub fn columns(&self) -> &[usize] {
-        &self.columns
-    }
-    pub fn cycles(&self) -> usize {
-        self.trace.cycles
-    }
-    pub fn num_polys(&self) -> usize {
-        self.columns.len()
-    }
-    #[inline]
-    pub fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        self.columns
-            .get(column)
-            .and_then(|&c| self.trace.source.digit(c, cycle))
-    }
-    #[inline]
-    pub fn index_bound(&self, column: usize) -> Option<usize> {
-        self.columns.get(column).map(|&c| 1 << self.trace.widths[c])
-    }
-}
-
-impl<S: CycleSource> ChunkIndexSource for DigitColumns<S> {
-    fn num_polys(&self) -> usize {
-        self.num_polys()
-    }
-
-    fn cycles(&self) -> usize {
-        self.cycles()
-    }
-
-    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        self.index(column, cycle)
-    }
-
-    fn index_bound(&self, column: usize) -> Option<usize> {
-        self.index_bound(column)
-    }
-}

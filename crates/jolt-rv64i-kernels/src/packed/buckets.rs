@@ -1,18 +1,35 @@
 //! Views of caller-owned bucket arrays, indexed by position then value.
 //!
-//! Hot passes use [`BucketPlacement`]: one padding element after each 256
-//! elements (4,096 bytes of `F128`). Byte positions stride by 257 elements;
-//! nibble words stride by 257, with 16 positions at offsets `16*p`.
-//! For byte positions, two entries alias modulo 4,096 exactly when
-//! `Δposition + Δvalue = 0 (mod 256)`. The column pass has 32 positions and
-//! the largest nine-word bank has 72; equal values cannot alias within either.
-//! For nibble words the condition is `Δword + 16*Δposition + Δvalue = 0
-//! (mod 256)`. With at most nine words, `|Δword| <= 8`, `|Δposition| <= 15`;
-//! at equal value this forces both differences to zero. Unequal values can
-//! still alias: byte differences cancel; nibble `Δword + Δvalue` can be zero
-//! or a multiple of 16, canceled by the position difference. Four padding
-//! elements would fail: `4*Δword + 16*Δposition = 0` at `(4, -1)`.
-//! The placement property is checked by `equal_value_tables_do_not_alias`.
+//! # Placement
+//!
+//! A store to one table and a load from another whose addresses agree in
+//! their low 12 bits are treated by the processor as dependent until both
+//! addresses are resolved. A pass that adds one weight to several tables at
+//! the *same value* (the zero bytes of a small word above all) pays for
+//! every such pair, so tables that one word set updates together are placed
+//! off the 4,096-byte stride. [`BucketPlacement`] is the one owner of that
+//! placement: one padding element after each 256 elements (4,096 bytes of
+//! `F128`).
+//!
+//! - Byte positions stride by 257 elements. Two entries agree modulo 4,096
+//!   bytes exactly when `Δposition + Δvalue = 0 (mod 256)`. The column pass
+//!   has 32 positions and the largest bank of byte words 72, so equal values
+//!   never agree within either.
+//! - Nibble words stride by 257 elements, their 16 positions at `16 * p`.
+//!   Two entries agree exactly when `Δword + 16 * Δposition + Δvalue = 0
+//!   (mod 256)`. A set has at most nine words, so `|Δword| <= 8` and
+//!   `|Δposition| <= 15`, and at equal value both differences are zero. Four
+//!   padding elements would not do: `4 * Δword + 16 * Δposition = 0` at
+//!   `(4, -1)`.
+//!
+//! The law covers the positions of the column pass and the words of one
+//! selector's set, and `equal_value_tables_do_not_alias` checks exactly
+//! that. It does not cover two sets that one cycle writes (one per shape),
+//! nor a set against the digit and flag tables that follow it: a nibble
+//! word takes one of the sixteen residue classes of its base modulo 16
+//! elements, so only a layout that assigned those classes across every
+//! shape at once could, and the fold has none. Unequal values can agree in
+//! either form.
 //!
 //! The borrowed views below are dense value domains, excluding padding.
 //! Digit histograms occupy separate contiguous ranges. Array merging is owned

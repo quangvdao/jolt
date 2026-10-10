@@ -22,10 +22,12 @@ use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
-use support::allocator::{AllocationAllowance, AllocationMeasurement, RAYON_WORKER_ALLOWANCE};
+use support::allocator::{
+    AllocationAllowance, AllocationMeasurement, AllocationStats, RAYON_WORKER_ALLOWANCE,
+};
 use support::{run_core, RunnerError};
 
 #[derive(Debug, Error)]
@@ -535,6 +537,20 @@ fn median(mut samples: Vec<f64>) -> f64 {
 
 #[expect(clippy::print_stdout, reason = "phase splits are benchmark output")]
 fn report(records: &[Record]) -> Result<(), RunnerError> {
+    let mut pools = Vec::new();
+    for record in records.iter().filter(|record| record.variant == "dense") {
+        if pools.iter().any(|(threads, _)| *threads == record.threads) {
+            continue;
+        }
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(record.threads)
+            .build()
+            .map_err(|error| RunnerError::ThreadPool {
+                message: error.to_string(),
+            })?;
+        let _ = pool.broadcast(|_| black_box(()));
+        pools.push((record.threads, pool));
+    }
     for (index, record) in records.iter().enumerate() {
         if records[..index].iter().any(|prior| {
             prior.variant == record.variant
@@ -592,13 +608,12 @@ fn report(records: &[Record]) -> Result<(), RunnerError> {
         if record.variant != "dense" {
             continue;
         }
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(record.threads)
-            .build()
-            .map_err(|error| RunnerError::ThreadPool {
-                message: error.to_string(),
+        let (_, pool) = pools
+            .iter()
+            .find(|(threads, _)| *threads == record.threads)
+            .ok_or_else(|| RunnerError::Core {
+                message: "gather measurement pool is missing".to_owned(),
             })?;
-        let _ = pool.broadcast(|_| black_box(()));
         let gathers = pool
             .install(|| -> Result<_, BenchError> {
                 let source = Arc::new(SyntheticTrace::new(
@@ -765,6 +780,156 @@ fn allocation_bound(log_t: usize, terms: usize) -> AllocationAllowance {
     }
 }
 
+const EQ_TERMS_NINE_ALLOCATIONS_PER_EXTRA_ROUND: usize = 25;
+
+fn measure_round_allocations(
+    log_t: usize,
+    term_count: Option<usize>,
+) -> Result<AllocationStats, BenchError> {
+    let source = Arc::new(SyntheticTrace::new(
+        SynthProfile::UniformDigits,
+        log_t,
+        16,
+        0x5eed,
+    )?);
+    let (mut core, mut claim) = if term_count == Some(9) {
+        nine_term_allocation_core(source)?
+    } else {
+        let variant = if term_count.is_some() {
+            Variant::EqTerms
+        } else {
+            Variant::Dense
+        };
+        let (core, claim) = TimedCore::new(source, variant, &Mutex::new(None))?;
+        (core.inner, claim)
+    };
+    let challenges = seeded_challenges();
+    let measurement = AllocationMeasurement::begin();
+    let mut bind = None;
+    for (round, &challenge) in challenges.iter().take(log_t).enumerate() {
+        let message = core.prove_round(bind, round, claim)?;
+        claim = message.evaluate(challenge);
+        bind = Some(challenge);
+    }
+    core.finish_rounds(challenges[log_t - 1])?;
+    Ok(measurement.finish())
+}
+
+fn round_chunk_visits(log_t: usize) -> Result<usize, ParError> {
+    (1..=log_t)
+        .map(|round| CycleChunks::new(log_t, round).map(|geometry| geometry.ranges().len()))
+        .sum()
+}
+
+fn fit_allocation_growth(rounds: [usize; 3], visits: [usize; 3], counts: [usize; 3]) -> [f64; 3] {
+    let rounds = rounds.map(|value| value as f64);
+    let visits = visits.map(|value| value as f64);
+    let counts = counts.map(|value| value as f64);
+    let dr1 = rounds[1] - rounds[0];
+    let dr2 = rounds[2] - rounds[0];
+    let dv1 = visits[1] - visits[0];
+    let dv2 = visits[2] - visits[0];
+    let dc1 = counts[1] - counts[0];
+    let dc2 = counts[2] - counts[0];
+    let determinant = dr1 * dv2 - dr2 * dv1;
+    let b = (dc1 * dv2 - dc2 * dv1) / determinant;
+    let c = (dr1 * dc2 - dr2 * dc1) / determinant;
+    [counts[0] - b * rounds[0] - c * visits[0], b, c]
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "allocation growth acceptance reports measured counts and chunk visits"
+)]
+fn check_round_allocations_grow_with_rounds_not_chunk_visits(
+    pool: &ThreadPool,
+) -> Result<(), RunnerError> {
+    let sizes = [14, 18];
+    let visits = sizes.map(round_chunk_visits);
+    let [small_visits, large_visits] = visits;
+    let small_visits = small_visits.map_err(|error| RunnerError::Core {
+        message: error.to_string(),
+    })?;
+    let large_visits = large_visits.map_err(|error| RunnerError::Core {
+        message: error.to_string(),
+    })?;
+    if large_visits < 4 * small_visits {
+        return Err(RunnerError::Core {
+            message: "allocation growth cases must differ by at least four times the chunk visits"
+                .to_owned(),
+        });
+    }
+    let mut failure = None;
+    for (name, term_count, per_round) in [
+        ("dense", None, 6),
+        ("eq_terms_2", Some(2), 11),
+        (
+            "eq_terms_9",
+            Some(9),
+            EQ_TERMS_NINE_ALLOCATIONS_PER_EXTRA_ROUND,
+        ),
+    ] {
+        let limit = per_round * (sizes[1] - sizes[0])
+            + RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
+        let mut minimum = [usize::MAX; 2];
+        let mut maximum = [0; 2];
+        let mut growth = 0;
+        for sample in 0..30 {
+            let mut counts = [0; 2];
+            let order = if sample % 2 == 0 { [0, 1] } else { [1, 0] };
+            for index in order {
+                counts[index] = pool
+                    .install(|| measure_round_allocations(sizes[index], term_count))
+                    .map_err(|error| RunnerError::Core {
+                        message: error.to_string(),
+                    })?
+                    .allocs;
+                minimum[index] = minimum[index].min(counts[index]);
+                maximum[index] = maximum[index].max(counts[index]);
+            }
+            growth = growth.max(counts[1].saturating_sub(counts[0]));
+        }
+        println!("chunk_product_allocation_growth/{name}/1 samples=30 log_t_small={} log_t_large={} visits_small={small_visits} visits_large={large_visits} count_small_min={} count_small_max={} count_large_min={} count_large_max={} growth={growth} limit={limit}", sizes[0], sizes[1], minimum[0], maximum[0], minimum[1], maximum[1]);
+        if term_count == Some(9) {
+            let middle_size = 16;
+            let middle_visits =
+                round_chunk_visits(middle_size).map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            let mut middle_min = usize::MAX;
+            let mut middle_max = 0;
+            for _ in 0..30 {
+                let count = pool
+                    .install(|| measure_round_allocations(middle_size, term_count))
+                    .map_err(|error| RunnerError::Core {
+                        message: error.to_string(),
+                    })?
+                    .allocs;
+                middle_min = middle_min.min(count);
+                middle_max = middle_max.max(count);
+            }
+            let [a, b, c] = fit_allocation_growth(
+                [sizes[0], middle_size, sizes[1]],
+                [small_visits, middle_visits, large_visits],
+                [minimum[0], middle_min, minimum[1]],
+            );
+            println!("chunk_product_allocation_fit/{name}/1 samples=30 log_t_middle={middle_size} visits_middle={middle_visits} count_middle_min={middle_min} count_middle_max={middle_max} a={a} b={b} c={c}");
+        }
+        if growth > limit && failure.is_none() {
+            failure = Some(RunnerError::Core {
+                message: BenchError::Allocation {
+                    log_t: sizes[1],
+                    quantity: "allocation growth with chunk visits",
+                    actual: growth,
+                    limit,
+                }
+                .to_string(),
+            });
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "allocation acceptance reports its measured counts"
@@ -791,33 +956,7 @@ fn check_allocations() -> Result<(), RunnerError> {
             };
             let stats = pool
                 .install(|| -> Result<_, BenchError> {
-                    let source = Arc::new(SyntheticTrace::new(
-                        SynthProfile::UniformDigits,
-                        log_t,
-                        16,
-                        0x5eed,
-                    )?);
-                    let (mut core, mut claim) = if term_count == Some(9) {
-                        nine_term_allocation_core(source)?
-                    } else {
-                        let variant = if term_count.is_some() {
-                            Variant::EqTerms
-                        } else {
-                            Variant::Dense
-                        };
-                        let (core, claim) = TimedCore::new(source, variant, &Mutex::new(None))?;
-                        (core.inner, claim)
-                    };
-                    let challenges = seeded_challenges();
-                    let measurement = AllocationMeasurement::begin();
-                    let mut bind = None;
-                    for (round, &challenge) in challenges.iter().take(log_t).enumerate() {
-                        let message = core.prove_round(bind, round, claim)?;
-                        claim = message.evaluate(challenge);
-                        bind = Some(challenge);
-                    }
-                    core.finish_rounds(challenges[log_t - 1])?;
-                    let stats = measurement.finish();
+                    let stats = measure_round_allocations(log_t, term_count)?;
                     for (quantity, actual, limit) in [
                         ("allocation count", stats.allocs, limit.allocs),
                         ("peak bytes", stats.peak_bytes, limit.bytes),
@@ -840,7 +979,7 @@ fn check_allocations() -> Result<(), RunnerError> {
             println!("chunk_product_allocation/{name}/{log_t}/{workers} allocs={} limit={} peak_bytes={} final_bytes={} byte_limit={} kernel_alloc_limit={} kernel_byte_limit={} runtime_alloc_allowance={} runtime_byte_allowance={} PASS", stats.allocs, limit.allocs, stats.peak_bytes, stats.final_bytes, limit.bytes, kernel.allocs, kernel.bytes, RAYON_WORKER_ALLOWANCE.allocs * workers, RAYON_WORKER_ALLOWANCE.bytes * workers);
         }
     }
-    Ok(())
+    check_round_allocations_grow_with_rounds_not_chunk_visits(&pool)
 }
 
 fn main() -> Result<(), RunnerError> {

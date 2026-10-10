@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::{run_core_variants, CycleScale, RunnerError};
 
-const HISTOGRAM_COLUMNS: [usize; 11] = [5, 6, 7, 8, 9, 10, 11, 12, 18, 19, 20];
+const HISTOGRAM_COLUMNS: [usize; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 18, 19, 20];
 
 struct FoldBench {
     trace: Arc<ValidatedTrace<SyntheticTrace>>,

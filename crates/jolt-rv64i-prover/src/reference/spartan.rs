@@ -2,7 +2,6 @@
 
 use crate::error::Rv64iProverError;
 use crate::plane::{Rv64iPlane, Rv64iWitness};
-use crate::reference::views::bits_column;
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
@@ -12,7 +11,7 @@ use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, InnerDerived, OpeningId, OuterDerived, RelationId, RowBlock,
     VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{equality_table, to_high_to_low, PointsError};
+use jolt_rv64i_verifier::points::{equality_table, PointsError};
 use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::{SpartanOuterF128, SpartanOuterF2};
 use jolt_rv64i_verifier::stages::stage2::SpartanInner;
@@ -138,23 +137,39 @@ impl PrepareKernel<F128, SpartanInner<F128>, Rv64iPlane> for SpartanInnerPrepare
         inputs: ProverInputs<'_, F128, SpartanInner<F128>>,
     ) -> Result<Box<dyn SumcheckKernel<F128, Relation = SpartanInner<F128>>>, KernelError<F128>>
     {
-        let r_1 = to_high_to_low(inputs.relation.r_1());
+        let weights = equality_table(inputs.relation.r_1()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
         let mut routed = vec![F128::zero(); WITNESS_COLUMNS];
-        for c in (1..4).chain(16..27).chain(64..768) {
-            let value = witness_column(witness, c).map_err(geometry)?.evaluate(&r_1)
-                + if c == 16 { F128::one() } else { F128::zero() };
-            let entry = routed
-                .get_mut(c)
-                .ok_or_else(|| geometry("routed column exceeds the witness domain"))?;
-            *entry = value;
-        }
         let mut direct = vec![F128::zero(); WITNESS_COLUMNS];
-        for c in 64..=witness.layout.keys_differ() {
-            let entry = direct
-                .get_mut(768 + c)
-                .ok_or_else(|| geometry("direct column exceeds the witness domain"))?;
-            *entry = bits_column(witness, c).evaluate(&r_1);
+        for (cycle, (bits, weight)) in witness.bits.iter().zip(weights).enumerate() {
+            let z = row(witness, cycle).map_err(geometry)?;
+            for column in (1..4).chain(16..27).chain(64..768) {
+                if z.bit(column)
+                    .ok_or_else(|| geometry("routed column exceeds the witness domain"))?
+                {
+                    *routed
+                        .get_mut(column)
+                        .ok_or_else(|| geometry("routed column exceeds the witness domain"))? +=
+                        weight;
+                }
+            }
+            for column in 64..=witness.layout.keys_differ() {
+                if bits
+                    .get(column / 64)
+                    .is_some_and(|word| (word >> (column % 64)) & 1 != 0)
+                {
+                    *direct
+                        .get_mut(768 + column)
+                        .ok_or_else(|| geometry("direct column exceeds the witness domain"))? +=
+                        weight;
+                }
+            }
         }
+        *routed
+            .get_mut(16)
+            .ok_or_else(|| geometry("routed column exceeds the witness domain"))? += F128::one();
         let mut matrix = Vec::with_capacity(WITNESS_COLUMNS);
         for c in 0..WITNESS_COLUMNS {
             let w: Vec<_> = (0..10)

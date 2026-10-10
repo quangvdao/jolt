@@ -251,20 +251,16 @@ impl Machinery {
         }
     }
 
-    #[inline]
-    fn word(
-        buckets: &mut NibbleBuckets<'_>,
-        base: usize,
-        slot: usize,
-        word: u64,
-        e: F128,
-    ) -> Result<(), BucketError> {
-        for (byte, value) in word.to_le_bytes().into_iter().enumerate() {
-            buckets.xor(base + slot * 16 + byte * 2, usize::from(value & 15), e)?;
-            buckets.xor(base + slot * 16 + byte * 2 + 1, usize::from(value >> 4), e)?;
+    #[inline(always)]
+    fn word(buckets: &mut NibbleBuckets<'_>, base: usize, slot: usize, word: u64, e: F128) {
+        let start = base + slot * 16;
+        let positions = &mut buckets.positions_mut()[start..start + 16];
+        for (positions, byte) in positions.as_chunks_mut::<2>().0.iter_mut().zip(word.to_le_bytes()) {
+            positions[0][usize::from(byte & 15)] += e;
+            positions[1][usize::from(byte >> 4)] += e;
         }
-        Ok(())
     }
+
 }
 
 impl MachineryKernel for Machinery {
@@ -331,7 +327,7 @@ impl MachineryKernel for Machinery {
                                     slot,
                                     source.trace_word(word, cycle),
                                     e,
-                                )?;
+                                );
                             }
                             for (slot, column) in (5..12).enumerate() {
                                 buckets.xor(
@@ -353,7 +349,7 @@ impl MachineryKernel for Machinery {
                                     0,
                                     source.trace_word(0, cycle),
                                     e,
-                                )?;
+                                );
                             }
                             if let Some(kind) = source.digit(14, cycle) {
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
@@ -363,7 +359,7 @@ impl MachineryKernel for Machinery {
                                         slot,
                                         source.trace_word(word, cycle),
                                         e,
-                                    )?;
+                                    );
                                 }
                             }
                             let row = source.bytecode_index(cycle);
@@ -380,7 +376,7 @@ impl MachineryKernel for Machinery {
                                         slot,
                                         word,
                                         e,
-                                    )?;
+                                    );
                                 }
                             }
                             if source.digit(16, cycle).is_some()
@@ -393,7 +389,7 @@ impl MachineryKernel for Machinery {
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         e,
-                                    )?;
+                                    );
                                 }
                             }
                         }

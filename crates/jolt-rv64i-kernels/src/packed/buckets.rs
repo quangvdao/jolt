@@ -57,9 +57,12 @@ macro_rules! buckets {
                 Ok(Self { positions })
             }
 
-            /// Number of positions in this view, including zero for empty storage.
-            pub fn positions(&self) -> usize {
-                self.positions.len()
+            /// Borrows whole position blocks, retaining their sums. Construction
+            /// checks the storage length; the caller selects positions and uses
+            /// values below the block's fixed entry count.
+            #[inline]
+            pub fn positions_mut(&mut self) -> &mut [[F128; $entries]] {
+                self.positions
             }
 
             /// Adds `e` to the specified value's sum with one load-XOR-store.

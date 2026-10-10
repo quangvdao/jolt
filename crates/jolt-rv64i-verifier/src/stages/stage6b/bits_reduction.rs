@@ -1,5 +1,7 @@
 //! Concrete reduction of the six committed functionals to one cycle point.
 
+use std::sync::Arc;
+
 use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
 use jolt_rv64i_arith::{Layout, BITS_COLUMNS};
@@ -19,8 +21,8 @@ use crate::points::{self, PointsError};
 pub struct BitsReduction<F: JoltField> {
     symbolic: BitsReductionSymbolic,
     r_1: Vec<F>,
-    r_3: Vec<F>,
-    r_5: Vec<F>,
+    r_3: Arc<Vec<F>>,
+    r_5: Arc<Vec<F>>,
     w: Vec<F>,
     x: Vec<F>,
     weights: [Vec<(usize, F)>; 6],
@@ -35,6 +37,17 @@ impl<F: JoltField> BitsReduction<F> {
         r_1: Vec<F>,
         r_3: Vec<F>,
         r_5: Vec<F>,
+        w: Vec<F>,
+        x: Vec<F>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(layout, r_1, Arc::new(r_3), Arc::new(r_5), w, x)
+    }
+
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Vec<F>,
+        r_3: Arc<Vec<F>>,
+        r_5: Arc<Vec<F>>,
         w: Vec<F>,
         x: Vec<F>,
     ) -> Result<Self, PointsError> {
@@ -192,13 +205,19 @@ impl<F: JoltField> BitsReduction<F> {
     pub fn input_points(&self) -> BitsReductionInputClaims<Vec<F>> {
         BitsReductionInputClaims {
             direct_columns: self.w.iter().chain(&self.r_1).copied().collect(),
-            variant_bits: self.x.iter().take(10).chain(&self.r_3).copied().collect(),
+            variant_bits: self
+                .x
+                .iter()
+                .take(10)
+                .chain(self.r_3.iter())
+                .copied()
+                .collect(),
             pos_ra_0: self
                 .x
                 .iter()
                 .skip(6)
                 .take(3)
-                .chain(&self.r_3)
+                .chain(self.r_3.iter())
                 .copied()
                 .collect(),
             pos_ra_1: self
@@ -206,11 +225,17 @@ impl<F: JoltField> BitsReduction<F> {
                 .iter()
                 .skip(9)
                 .take(3)
-                .chain(&self.r_3)
+                .chain(self.r_3.iter())
                 .copied()
                 .collect(),
-            should_branch: self.r_3.clone(),
-            inc: self.x.iter().take(6).chain(&self.r_5).copied().collect(),
+            should_branch: self.r_3.as_ref().clone(),
+            inc: self
+                .x
+                .iter()
+                .take(6)
+                .chain(self.r_5.iter())
+                .copied()
+                .collect(),
         }
     }
 

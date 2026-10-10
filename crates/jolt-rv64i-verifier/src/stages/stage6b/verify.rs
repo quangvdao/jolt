@@ -18,6 +18,7 @@ use crate::statement::CheckedInputs;
 use jolt_field::F128;
 use jolt_rv64i_arith::BITS_COLUMNS;
 use jolt_transcript::Transcript;
+use std::sync::Arc;
 
 /// The terminal cycle point consumed by the shared commitment opening.
 pub struct Output {
@@ -49,27 +50,30 @@ pub fn from_upstream<S: BitsCommitmentScheme>(
     stage6a: &Stage6aOutput,
 ) -> Result<Inputs, Rv64iVerifierError> {
     let fail = BytecodeReadCycle::<F128>::term_error;
-    let bytecode_read_cycle = BytecodeReadCycle::new(
+    let r_3 = Arc::new(stage3b.r_3().to_vec());
+    let r_4 = Arc::new(stage4.r_4().map_err(fail)?.to_vec());
+    let r_5 = Arc::new(stage5.r_5().to_vec());
+    let bytecode_read_cycle = BytecodeReadCycle::new_shared(
         checked.layout(),
         stage6a.bytecode_folds,
         stage6a.points.bytecode_read_address.address_claim.clone(),
-        stage3b.r_3().to_vec(),
-        stage4.r_4().map_err(fail)?.to_vec(),
-        stage5.r_5().to_vec(),
+        Arc::clone(&r_3),
+        Arc::clone(&r_4),
+        Arc::clone(&r_5),
     )
     .map_err(fail)?;
-    let ram_ra_product = RamRaProduct::new(
+    let ram_ra_product = RamRaProduct::new_shared(
         checked.layout(),
         stage4.a_ram().map_err(fail)?.to_vec(),
-        stage4.r_4().map_err(fail)?.to_vec(),
-        stage5.r_5().to_vec(),
+        r_4,
+        Arc::clone(&r_5),
     )
     .map_err(fail)?;
-    let bits_reduction = BitsReduction::new(
+    let bits_reduction = BitsReduction::new_shared(
         checked.layout(),
         stage1.r_1().map_err(fail)?.to_vec(),
-        stage3b.r_3().to_vec(),
-        stage5.r_5().to_vec(),
+        r_3,
+        r_5,
         stage2.w().map_err(fail)?.to_vec(),
         stage3a.x.clone(),
     )

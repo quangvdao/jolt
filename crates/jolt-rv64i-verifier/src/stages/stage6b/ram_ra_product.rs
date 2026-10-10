@@ -11,6 +11,7 @@ use jolt_rv64i_arith::{Chunk, Layout};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// RAM chunk product reduced over low-variable-first cycles at the shared batch-4 address point.
 /// Its two input claims come from batches 4 and 5 at their respective cycle points.
@@ -20,8 +21,8 @@ pub struct RamRaProduct<F: JoltField> {
     chunks: Vec<(Chunk, Vec<F>)>,
     a_ram: Vec<F>,
 
-    r_4: Vec<F>,
-    r_5: Vec<F>,
+    r_4: Arc<Vec<F>>,
+    r_5: Arc<Vec<F>>,
 }
 impl<F: JoltField> RamRaProduct<F> {
     /// Checks the RAM-address width against the layout and equal widths for the verified batch-4 and batch-5 cycle points.
@@ -31,6 +32,15 @@ impl<F: JoltField> RamRaProduct<F> {
         a_ram: Vec<F>,
         r_4: Vec<F>,
         r_5: Vec<F>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(layout, a_ram, Arc::new(r_4), Arc::new(r_5))
+    }
+
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        a_ram: Vec<F>,
+        r_4: Arc<Vec<F>>,
+        r_5: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
         let expected = layout.log_K_ram();
         if a_ram.len() != expected {
@@ -81,8 +91,8 @@ impl<F: JoltField> RamRaProduct<F> {
     /// Consumed RAM-selector points in address-then-cycle order, from batches 4 and 5.
     pub fn input_points(&self) -> RamRaProductInputClaims<Vec<F>> {
         RamRaProductInputClaims {
-            ram_ra_read: self.a_ram.iter().chain(&self.r_4).copied().collect(),
-            ram_ra_val: self.a_ram.iter().chain(&self.r_5).copied().collect(),
+            ram_ra_read: self.a_ram.iter().chain(self.r_4.iter()).copied().collect(),
+            ram_ra_val: self.a_ram.iter().chain(self.r_5.iter()).copied().collect(),
         }
     }
     /// Projects the transmitted 256 columns onto this instance's fixed RAM-chunk points.

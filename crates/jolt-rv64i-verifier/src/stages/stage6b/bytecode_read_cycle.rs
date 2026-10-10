@@ -11,6 +11,7 @@ use jolt_rv64i_arith::{Chunk, Layout};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Bytecode chunk product reduced over low-variable-first cycles at the address point verified by batch 6a.
 /// The five public folds come from that same batch-6a output.
@@ -20,9 +21,9 @@ pub struct BytecodeReadCycle<F: JoltField> {
     chunks: Vec<(Chunk, Vec<F>)>,
     a_bc: Vec<F>,
     h: [F; 5],
-    r_3: Vec<F>,
-    r_4: Vec<F>,
-    r_5: Vec<F>,
+    r_3: Arc<Vec<F>>,
+    r_4: Arc<Vec<F>>,
+    r_5: Arc<Vec<F>>,
 }
 impl<F: JoltField> BytecodeReadCycle<F> {
     /// Checks the bytecode-address width against the layout and equal widths for batch-3b, batch-4 and batch-5 cycle points.
@@ -34,6 +35,17 @@ impl<F: JoltField> BytecodeReadCycle<F> {
         r_3: Vec<F>,
         r_4: Vec<F>,
         r_5: Vec<F>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(layout, h, a_bc, Arc::new(r_3), Arc::new(r_4), Arc::new(r_5))
+    }
+
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        h: [F; 5],
+        a_bc: Vec<F>,
+        r_3: Arc<Vec<F>>,
+        r_4: Arc<Vec<F>>,
+        r_5: Arc<Vec<F>>,
     ) -> Result<Self, PointsError> {
         let expected = layout.log_K_bytecode();
         if a_bc.len() != expected {

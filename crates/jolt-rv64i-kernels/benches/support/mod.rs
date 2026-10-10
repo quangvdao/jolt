@@ -21,7 +21,7 @@ use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
 use self::allocator::AllocationMeasurement;
@@ -97,6 +97,21 @@ impl Options {
     }
 }
 
+fn warmed_pools(threads: &[usize]) -> Result<Vec<(usize, ThreadPool)>, RunnerError> {
+    let mut pools = Vec::with_capacity(threads.len());
+    for &threads in threads {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|error| RunnerError::ThreadPool {
+                message: error.to_string(),
+            })?;
+        let _ = pool.broadcast(|_| black_box(()));
+        pools.push((threads, pool));
+    }
+    Ok(pools)
+}
+
 /// Measures one constructor and extraction callback over each profile and CLI size.
 /// The extraction receives the bound challenge point in low-variable-first order.
 #[expect(
@@ -114,14 +129,10 @@ where
     E: StdError,
 {
     let options = Options::parse()?;
-    for threads in options.threads {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .map_err(|error| RunnerError::ThreadPool {
-                message: error.to_string(),
-            })?;
-        let _ = pool.broadcast(|_| black_box(()));
+    let pools = warmed_pools(&options.threads)?;
+    // Pool drop does not join workers; retain every pool through the last record
+    // so worker teardown cannot change a subsequent allocator baseline.
+    for (threads, pool) in &pools {
         for &profile in profiles {
             for &log_t in &options.log_t {
                 let source = Arc::new(

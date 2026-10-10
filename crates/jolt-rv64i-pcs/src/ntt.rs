@@ -318,7 +318,35 @@ impl<'a> Encoder<'a> {
             }
             return;
         }
-        for (top, bot) in top.iter_mut().zip(bot) {
+        if !F::FUSE_LAYERS {
+            for (top, bot) in top.iter_mut().zip(bot) {
+                let new_top = *top + bot.scale(twiddle);
+                *bot += new_top;
+                *top = new_top;
+            }
+            return;
+        }
+        let (top_chunks, top_tail) = top.as_chunks_mut::<4>();
+        let (bot_chunks, bot_tail) = bot.as_chunks_mut::<4>();
+        for ([t0, t1, t2, t3], [b0, b1, b2, b3]) in top_chunks.iter_mut().zip(bot_chunks) {
+            let p0 = b0.scale(twiddle);
+            let p1 = b1.scale(twiddle);
+            let p2 = b2.scale(twiddle);
+            let p3 = b3.scale(twiddle);
+            let n0 = *t0 + p0;
+            let n1 = *t1 + p1;
+            let n2 = *t2 + p2;
+            let n3 = *t3 + p3;
+            *b0 += n0;
+            *b1 += n1;
+            *b2 += n2;
+            *b3 += n3;
+            *t0 = n0;
+            *t1 = n1;
+            *t2 = n2;
+            *t3 = n3;
+        }
+        for (top, bot) in top_tail.iter_mut().zip(bot_tail) {
             let new_top = *top + bot.scale(twiddle);
             *bot += new_top;
             *top = new_top;

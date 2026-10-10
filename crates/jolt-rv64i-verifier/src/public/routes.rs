@@ -9,6 +9,7 @@ use jolt_rv64i_arith::{
     BRANCH_FORM,
 };
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 pub const ROUTERS: [Router; 5] = [
     Router::Variant,
@@ -17,6 +18,94 @@ pub const ROUTERS: [Router; 5] = [
     Router::Compare,
     Router::Branch,
 ];
+
+/// A named word in a router's source bank; `One` has only bit zero set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BankWord {
+    Rs1Value,
+    Rs2Value,
+    RdPreValue,
+    RamReadValue,
+    NextPC,
+    Inc,
+    Imm,
+    FallThroughPC,
+    PCPlusImm,
+    PC,
+    One,
+}
+
+/// Selector digits in least-significant-factor order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Factor {
+    Variant,
+    Pos(u8),
+    ShiftKind,
+    AccessKind,
+    KeyKind,
+    Branch,
+    ShouldBranch,
+}
+
+/// Words precede committed entries, which are followed by one constant.
+/// A bank without committed entries represents constants through `words`.
+#[derive(Clone, Debug)]
+pub struct Bank {
+    pub words: &'static [BankWord],
+    pub committed: Option<Range<usize>>,
+    pub factors: &'static [Factor],
+}
+
+/// The shared source and selector geometry used by tensor generation and proving.
+pub fn bank(router: Router, layout: &Layout) -> Bank {
+    match router {
+        Router::Variant => Bank {
+            words: &[
+                BankWord::Rs1Value,
+                BankWord::Rs2Value,
+                BankWord::RdPreValue,
+                BankWord::Imm,
+                BankWord::FallThroughPC,
+                BankWord::PCPlusImm,
+                BankWord::PC,
+                BankWord::NextPC,
+                BankWord::Inc,
+            ],
+            committed: Some(
+                layout
+                    .ram_ra()
+                    .first()
+                    .map_or(64, |c| usize::from(c.start()))..layout.used_columns(),
+            ),
+            factors: &[Factor::Variant],
+        },
+        Router::Shift => Bank {
+            words: &[BankWord::Rs1Value],
+            committed: None,
+            factors: &[Factor::Pos(0), Factor::Pos(1), Factor::ShiftKind],
+        },
+        Router::Memory => Bank {
+            words: &[BankWord::RamReadValue, BankWord::Rs2Value],
+            committed: None,
+            factors: &[Factor::Pos(0), Factor::AccessKind],
+        },
+        Router::Compare => Bank {
+            words: &[
+                BankWord::Rs1Value,
+                BankWord::Rs2Value,
+                BankWord::Imm,
+                BankWord::One,
+            ],
+            committed: None,
+            factors: &[Factor::Pos(0), Factor::Pos(1), Factor::KeyKind],
+        },
+        Router::Branch => Bank {
+            words: &[BankWord::FallThroughPC, BankWord::PCPlusImm],
+            committed: None,
+            factors: &[Factor::Branch, Factor::ShouldBranch],
+        },
+    }
+}
 
 pub fn source_slots(router: Router) -> &'static [usize] {
     match router {
@@ -114,9 +203,9 @@ impl RouteTensors {
             entries: std::array::from_fn(|_| BTreeSet::new()),
         };
         for variant in Variant::ALL {
-            let h = variant.index();
+            let h = builder.selector(Router::Variant, &[(Factor::Variant, variant.index())])?;
             let line = variant.line();
-            builder.toggle(Router::Variant, 16, builder.one(), h);
+            builder.toggle(Router::Variant, 16, builder.one(Router::Variant)?, h);
             match line.rails {
                 Rails::None => {}
                 Rails::Adder { left, right, sum } => {
@@ -229,7 +318,14 @@ impl RouteTensors {
                 builder.form(
                     Router::Shift,
                     576,
-                    usize::from(pos) | (kind << 6),
+                    builder.selector(
+                        Router::Shift,
+                        &[
+                            (Factor::Pos(0), usize::from(pos & 7)),
+                            (Factor::Pos(1), usize::from(pos >> 3)),
+                            (Factor::ShiftKind, kind),
+                        ],
+                    )?,
                     Variant::NOOP,
                     shift_form(shift.kind, pos)
                         .map_err(|_| PointsError::Index {
@@ -254,7 +350,13 @@ impl RouteTensors {
                     variables: 4,
                 })?;
             for pos in 0..8_u8 {
-                let h = usize::from(pos) | (index << 3);
+                let h = builder.selector(
+                    Router::Memory,
+                    &[
+                        (Factor::Pos(0), usize::from(pos)),
+                        (Factor::AccessKind, index),
+                    ],
+                )?;
                 builder.form(
                     Router::Memory,
                     576,
@@ -296,7 +398,14 @@ impl RouteTensors {
                 })?;
             let (left, right) = key.keys();
             for pos in 0..64_u8 {
-                let h = usize::from(pos) | (kind << 6);
+                let h = builder.selector(
+                    Router::Compare,
+                    &[
+                        (Factor::Pos(0), usize::from(pos & 7)),
+                        (Factor::Pos(1), usize::from(pos >> 3)),
+                        (Factor::KeyKind, kind),
+                    ],
+                )?;
                 for (form, column) in [(left, 1), (right, 2)] {
                     for term in form {
                         for wire in term.wires() {
@@ -325,7 +434,16 @@ impl RouteTensors {
                 }
             }
         }
-        builder.form(Router::Branch, 704, 0, Variant::NOOP, BRANCH_FORM)?;
+        builder.form(
+            Router::Branch,
+            704,
+            builder.selector(
+                Router::Branch,
+                &[(Factor::Branch, 0), (Factor::ShouldBranch, 0)],
+            )?,
+            Variant::NOOP,
+            BRANCH_FORM,
+        )?;
         Ok(Self {
             tensors: builder.entries.map(|set| set.into_iter().collect()),
         })
@@ -381,14 +499,72 @@ struct Builder<'a> {
     entries: [BTreeSet<RouteEntry>; 5],
 }
 impl Builder<'_> {
-    fn g(&self) -> usize {
-        self.layout
-            .ram_ra()
-            .first()
-            .map_or(64, |c| usize::from(c.start()))
+    fn committed_index(&self, column: usize) -> Result<usize, PointsError> {
+        let bank = bank(Router::Variant, self.layout);
+        let range = bank
+            .committed
+            .ok_or(PointsError::MissingColumn { column })?;
+        if !range.contains(&column) {
+            return Err(PointsError::MissingColumn { column });
+        }
+        Ok(64 * bank.words.len() + column - range.start)
     }
-    fn one(&self) -> usize {
-        576 + self.layout.used_columns() - self.g()
+    fn word(&self, router: Router, word: BankWord, bit: u8) -> Result<usize, PointsError> {
+        bank(router, self.layout)
+            .words
+            .iter()
+            .position(|entry| *entry == word)
+            .map(|slot| slot * 64 + usize::from(bit))
+            .ok_or(PointsError::MissingColumn {
+                column: usize::from(bit),
+            })
+    }
+    fn one(&self, router: Router) -> Result<usize, PointsError> {
+        let bank = bank(router, self.layout);
+        match bank.committed {
+            Some(range) => Ok(64 * bank.words.len() + range.len()),
+            None => self.word(router, BankWord::One, 0),
+        }
+    }
+    fn selector(&self, router: Router, values: &[(Factor, usize)]) -> Result<usize, PointsError> {
+        let mut selector = 0;
+        let mut shift = 0;
+        for factor in bank(router, self.layout).factors {
+            let bits = match factor {
+                Factor::Variant => 6,
+                Factor::Pos(index) => self
+                    .layout
+                    .pos_ra()
+                    .get(usize::from(*index))
+                    .copied()
+                    .ok_or(PointsError::Index {
+                        index: usize::from(*index),
+                        variables: 1,
+                    })?
+                    .bits()
+                    .into(),
+                Factor::ShiftKind | Factor::KeyKind => 3,
+                Factor::AccessKind => 4,
+                Factor::Branch | Factor::ShouldBranch => 0,
+            };
+            let value = values
+                .iter()
+                .find(|(entry, _)| entry == factor)
+                .map(|(_, value)| *value)
+                .ok_or(PointsError::Index {
+                    index: shift,
+                    variables: shift + bits,
+                })?;
+            if value >= (1 << bits) {
+                return Err(PointsError::Index {
+                    index: value,
+                    variables: bits,
+                });
+            }
+            selector |= value << shift;
+            shift += bits;
+        }
+        Ok(selector)
     }
     fn toggle(&mut self, router: Router, column: usize, source: usize, selector: usize) {
         let entry = RouteEntry {
@@ -418,7 +594,7 @@ impl Builder<'_> {
                 self.toggle(
                     Router::Variant,
                     column,
-                    576 + usize::from(chunk.start()) + digit - 1 - self.g(),
+                    self.committed_index(usize::from(chunk.start()) + digit - 1)?,
                     h,
                 );
             }
@@ -451,18 +627,26 @@ impl Builder<'_> {
     ) -> Result<(), PointsError> {
         let i = usize::from(bit);
         if r != Router::Variant {
-            let slot = match (r, source) {
-                (Router::Shift | Router::Compare, Source::Rs1Value)
-                | (Router::Memory, Source::RamReadValue)
-                | (Router::Branch, Source::FallThroughPC) => 0,
-                (Router::Memory | Router::Compare, Source::Rs2Value)
-                | (Router::Branch, Source::PCPlusImm) => 1,
-                (Router::Compare, Source::Imm) => 2,
-                (Router::Compare, Source::One) => 3,
-                _ => return Err(PointsError::MissingColumn { column: c }),
+            let word = match source {
+                Source::Rs1Value => BankWord::Rs1Value,
+                Source::Rs2Value => BankWord::Rs2Value,
+                Source::Imm => BankWord::Imm,
+                Source::RamReadValue => BankWord::RamReadValue,
+                Source::FallThroughPC => BankWord::FallThroughPC,
+                Source::PCPlusImm => BankWord::PCPlusImm,
+                Source::One => BankWord::One,
+                Source::RdWriteValue
+                | Source::PC
+                | Source::NextPC
+                | Source::Inc
+                | Source::RamAddress
+                | Source::Pos
+                | Source::KeysDiffer
+                | Source::ShouldBranch
+                | Source::JalrLowBit => return Err(PointsError::MissingColumn { column: c }),
             };
-            if source != Source::One || bit == 0 {
-                self.toggle(r, c, slot * 64 + i, h);
+            if word != BankWord::One || bit == 0 {
+                self.toggle(r, c, self.word(r, word, bit)?, h);
             }
             return Ok(());
         }
@@ -473,24 +657,26 @@ impl Builder<'_> {
                         r,
                         c,
                         match term {
-                            RdWriteSource::RdPreValue => 128 + i,
-                            RdWriteSource::Inc => 512 + i,
+                            RdWriteSource::RdPreValue => self.word(r, BankWord::RdPreValue, bit)?,
+                            RdWriteSource::Inc => self.word(r, BankWord::Inc, bit)?,
                         },
                         h,
                     );
                 }
             }
-            Source::Rs1Value => self.toggle(r, c, i, h),
-            Source::Rs2Value => self.toggle(r, c, 64 + i, h),
-            Source::Imm => self.toggle(r, c, 192 + i, h),
-            Source::FallThroughPC => self.toggle(r, c, 256 + i, h),
-            Source::PCPlusImm => self.toggle(r, c, 320 + i, h),
-            Source::PC => self.toggle(r, c, 384 + i, h),
-            Source::NextPC => self.toggle(r, c, 448 + i, h),
-            Source::Inc => self.toggle(r, c, 512 + i, h),
+            Source::Rs1Value => self.toggle(r, c, self.word(r, BankWord::Rs1Value, bit)?, h),
+            Source::Rs2Value => self.toggle(r, c, self.word(r, BankWord::Rs2Value, bit)?, h),
+            Source::Imm => self.toggle(r, c, self.word(r, BankWord::Imm, bit)?, h),
+            Source::FallThroughPC => {
+                self.toggle(r, c, self.word(r, BankWord::FallThroughPC, bit)?, h)
+            }
+            Source::PCPlusImm => self.toggle(r, c, self.word(r, BankWord::PCPlusImm, bit)?, h),
+            Source::PC => self.toggle(r, c, self.word(r, BankWord::PC, bit)?, h),
+            Source::NextPC => self.toggle(r, c, self.word(r, BankWord::NextPC, bit)?, h),
+            Source::Inc => self.toggle(r, c, self.word(r, BankWord::Inc, bit)?, h),
             Source::One => {
                 if bit == 0 {
-                    self.toggle(r, c, self.one(), h);
+                    self.toggle(r, c, self.one(r)?, h);
                 }
             }
             Source::KeysDiffer | Source::ShouldBranch | Source::JalrLowBit => {
@@ -513,7 +699,7 @@ impl Builder<'_> {
                         | Source::Pos
                         | Source::One => return Err(PointsError::MissingColumn { column: c }),
                     };
-                    self.toggle(r, c, 576 + y - self.g(), h);
+                    self.toggle(r, c, self.committed_index(y)?, h);
                 }
             }
             Source::Pos => {

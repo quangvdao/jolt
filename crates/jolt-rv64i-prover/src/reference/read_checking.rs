@@ -2,14 +2,14 @@
 
 use crate::plane::{Rv64iPlane, Rv64iWitness};
 use crate::reference::views::{self, RegisterSelector};
-use jolt_field::{Ring, F128};
+use jolt_field::{Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
 use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_verifier::ids::{
     DerivedId, OpeningId, OutputCheckDerived, ReadCheckingDerived, RelationId, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, WordLift};
+use jolt_rv64i_verifier::points::{eq_index, equality_table, WordLift};
 use jolt_rv64i_verifier::public::io::word_at;
 use jolt_rv64i_verifier::stages::stage4::{
     ram_output_check::RamOutputCheck, ram_read_checking::RamReadChecking,
@@ -62,13 +62,10 @@ impl PrepareKernel<F128, RegistersReadChecking<F128>, Rv64iPlane> for RegistersR
             )
         })
         .collect();
-        let weights = (0..witness.bits.len())
-            .map(|j| eq_index(inputs.relation.r_3(), j).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let table = weights
-            .into_iter()
-            .flat_map(|value| std::iter::repeat_n(value, 32))
-            .collect();
+        let mut table = vec![F128::zero(); 32 * witness.bits.len()];
+        for (cycle, row) in table.chunks_exact_mut(32).enumerate() {
+            row.fill(eq_index(inputs.relation.r_3(), cycle).map_err(geometry)?);
+        }
         let derived = [(
             DerivedId::RegistersReadChecking(ReadCheckingDerived::EqCycle),
             Polynomial::new(table),
@@ -115,13 +112,10 @@ impl PrepareKernel<F128, RamReadChecking<F128>, Rv64iPlane> for RamReadCheckingP
             )
         })
         .collect();
-        let weights = (0..witness.bits.len())
-            .map(|j| eq_index(inputs.relation.r_3(), j).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let table = weights
-            .into_iter()
-            .flat_map(|value| std::iter::repeat_n(value, count))
-            .collect();
+        let mut table = vec![F128::zero(); count * witness.bits.len()];
+        for (cycle, row) in table.chunks_exact_mut(count).enumerate() {
+            row.fill(eq_index(inputs.relation.r_3(), cycle).map_err(geometry)?);
+        }
         let derived = [(
             DerivedId::RamReadChecking(ReadCheckingDerived::EqCycle),
             Polynomial::new(table),
@@ -160,9 +154,7 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
         .into_iter()
         .collect();
         let io = inputs.relation.io();
-        let weights = (0..count)
-            .map(|k| eq_index(inputs.relation.tau(), k).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
+        let weights = equality_table(inputs.relation.tau()).map_err(geometry)?;
         let mask = (0..count)
             .map(|k| {
                 F128::from_u64(u64::from(

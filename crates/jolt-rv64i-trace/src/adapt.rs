@@ -190,6 +190,9 @@ impl Pass<'_> {
         start: usize,
         consumer: C,
     ) -> (C::Result, Reduction) {
+        if consumer.full() {
+            return (consumer.into_folder().complete(), Reduction::default());
+        }
         let chunks = rows.len().div_ceil(CHUNK_ROWS);
         if chunks > 1 {
             let middle = (chunks / 2) * CHUNK_ROWS;
@@ -207,6 +210,9 @@ impl Pass<'_> {
         let mut folder = consumer.into_folder();
         let mut reduction = Reduction::default();
         for (offset, row) in rows.iter().enumerate() {
+            if folder.full() {
+                break;
+            }
             let cycle = start + offset;
             let fact = match self.fact(cycle, row) {
                 Ok(fact) => {
@@ -229,6 +235,7 @@ impl Pass<'_> {
 // Rayon uses opt_len to write directly into the reserved vector. drive splits
 // its consumer at the same exact chunk boundaries as the source slice, so the
 // collector receives every element once, in order, without intermediate buffers.
+// Full consumers stop the pass; its side reduction covers only consumed rows.
 struct FactPass<'a, 'b> {
     pass: &'a Pass<'a>,
     rows: &'a [SourceTraceRow],

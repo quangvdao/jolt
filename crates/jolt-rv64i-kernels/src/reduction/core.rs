@@ -5,6 +5,7 @@ use crate::round::RoundError;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_poly::{GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
 /// One input equality claim. Its defining equality sum is required of the
@@ -118,7 +119,7 @@ impl ReductionCore {
         }
         let scratch = tables
             .iter()
-            .map(|_| vec![F128::from_raw(0); length / 2])
+            .map(|_| unsafe_allocate_zero_vec(length / 2))
             .collect();
         let chunks = length
             / CycleChunks::new(rounds, 0)

@@ -3,6 +3,7 @@ use crate::packed::lift::WordLift;
 use crate::par::CycleChunks;
 use crate::source::{CycleSource, ValidatedTrace};
 use jolt_field::F128;
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
 fn check_weights(weights: &[Vec<F128>]) -> Result<(), ReductionError> {
@@ -304,7 +305,9 @@ pub fn g_pass_digits<S: CycleSource>(
             }
         })
         .collect();
-    let mut tables = vec![vec![F128::from_raw(0); source.cycles()]; weights.len()];
+    let mut tables = (0..weights.len())
+        .map(|_| unsafe_allocate_zero_vec(source.cycles()))
+        .collect::<Vec<Vec<F128>>>();
     if weights.is_empty() {
         return Ok(tables);
     }

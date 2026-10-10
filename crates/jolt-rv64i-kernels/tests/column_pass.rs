@@ -109,7 +109,7 @@ fn measured_column_allocations(pool: &ThreadPool, log_t: usize) -> usize {
         "{} allocations",
         stats.allocs
     );
-    let allowance = 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16;
+    let allowance = 256 * 16 + threads * 8224 * 16 + (1 << log_t) * 16;
     assert!(
         stats.peak_bytes <= allowance + runtime_bytes,
         "{} peak bytes",

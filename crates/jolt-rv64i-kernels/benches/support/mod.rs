@@ -336,6 +336,7 @@ pub trait ProbeKernel: Send {
     fn chain_terms(&self) -> Option<usize> {
         None
     }
+    fn memory_layout(&self) -> Option<(usize, usize)> { None }
     fn lookup_layout(&self) -> Option<(usize, usize)> {
         None
     }
@@ -345,6 +346,7 @@ pub trait ProbeKernel: Send {
 pub struct ProbeRecord {
     pub id: String,
     pub median: f64,
+    pub layout: Option<(usize, usize)>,
 }
 
 /// Runs unit probes with warmed pools and resident sources excluded from timing.
@@ -420,8 +422,9 @@ where
                 let mut operations = [0; 2];
                 let mut chain_terms = None;
                 let mut lookup_layout = None;
+                let mut memory_layout = None;
                 for _ in 0..options.samples {
-                    let (sample, (counts, terms, layout)) = pool.install(|| {
+                    let (sample, (counts, terms, layout, memory)) = pool.install(|| {
                         let measurement = AllocationMeasurement::begin();
                         let start = Instant::now();
                         let mut kernel =
@@ -434,6 +437,7 @@ where
                         let counts = kernel.operations();
                         let terms = kernel.chain_terms();
                         let layout = kernel.lookup_layout();
+                        let memory = kernel.memory_layout();
                         if counts[0] == 0 {
                             return Err(RunnerError::WorkCount {
                                 variant: case.variant.clone(),
@@ -455,13 +459,14 @@ where
                                 times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
                                 allocation,
                             },
-                            (counts, terms, layout),
+                            (counts, terms, layout, memory),
                         ))
                     })?;
                     samples.push(sample);
                     operations = counts;
                     chain_terms = terms;
                     lookup_layout = layout;
+                    memory_layout = memory;
                 }
                 let primary = Sample::phase(&samples, 1, operations[0] as f64);
                 let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
@@ -482,6 +487,9 @@ where
                 if let Some((bytes, entries)) = lookup_layout {
                     print!(" allocated_bytes={bytes} addressable_entries={entries}");
                 }
+                if let Some((bytes, arrays)) = memory_layout {
+                    print!(" bytes_per_array={bytes} arrays={arrays}");
+                }
                 if operations[1] != 0 {
                     let auxiliary = Sample::phase(&samples, 2, operations[1] as f64);
                     print!(
@@ -500,6 +508,7 @@ where
                 records.push(ProbeRecord {
                     id,
                     median: primary.median,
+                    layout: memory_layout,
                 });
             }
         }

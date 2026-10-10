@@ -1251,10 +1251,21 @@ impl Readout {
             .par_iter_mut()
             .zip(specs.par_iter())
             .for_each(|(output, spec)| {
+                let bucket = &buckets[spec.base..spec.base + spec.width];
                 let mut total = F128::from_raw(0);
-                for value in 0..spec.width {
-                    if spec.bit.is_none_or(|bit| value & (1 << bit) != 0) {
-                        total += buckets[spec.base + value];
+                match spec.bit {
+                    Some(bit) => {
+                        let half = 1 << bit;
+                        for period in bucket.chunks_exact(2 * half) {
+                            for &value in &period[half..] {
+                                total += value;
+                            }
+                        }
+                    }
+                    None => {
+                        for &value in bucket {
+                            total += value;
+                        }
                     }
                 }
                 *output = total;
@@ -1273,10 +1284,15 @@ enum MergeMode {
     Tree,
 }
 
+enum MergeStorage {
+    Pool(ScratchPool),
+    Pair { left: Vec<F128>, right: Vec<F128> },
+}
+
 struct Merge {
-    pool: ScratchPool,
+    storage: MergeStorage,
     mode: MergeMode,
-    threads: usize,
+    arrays: usize,
     len: usize,
 }
 
@@ -1287,42 +1303,68 @@ struct Merge {
 impl Merge {
     fn new(threads: usize, mode: MergeMode) -> Result<Self, PoolError> {
         let len = 10 * 1024 * 1024 / size_of::<F128>();
-        let pool = ScratchPool::new(len)?;
-        let mut guards: Vec<_> = (0..threads)
-            .map(|_| pool.take())
-            .collect::<Result<_, _>>()?;
-        for guard in &mut guards {
-            guard.fill(F128::from_raw(1));
-        }
-        drop(guards);
+        let arrays = if mode == MergeMode::Tree { 2 } else { threads };
+        let storage = if mode == MergeMode::Tree {
+            MergeStorage::Pair {
+                left: field_values(len),
+                right: field_values(len),
+            }
+        } else {
+            let pool = ScratchPool::new(len)?;
+            let mut guards: Vec<_> = (0..arrays).map(|_| pool.take()).collect::<Result<_, _>>()?;
+            for guard in &mut guards {
+                guard.fill(F128::from_raw(1));
+            }
+            drop(guards);
+            MergeStorage::Pool(pool)
+        };
         Ok(Self {
-            pool,
+            storage,
             mode,
-            threads,
+            arrays,
             len,
         })
     }
 
     fn operations(&self) -> usize {
         let arrays = match self.mode {
-            MergeMode::Zero => self.threads,
-            MergeMode::ZeroTree => 2 * self.threads - 1,
-            MergeMode::Tree => self.threads - 1,
+            MergeMode::Zero => self.arrays,
+            MergeMode::ZeroTree => 2 * self.arrays - 1,
+            MergeMode::Tree => self.arrays - 1,
         };
         arrays * self.len
     }
 
+    fn layout(&self) -> (usize, usize) {
+        (self.len * size_of::<F128>(), self.arrays)
+    }
+
     fn run(&mut self) -> F128 {
-        let pool = black_box(&self.pool);
-        if self.mode != MergeMode::Tree {
-            pool.zero().unwrap();
-        }
-        if self.mode != MergeMode::Zero {
-            let result = pool.merge().unwrap();
-            let _ = black_box(&result);
-            result[0]
-        } else {
-            black_box(F128::from_raw(0))
+        match &mut self.storage {
+            MergeStorage::Pair { left, right } => {
+                let left = black_box(left);
+                let right = black_box(right);
+                left.par_chunks_mut(CHUNK)
+                    .zip(right.par_chunks(CHUNK))
+                    .for_each(|(left, right)| {
+                        for (left, &right) in left.iter_mut().zip(right) {
+                            *left += right;
+                        }
+                    });
+                let _ = black_box(&left);
+                left[0]
+            }
+            MergeStorage::Pool(pool) => {
+                let pool = black_box(pool);
+                pool.zero().unwrap();
+                if self.mode == MergeMode::ZeroTree {
+                    let result = pool.merge().unwrap();
+                    let _ = black_box(&result);
+                    result[0]
+                } else {
+                    black_box(F128::from_raw(0))
+                }
+            }
         }
     }
 }
@@ -1565,6 +1607,14 @@ impl ProbeKernel for Unit {
         }
     }
 
+    fn memory_layout(&self) -> Option<(usize,usize)> {
+        match self {
+            Self::Merge(unit) => Some(unit.layout()),
+            Self::Readout(unit) => Some((unit.buckets.len()*size_of::<F128>(),1)),
+            _ => None,
+        }
+    }
+
     fn chain_terms(&self) -> Option<usize> {
         match self {
             Self::Hot(unit) => unit.terms(),
@@ -1657,7 +1707,7 @@ fn main() -> Result<(), RunnerError> {
             unit: "merge",
             variant: variant.to_owned(),
             profiles: &[],
-            minimum_threads: if variant == "tree_only_10mib" { 2 } else { 1 },
+            minimum_threads: 1,
         });
     }
     for variant in ["product_hot", "reduce_hot", "reduce_hot_control"] {

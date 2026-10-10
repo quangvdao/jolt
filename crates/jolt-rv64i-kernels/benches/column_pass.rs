@@ -1,21 +1,20 @@
 pub mod support;
 
 use jolt_field::{Field, F128};
-use jolt_poly::UnivariatePoly;
+use jolt_rv64i_kernels::packed::buckets::BucketPlacement;
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_rv64i_kernels::{packed, par, round};
-use jolt_sumcheck::{ProveRounds, SumcheckError};
+use std::hint::black_box;
 use std::mem::size_of;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use support::{run_core, RunnerError};
+use std::sync::Arc;
+use support::{run_cases, Case, Clock, PhaseTimes, RunnerError};
 
 // Including the canonical implementation gives this bench access to its private
 // phase boundaries without adding a timing API to the library.
 mod measured {
     include!("../src/column_pass.rs");
 
-    use super::{Arc, Field, Instant, Record, SyntheticTrace, RECORDS};
+    use super::{Arc, Clock, Field, PhaseTimes, SyntheticTrace};
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
@@ -34,28 +33,16 @@ mod measured {
             Ok(Self { prepared, source })
         }
 
-        #[expect(
-            clippy::expect_used,
-            reason = "a poisoned benchmark telemetry lock means an earlier sample panicked"
-        )]
-        pub(super) fn extract(&self) -> [F128; 256] {
-            let start = Instant::now();
+        pub(super) fn extract(&self, times: &mut PhaseTimes) -> [F128; 256] {
+            let clock = Clock::start();
             self.prepared.pass(self.source.rows());
-            let pass = start.elapsed().as_nanos() as f64;
-            let start = Instant::now();
+            times.set(4, clock.elapsed());
+            let clock = Clock::start();
             let mut sums = self.prepared.merge();
-            let merge = start.elapsed().as_nanos() as f64;
-            let start = Instant::now();
+            times.set(5, clock.elapsed());
+            let clock = Clock::start();
             let columns = read_columns(&mut sums);
-            let read = start.elapsed().as_nanos() as f64;
-            RECORDS
-                .lock()
-                .expect("benchmark telemetry lock")
-                .push(Record {
-                    log_t: self.source.rows().len().ilog2() as usize,
-                    threads: rayon::current_num_threads(),
-                    times: [pass, merge, read],
-                });
+            times.set(6, clock.elapsed());
             columns
         }
     }
@@ -65,88 +52,49 @@ mod measured {
     }
 }
 
-use measured::{ColumnPassError, Pass};
+use measured::Pass;
 
-struct Record {
-    log_t: usize,
-    threads: usize,
-    times: [f64; 3],
-}
-
-static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
-
-impl ProveRounds<F128> for Pass {
-    fn num_rounds(&self) -> usize {
-        0
-    }
-
-    fn prove_round(
-        &mut self,
-        _bind: Option<F128>,
-        round: usize,
-        _previous_claim: F128,
-    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
-        Err(SumcheckError::WrongNumberOfRounds {
-            expected: 0,
-            got: round,
-        })
-    }
-
-    fn finish_rounds(&mut self, _bind: F128) -> Result<(), SumcheckError<F128>> {
-        Ok(())
-    }
-}
-
-fn phase_median(records: &[Record], phase: usize) -> f64 {
-    let mut values: Vec<_> = records.iter().map(|record| record.times[phase]).collect();
-    values.sort_by(f64::total_cmp);
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        values[middle - 1].midpoint(values[middle])
+fn threshold(_: usize, threads: usize) -> f64 {
+    if threads == 1 {
+        26.0
     } else {
-        values[middle]
+        26.0 / 9.6
     }
 }
 
 #[expect(
     clippy::print_stdout,
-    clippy::expect_used,
-    reason = "benchmark output reports phase medians; telemetry poisoning identifies a failed sample"
+    reason = "phase diagnostics are benchmark output"
 )]
 fn main() -> Result<(), RunnerError> {
     let _ = measured::warm_up().map_err(|error| RunnerError::Core {
         message: error.to_string(),
     })?;
-    RECORDS
-        .lock()
-        .expect("benchmark telemetry lock")
-        .reserve(4096);
-    run_core(
-        "column_pass",
+    let mut case = Case::core("column_pass", (), &["pass", "merge", "readout"]);
+    case.threshold = Some(threshold);
+    let _ = run_cases(
         &[SynthProfile::Local],
-        |source| {
-            let core = Pass::new(source)?;
-            Ok::<_, ColumnPassError>((core, F128::from_raw(0)))
+        &[case],
+        Ok::<_, RunnerError>,
+        |source, (), _, times| {
+            let clock = Clock::start();
+            let pass = Pass::new(Arc::clone(source)).map_err(|error| RunnerError::Core {
+                message: error.to_string(),
+            })?;
+            times.set(0, clock.elapsed());
+            let clock = Clock::start();
+            let columns = pass.extract(times);
+            let _ = black_box(&columns);
+            times.set(3, clock.elapsed());
+            Ok((pass, columns))
         },
-        |core, _point| Ok::<_, ColumnPassError>(core.extract()),
+        |_, _| {},
+        |record, _, ()| {
+            println!("column_pass_parts/local/{}/{} pass_ns={:.6} merge_ns={:.6} readout_ns={:.6} bucket_bytes_per_worker={} samples={} model_pass_ns={} threshold_ns={:.6} loaded_machine=true", record.log_t, record.threads,
+                record.phases[4].median, record.phases[5].median, record.phases[6].median,
+                32 * BucketPlacement::Byte.position_offset(1) * size_of::<F128>(), record.samples, 21.0 / record.threads as f64,
+                threshold(record.log_t, record.threads));
+        },
     )?;
-    let mut records = RECORDS.lock().expect("benchmark telemetry lock");
-    records.sort_unstable_by_key(|record| (record.threads, record.log_t));
-    let mut remaining = records.as_slice();
-    while let Some(first) = remaining.first() {
-        let count = remaining.partition_point(|record| {
-            record.log_t == first.log_t && record.threads == first.threads
-        });
-        let (group, rest) = remaining.split_at(count);
-        let cycles = (1_usize << first.log_t) as f64;
-        let phases = std::array::from_fn::<_, 3, _>(|phase| phase_median(group, phase) / cycles);
-        let threshold = if first.threads == 1 { 26.0 } else { 26.0 / 9.6 };
-        println!(
-            "column_pass_parts/local/{}/{} pass_ns={:.6} merge_ns={:.6} readout_ns={:.6} bucket_bytes_per_worker={} samples={} model_pass_ns={} threshold_ns={threshold:.6} loaded_machine=true",
-            first.log_t, first.threads, phases[0], phases[1], phases[2],
-            8192 * size_of::<F128>(), group.len(), 21.0 / first.threads as f64,
-        );
-        remaining = rest;
-    }
     Ok(())
 }

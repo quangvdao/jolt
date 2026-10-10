@@ -5,28 +5,31 @@ pub mod support;
 
 use std::hint::black_box;
 use std::mem::size_of;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::Duration;
 
-use jolt_field::{Accumulator, F128Accumulator, Field, F128};
-use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
+use jolt_field::{Accumulator, F128Accumulator, F128};
+use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use jolt_poly::{Polynomial, UnivariatePoly};
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
 use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use jolt_rv64i_kernels::round::eq::eq_table;
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PresentGroup, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
-use support::allocator::{AllocationAllowance, AllocationMeasurement, RAYON_WORKER_ALLOWANCE};
-use support::{run_core, RunnerError};
+use support::allocator::{
+    AllocationAllowance, AllocationMeasurement, AllocationStats, RAYON_WORKER_ALLOWANCE,
+};
+use support::gather::run_gathers;
+use support::{core_rounds, run_prepared_cases, seeded_challenges, Case, Clock, RunnerError};
 
 #[derive(Debug, Error)]
 enum BenchError {
@@ -37,13 +40,9 @@ enum BenchError {
     #[error(transparent)]
     Par(#[from] ParError),
     #[error(transparent)]
-    Lazy(#[from] LazyRaError),
-    #[error(transparent)]
     Synth(#[from] SynthError),
     #[error(transparent)]
     Sumcheck(#[from] SumcheckError<F128>),
-    #[error("benchmark timing lock was poisoned")]
-    TimingLock,
     #[error("core {quantity} was {actual} at log_t={log_t}, above limit {limit}")]
     Allocation {
         log_t: usize,
@@ -70,61 +69,36 @@ impl Variant {
     }
 }
 
-#[derive(Clone, Copy)]
-enum PreparedClaims {
-    Dense(F128),
-    Equality([F128; 2]),
-}
-
 struct Prepared {
     trace: Arc<ValidatedTrace<SyntheticTrace>>,
-    claims: PreparedClaims,
+    dense_claim: F128,
+    equality_claims: [F128; 2],
 }
 
 struct TimedCore {
     inner: ChunkProductCore,
-    log_t: usize,
-    setup_ns: [u128; 3],
-    round_ns: [u128; 2],
-    construct_ns: u128,
-    finish_ns: u128,
-    source_setup: bool,
+    combined: Duration,
+    rounds: [Duration; 2],
 }
 
 impl ProveRounds<F128> for TimedCore {
     fn num_rounds(&self) -> usize {
         self.inner.num_rounds()
     }
-
     fn prove_round(
         &mut self,
         bind: Option<F128>,
         round: usize,
         claim: F128,
     ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
-        let start = Instant::now();
+        let start = Clock::start();
         let result = self.inner.prove_round(bind, round, claim);
-        self.round_ns[usize::from(round >= 4)] += start.elapsed().as_nanos();
+        self.rounds[usize::from(round >= 4)] += start.elapsed();
         result
     }
-
     fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
-        let start = Instant::now();
-        let result = self.inner.finish_rounds(bind);
-        self.finish_ns += start.elapsed().as_nanos();
-        result
+        self.inner.finish_rounds(bind)
     }
-}
-
-struct Record {
-    variant: &'static str,
-    log_t: usize,
-    threads: usize,
-    setup_ns: [u128; 3],
-    round_ns: [u128; 2],
-    construct_ns: u128,
-    finish_ns: u128,
-    source_setup: bool,
 }
 
 fn digit_points() -> Vec<Vec<F128>> {
@@ -179,11 +153,7 @@ fn terms(log_t: usize, variant: Variant) -> Vec<ChunkWeightTerm> {
         .collect()
 }
 
-fn column_product(
-    columns: &DigitColumns<SyntheticTrace>,
-    tables: &[Vec<F128>],
-    cycle: usize,
-) -> F128 {
+fn column_product(columns: &PresentGroup, tables: &[Vec<F128>], cycle: usize) -> F128 {
     let first = columns
         .index(0, cycle)
         .map_or(F128::from_raw(0), |digit| tables[0][digit]);
@@ -200,7 +170,7 @@ fn column_product(
 }
 
 fn equality_claims<const M: usize>(
-    columns: &DigitColumns<SyntheticTrace>,
+    columns: &PresentGroup,
     tables: &[Vec<F128>],
     terms: &[EqTerm; M],
     geometry: CycleChunks,
@@ -246,111 +216,80 @@ fn equality_claims<const M: usize>(
         .map(Accumulator::reduce))
 }
 
+impl Prepared {
+    fn new(source: Arc<SyntheticTrace>) -> Result<Self, BenchError> {
+        let log_t = source.cycles().ilog2() as usize;
+        let (trace, mut groups) = ValidatedTrace::prepare(
+            source,
+            PrepareRequest {
+                present: vec![(0..5).collect()],
+                optional: vec![],
+            },
+        )?;
+        let trace = Arc::new(trace);
+        let columns = groups.present.remove(0);
+        let tables: Vec<_> = digit_points()
+            .iter()
+            .map(|point| eq_table(point, None))
+            .collect();
+        let geometry = CycleChunks::new(log_t, 0)?;
+        let dense = combined_weight(log_t, &terms(log_t, Variant::Dense))?;
+        let dense_claim = dense
+            .par_chunks(geometry.chunk_len())
+            .enumerate()
+            .map(|(chunk, weights)| {
+                let mut sum = F128Accumulator::default();
+                for (offset, &weight) in weights.iter().enumerate() {
+                    sum.fmadd(
+                        weight,
+                        column_product(&columns, &tables, chunk * geometry.chunk_len() + offset),
+                    );
+                }
+                sum
+            })
+            .reduce(F128Accumulator::default, |mut left, right| {
+                left.merge(right);
+                left
+            })
+            .reduce();
+        let equality_claims =
+            equality_claims(&columns, &tables, &equality_terms::<2>(log_t), geometry)?;
+        Ok(Self {
+            trace,
+            dense_claim,
+            equality_claims,
+        })
+    }
+}
+
 impl TimedCore {
     fn new(
-        source: Arc<SyntheticTrace>,
+        prepared: &Prepared,
+        columns: PresentGroup,
         variant: Variant,
-        cache: &Mutex<Option<Prepared>>,
     ) -> Result<(Self, F128), BenchError> {
-        let construction = Instant::now();
-        let log_t = source.cycles().ilog2() as usize;
-        let mut cache = cache.lock().map_err(|_| BenchError::TimingLock)?;
-        let start = Instant::now();
-        let prepared = cache.as_ref().filter(|prepared| {
-            Arc::ptr_eq(prepared.trace.source(), &source)
-                && matches!(
-                    (prepared.claims, variant),
-                    (PreparedClaims::Dense(_), Variant::Dense)
-                        | (
-                            PreparedClaims::Equality(_),
-                            Variant::DenseTwo | Variant::EqTerms
-                        )
-                )
-        });
-        let source_setup = prepared.is_none();
-        let trace = if let Some(prepared) = prepared {
-            Arc::clone(&prepared.trace)
-        } else {
-            Arc::new(ValidatedTrace::new(source)?)
-        };
-        let cached_claims = prepared.map(|prepared| prepared.claims);
-        let validation_ns = if source_setup {
-            start.elapsed().as_nanos()
-        } else {
-            0
-        };
-        let columns = DigitColumns::from_validated(Arc::clone(&trace), (0..5).collect())?;
+        let log_t = prepared.trace.source().cycles().ilog2() as usize;
         let points = digit_points();
-        let tables: Vec<_> = if source_setup {
-            points.iter().map(|point| eq_table(point, None)).collect()
-        } else {
-            Vec::new()
-        };
-        let geometry = CycleChunks::new(log_t, 0)?;
-        let (weight, claim, claims, combined_ns, claim_ns) = match variant {
+        let _geometry = CycleChunks::new(log_t, 0)?;
+        let (weight, claim, combined) = match variant {
             Variant::Dense => {
                 let terms = terms(log_t, variant);
-                let start = Instant::now();
+                let start = Clock::start();
                 let dense = combined_weight(log_t, &terms)?;
-                let combined_ns = start.elapsed().as_nanos();
-                let start = Instant::now();
-                let claim = if let Some(PreparedClaims::Dense(claim)) = cached_claims {
-                    claim
-                } else {
-                    dense
-                        .par_chunks(geometry.chunk_len())
-                        .enumerate()
-                        .map(|(chunk, weights)| {
-                            let mut sum = F128Accumulator::default();
-                            for (offset, &weight) in weights.iter().enumerate() {
-                                sum.fmadd(
-                                    weight,
-                                    column_product(
-                                        &columns,
-                                        &tables,
-                                        chunk * geometry.chunk_len() + offset,
-                                    ),
-                                );
-                            }
-                            sum
-                        })
-                        .reduce(F128Accumulator::default, |mut left, right| {
-                            left.merge(right);
-                            left
-                        })
-                        .reduce()
-                };
-                let claim_ns = if source_setup {
-                    start.elapsed().as_nanos()
-                } else {
-                    0
-                };
                 (
                     ChunkWeight::Dense(dense),
-                    claim,
-                    PreparedClaims::Dense(claim),
-                    combined_ns,
-                    claim_ns,
+                    prepared.dense_claim,
+                    start.elapsed(),
                 )
             }
             Variant::DenseTwo | Variant::EqTerms => {
                 let mut eq_terms = equality_terms::<2>(log_t);
-                let start = Instant::now();
-                let sums = if let Some(PreparedClaims::Equality(claims)) = cached_claims {
-                    claims
-                } else {
-                    equality_claims(&columns, &tables, &eq_terms, geometry)?
-                };
-                let claim_ns = if source_setup {
-                    start.elapsed().as_nanos()
-                } else {
-                    0
-                };
+                let sums = prepared.equality_claims;
                 for (term, claim) in eq_terms.iter_mut().zip(sums) {
                     term.claim = claim;
                 }
                 let claim = sums[0] + sums[1];
-                let (weight, combined_ns) = if matches!(variant, Variant::DenseTwo) {
+                let (weight, combined) = if matches!(variant, Variant::DenseTwo) {
                     let terms: Vec<_> = eq_terms
                         .into_iter()
                         .map(|term| ChunkWeightTerm::Eq {
@@ -358,36 +297,24 @@ impl TimedCore {
                             point: term.point,
                         })
                         .collect();
-                    let start = Instant::now();
+                    let start = Clock::start();
                     let dense = combined_weight(log_t, &terms)?;
-                    (ChunkWeight::Dense(dense), start.elapsed().as_nanos())
+                    (ChunkWeight::Dense(dense), start.elapsed())
                 } else {
-                    (ChunkWeight::EqTerms(eq_terms.into_iter().collect()), 0)
+                    (
+                        ChunkWeight::EqTerms(eq_terms.into_iter().collect()),
+                        Duration::ZERO,
+                    )
                 };
-                (
-                    weight,
-                    claim,
-                    PreparedClaims::Equality(sums),
-                    combined_ns,
-                    claim_ns,
-                )
+                (weight, claim, combined)
             }
         };
-        if source_setup {
-            *cache = Some(Prepared { trace, claims });
-        }
-        drop(cache);
         let inner = ChunkProductCore::new(columns, points, weight)?;
-        let construct_ns = construction.elapsed().as_nanos();
         Ok((
             Self {
                 inner,
-                log_t,
-                setup_ns: [validation_ns, combined_ns, claim_ns],
-                round_ns: [0; 2],
-                construct_ns,
-                finish_ns: 0,
-                source_setup,
+                combined,
+                rounds: [Duration::ZERO; 2],
             },
             claim,
         ))
@@ -398,7 +325,14 @@ fn nine_term_allocation_core(
     source: Arc<SyntheticTrace>,
 ) -> Result<(ChunkProductCore, F128), BenchError> {
     let log_t = source.cycles().ilog2() as usize;
-    let columns = DigitColumns::new(source, (0..5).collect())?;
+    let (_, mut groups) = ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![(0..5).collect()],
+            optional: vec![],
+        },
+    )?;
+    let columns = groups.present.remove(0);
     let points = digit_points();
     let tables: Vec<_> = points.iter().map(|point| eq_table(point, None)).collect();
     let geometry = CycleChunks::new(log_t, 0)?;
@@ -419,332 +353,6 @@ fn nine_term_allocation_core(
     Ok((core, claim))
 }
 
-#[derive(Clone)]
-struct CompactDigits {
-    digits: Vec<u8>,
-    bits: [usize; 7],
-    d: usize,
-    cycles: usize,
-}
-
-impl CompactDigits {
-    fn new(columns: &DigitColumns<SyntheticTrace>) -> Result<Self, BenchError> {
-        let cycles = columns.cycles();
-        let d = columns.num_polys();
-        let bits = std::array::from_fn(|column| {
-            if column < d {
-                columns.source().bits(columns.columns()[column])
-            } else {
-                0
-            }
-        });
-        let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)?;
-        let mut digits = jolt_utils::unsafe_allocate_zero_vec(cycles * d);
-        let missing = digits
-            .par_chunks_mut(geometry.chunk_len() * d)
-            .enumerate()
-            .find_map_first(|(chunk, digits)| {
-                let start = chunk * geometry.chunk_len();
-                for (offset, row) in digits.chunks_exact_mut(d).enumerate() {
-                    for (column, digit) in row.iter_mut().enumerate() {
-                        let cycle = start + offset;
-                        match columns.index(column, cycle) {
-                            Some(index) => *digit = index as u8,
-                            None => return Some(ChunkProductError::MissingDigit { column, cycle }),
-                        }
-                    }
-                }
-                None
-            });
-        if let Some(error) = missing {
-            return Err(error.into());
-        }
-        Ok(Self {
-            digits,
-            bits,
-            d,
-            cycles,
-        })
-    }
-}
-
-impl ChunkIndexSource for CompactDigits {
-    fn num_polys(&self) -> usize {
-        self.d
-    }
-    fn cycles(&self) -> usize {
-        self.cycles
-    }
-    #[inline]
-    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        Some(usize::from(self.digits[cycle * self.d + column]))
-    }
-    fn index_bound(&self, column: usize) -> Option<usize> {
-        Some(1 << self.bits[column])
-    }
-}
-
-fn seeded_challenges() -> [F128; 32] {
-    let mut rng = ChaCha20Rng::seed_from_u64(0x726f_756e_6473);
-    std::array::from_fn(|_| F128::random(&mut rng))
-}
-
-fn measure_gathers(columns: CompactDigits, log_t: usize) -> Result<u128, BenchError> {
-    let tables = digit_points()
-        .iter()
-        .map(|point| eq_table(point, None))
-        .collect();
-    let mut columns = LazyFoldedRa::try_new(tables, columns)?;
-    let challenges = seeded_challenges();
-    let mut elapsed = 0;
-    for (round, &challenge) in challenges.iter().take(log_t.min(4)).enumerate() {
-        let geometry = CycleChunks::new(log_t, round)?;
-        let start = Instant::now();
-        let checksum = (0..geometry.len() / geometry.chunk_len())
-            .into_par_iter()
-            .map(|chunk| {
-                let start = chunk * geometry.chunk_len() / 2;
-                let end = start + geometry.chunk_len() / 2;
-                let mut values = [(F128::from_raw(0), F128::from_raw(0)); 5];
-                let mut sum = F128::from_raw(0);
-                for pair in start..end {
-                    columns.lo_hi_all(pair, &mut values);
-                    for &(low, high) in &values {
-                        sum += low + high;
-                    }
-                }
-                sum
-            })
-            .reduce(|| F128::from_raw(0), |left, right| left + right);
-        let _ = black_box(checksum);
-        columns.bind(challenge);
-        elapsed += start.elapsed().as_nanos();
-    }
-    Ok(elapsed)
-}
-
-fn median(mut samples: Vec<f64>) -> f64 {
-    samples.sort_by(f64::total_cmp);
-    let middle = samples.len() / 2;
-    if samples.len().is_multiple_of(2) {
-        samples[middle - 1].midpoint(samples[middle])
-    } else {
-        samples[middle]
-    }
-}
-
-#[expect(clippy::print_stdout, reason = "phase splits are benchmark output")]
-fn report(records: &[Record]) -> Result<(), RunnerError> {
-    for (index, record) in records.iter().enumerate() {
-        if records[..index].iter().any(|prior| {
-            prior.variant == record.variant
-                && prior.log_t == record.log_t
-                && prior.threads == record.threads
-        }) {
-            continue;
-        }
-        let samples: Vec<_> = records
-            .iter()
-            .filter(|sample| {
-                sample.variant == record.variant
-                    && sample.log_t == record.log_t
-                    && sample.threads == record.threads
-            })
-            .collect();
-        let cycles = (1_usize << record.log_t) as f64;
-        let statistic = if record.threads == 1 {
-            "minimum"
-        } else {
-            "median"
-        };
-        let summarize = |values: Vec<f64>| {
-            if record.threads == 1 {
-                values.into_iter().fold(f64::INFINITY, f64::min)
-            } else {
-                median(values)
-            }
-        };
-        let setup: [f64; 3] = std::array::from_fn(|phase| {
-            summarize(
-                samples
-                    .iter()
-                    .map(|sample| sample.setup_ns[phase] as f64 / cycles)
-                    .collect(),
-            )
-        });
-        let rounds: [f64; 2] = std::array::from_fn(|phase| {
-            summarize(
-                samples
-                    .iter()
-                    .map(|sample| sample.round_ns[phase] as f64 / cycles)
-                    .collect(),
-            )
-        });
-        let cold = samples.iter().find(|sample| sample.source_setup);
-        let cold_validation = cold.map_or(0.0, |sample| sample.setup_ns[0] as f64 / cycles);
-        let cold_claim = cold.map_or(0.0, |sample| sample.setup_ns[2] as f64 / cycles);
-        let cold_total = cold.map_or(0.0, |sample| {
-            (sample.construct_ns + sample.round_ns.iter().sum::<u128>() + sample.finish_ns) as f64
-                / cycles
-        });
-        println!("chunk_product_source_setup/{}/{}/{} source_setup_cache=true first_use_validation_ns={cold_validation:.6} first_use_claim_preparation_ns={cold_claim:.6} cold_total_without_extraction_ns={cold_total:.6} loaded_machine=true statistic={statistic} parallel_evidence=false", record.variant, record.log_t, record.threads);
-        println!("chunk_product_split/{}/{}/{} validation_ns={:.6} combined_weight_ns={:.6} claim_preparation_ns={:.6} first_four_rounds_ns={:.6} later_rounds_ns={:.6} loaded_machine=true statistic={statistic} parallel_evidence=false", record.variant, record.log_t, record.threads, setup[0], setup[1], setup[2], rounds[0], rounds[1]);
-        if record.variant != "dense" {
-            continue;
-        }
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(record.threads)
-            .build()
-            .map_err(|error| RunnerError::ThreadPool {
-                message: error.to_string(),
-            })?;
-        let _ = pool.broadcast(|_| black_box(()));
-        let gathers = pool
-            .install(|| -> Result<_, BenchError> {
-                let source = Arc::new(SyntheticTrace::new(
-                    SynthProfile::UniformDigits,
-                    record.log_t,
-                    1 << 20,
-                    0x5eed,
-                )?);
-                let trace = Arc::new(ValidatedTrace::new(source)?);
-                let columns = DigitColumns::from_validated(trace, (0..5).collect())?;
-                let compact = CompactDigits::new(&columns)?;
-                let mut measured = Vec::with_capacity(samples.len());
-                for _ in 0..samples.len() {
-                    measured.push(measure_gathers(compact.clone(), record.log_t)? as f64 / cycles);
-                }
-                Ok(summarize(measured))
-            })
-            .map_err(|error| RunnerError::Core {
-                message: error.to_string(),
-            })?;
-        println!("chunk_product_model_split/{}/{} combined_weight_ns={:.6} column_gathers_ns={gathers:.6} rounds_minus_independent_gather_diagnostic_ns={:.6} difference_is_independent_phase=false model_combined_ns=5.1 model_gathers_ns=10.0 model_rounds_ns=40.1 threshold_ns={:.6} loaded_machine=true statistic={statistic} parallel_evidence=false", record.log_t, record.threads, setup[1], rounds.iter().sum::<f64>() - gathers, if record.threads == 12 { 69.0 / 9.6 } else { 69.0 });
-    }
-    Ok(())
-}
-
-struct OptionStats {
-    min: f64,
-    median: f64,
-    max: f64,
-}
-
-impl OptionStats {
-    fn new(samples: &[f64]) -> Self {
-        Self {
-            min: samples.iter().copied().reduce(f64::min).unwrap_or_default(),
-            median: median(samples.to_vec()),
-            max: samples.iter().copied().reduce(f64::max).unwrap_or_default(),
-        }
-    }
-
-    fn spread(&self) -> f64 {
-        self.max - self.min
-    }
-}
-
-fn option_sample(
-    source: &Arc<SyntheticTrace>,
-    variant: Variant,
-    cache: &Mutex<Option<Prepared>>,
-    challenges: &[F128],
-) -> Result<f64, BenchError> {
-    let start = Instant::now();
-    let (mut core, mut claim) = TimedCore::new(Arc::clone(source), variant, cache)?;
-    let mut bind = None;
-    for (round, &challenge) in challenges.iter().enumerate() {
-        let message = core.prove_round(bind, round, claim)?;
-        claim = message.evaluate(challenge);
-        bind = Some(challenge);
-        let _ = black_box(message);
-    }
-    if let Some(challenge) = bind {
-        core.finish_rounds(challenge)?;
-    }
-    let values = core.inner.final_values()?;
-    let _ = black_box((claim, values));
-    Ok(start.elapsed().as_nanos() as f64 / source.cycles() as f64)
-}
-
-#[expect(
-    clippy::print_stdout,
-    reason = "matched option statistics and default recommendation are benchmark output"
-)]
-fn compare_options(records: &[Record]) -> Result<(), RunnerError> {
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()
-        .map_err(|error| RunnerError::ThreadPool {
-            message: error.to_string(),
-        })?;
-    let _ = pool.broadcast(|_| black_box(()));
-    let mut wins = [None; 2];
-    for (index, log_t) in [20, 22].into_iter().enumerate() {
-        let Some(record) = records
-            .iter()
-            .find(|record| record.log_t == log_t && record.threads == 1)
-        else {
-            continue;
-        };
-        let samples = records
-            .iter()
-            .filter(|sample| {
-                sample.log_t == log_t && sample.threads == 1 && sample.variant == record.variant
-            })
-            .count()
-            .max(5);
-        let (dense, eq) = pool
-            .install(|| -> Result<_, BenchError> {
-                let source = Arc::new(SyntheticTrace::new(
-                    SynthProfile::UniformDigits,
-                    log_t,
-                    1 << 20,
-                    0x5eed,
-                )?);
-                let cache = Mutex::new(None);
-                let challenges = seeded_challenges();
-                let challenges = &challenges[..log_t];
-                let _ = option_sample(&source, Variant::DenseTwo, &cache, challenges)?;
-                let _ = option_sample(&source, Variant::EqTerms, &cache, challenges)?;
-                let mut dense = Vec::with_capacity(samples);
-                let mut eq = Vec::with_capacity(samples);
-                for sample in 0..samples {
-                    let order = if sample.is_multiple_of(2) {
-                        [Variant::DenseTwo, Variant::EqTerms]
-                    } else {
-                        [Variant::EqTerms, Variant::DenseTwo]
-                    };
-                    for variant in order {
-                        let timing = option_sample(&source, variant, &cache, challenges)?;
-                        if matches!(variant, Variant::DenseTwo) {
-                            dense.push(timing);
-                        } else {
-                            eq.push(timing);
-                        }
-                    }
-                }
-                Ok((OptionStats::new(&dense), OptionStats::new(&eq)))
-            })
-            .map_err(|error| RunnerError::Core {
-                message: error.to_string(),
-            })?;
-        let gain = dense.median - eq.median;
-        let spread = dense.spread() + eq.spread();
-        let wins_here = gain > spread;
-        wins[index] = Some(wins_here);
-        println!("chunk_product_options/{log_t}/1 samples={samples} alternating=true same_input=true source_validation_timed=false claim_preparation_timed=false dense_weight_construction_timed=true core_construction_timed=true dense_two_min_ns={:.6} dense_two_median_ns={:.6} dense_two_max_ns={:.6} eq_terms_two_min_ns={:.6} eq_terms_two_median_ns={:.6} eq_terms_two_max_ns={:.6} median_gain_ns={gain:.6} sum_spreads_ns={spread:.6} eq_terms_wins={wins_here} loaded_machine=true", dense.min, dense.median, dense.max, eq.min, eq.median, eq.max);
-    }
-    let complete = wins.iter().all(Option::is_some);
-    let winner = if complete && wins.iter().all(|win| *win == Some(true)) {
-        "eq_terms"
-    } else {
-        "dense"
-    };
-    println!("chunk_product_two_term_default recommendation={winner} compared_both_sizes={complete} criterion=median_gain_exceeds_sum_spreads_at_both_sizes loaded_machine=true");
-    Ok(())
-}
-
 fn allocation_bound(log_t: usize, terms: usize) -> AllocationAllowance {
     let columns = 5;
     let column_bits = 4;
@@ -763,6 +371,164 @@ fn allocation_bound(log_t: usize, terms: usize) -> AllocationAllowance {
         },
         bytes: column_bytes + branch_bytes + round_values * size_of::<F128>() + metadata_bytes,
     }
+}
+
+const EQ_TERMS_NINE_ALLOCATIONS_PER_EXTRA_ROUND: usize = 25;
+
+fn measure_round_allocations(
+    log_t: usize,
+    term_count: Option<usize>,
+) -> Result<AllocationStats, BenchError> {
+    let source = Arc::new(SyntheticTrace::new(
+        SynthProfile::UniformDigits,
+        log_t,
+        16,
+        0x5eed,
+    )?);
+    let (mut core, mut claim) = if term_count == Some(9) {
+        nine_term_allocation_core(source)?
+    } else {
+        let variant = if term_count.is_some() {
+            Variant::EqTerms
+        } else {
+            Variant::Dense
+        };
+        let prepared = Prepared::new(source)?;
+        let (_, mut groups) = ValidatedTrace::prepare(
+            Arc::clone(prepared.trace.source()),
+            PrepareRequest {
+                present: vec![(0..5).collect()],
+                optional: vec![],
+            },
+        )?;
+        let (core, claim) = TimedCore::new(&prepared, groups.present.remove(0), variant)?;
+        (core.inner, claim)
+    };
+    let challenges = seeded_challenges();
+    let measurement = AllocationMeasurement::begin();
+    let mut bind = None;
+    for (round, &challenge) in challenges.iter().take(log_t).enumerate() {
+        let message = core.prove_round(bind, round, claim)?;
+        claim = message.evaluate(challenge);
+        bind = Some(challenge);
+    }
+    core.finish_rounds(challenges[log_t - 1])?;
+    Ok(measurement.finish())
+}
+
+fn round_chunk_visits(log_t: usize) -> Result<usize, ParError> {
+    (1..=log_t)
+        .map(|round| CycleChunks::new(log_t, round).map(|geometry| geometry.ranges().len()))
+        .sum()
+}
+
+fn fit_allocation_growth(rounds: [usize; 3], visits: [usize; 3], counts: [usize; 3]) -> [f64; 3] {
+    let rounds = rounds.map(|value| value as f64);
+    let visits = visits.map(|value| value as f64);
+    let counts = counts.map(|value| value as f64);
+    let dr1 = rounds[1] - rounds[0];
+    let dr2 = rounds[2] - rounds[0];
+    let dv1 = visits[1] - visits[0];
+    let dv2 = visits[2] - visits[0];
+    let dc1 = counts[1] - counts[0];
+    let dc2 = counts[2] - counts[0];
+    let determinant = dr1 * dv2 - dr2 * dv1;
+    let b = (dc1 * dv2 - dc2 * dv1) / determinant;
+    let c = (dr1 * dc2 - dr2 * dc1) / determinant;
+    [counts[0] - b * rounds[0] - c * visits[0], b, c]
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "allocation growth acceptance reports measured counts and chunk visits"
+)]
+fn check_round_allocations_grow_with_rounds_not_chunk_visits(
+    pool: &ThreadPool,
+) -> Result<(), RunnerError> {
+    let sizes = [14, 18];
+    let visits = sizes.map(round_chunk_visits);
+    let [small_visits, large_visits] = visits;
+    let small_visits = small_visits.map_err(|error| RunnerError::Core {
+        message: error.to_string(),
+    })?;
+    let large_visits = large_visits.map_err(|error| RunnerError::Core {
+        message: error.to_string(),
+    })?;
+    if large_visits < 4 * small_visits {
+        return Err(RunnerError::Core {
+            message: "allocation growth cases must differ by at least four times the chunk visits"
+                .to_owned(),
+        });
+    }
+    let mut failure = None;
+    for (name, term_count, per_round) in [
+        ("dense", None, 6),
+        ("eq_terms_2", Some(2), 11),
+        (
+            "eq_terms_9",
+            Some(9),
+            EQ_TERMS_NINE_ALLOCATIONS_PER_EXTRA_ROUND,
+        ),
+    ] {
+        let limit = per_round * (sizes[1] - sizes[0])
+            + RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
+        let mut minimum = [usize::MAX; 2];
+        let mut maximum = [0; 2];
+        let mut growth = 0;
+        for sample in 0..30 {
+            let mut counts = [0; 2];
+            let order = if sample % 2 == 0 { [0, 1] } else { [1, 0] };
+            for index in order {
+                counts[index] = pool
+                    .install(|| measure_round_allocations(sizes[index], term_count))
+                    .map_err(|error| RunnerError::Core {
+                        message: error.to_string(),
+                    })?
+                    .allocs;
+                minimum[index] = minimum[index].min(counts[index]);
+                maximum[index] = maximum[index].max(counts[index]);
+            }
+            growth = growth.max(counts[1].saturating_sub(counts[0]));
+        }
+        println!("chunk_product_allocation_growth/{name}/1 samples=30 log_t_small={} log_t_large={} visits_small={small_visits} visits_large={large_visits} count_small_min={} count_small_max={} count_large_min={} count_large_max={} growth={growth} limit={limit}", sizes[0], sizes[1], minimum[0], maximum[0], minimum[1], maximum[1]);
+        if term_count == Some(9) {
+            let middle_size = 16;
+            let middle_visits =
+                round_chunk_visits(middle_size).map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            let mut middle_min = usize::MAX;
+            let mut middle_max = 0;
+            for _ in 0..30 {
+                let count = pool
+                    .install(|| measure_round_allocations(middle_size, term_count))
+                    .map_err(|error| RunnerError::Core {
+                        message: error.to_string(),
+                    })?
+                    .allocs;
+                middle_min = middle_min.min(count);
+                middle_max = middle_max.max(count);
+            }
+            let [a, b, c] = fit_allocation_growth(
+                [sizes[0], middle_size, sizes[1]],
+                [small_visits, middle_visits, large_visits],
+                [minimum[0], middle_min, minimum[1]],
+            );
+            println!("chunk_product_allocation_fit/{name}/1 samples=30 log_t_middle={middle_size} visits_middle={middle_visits} count_middle_min={middle_min} count_middle_max={middle_max} a={a} b={b} c={c}");
+        }
+        if growth > limit && failure.is_none() {
+            failure = Some(RunnerError::Core {
+                message: BenchError::Allocation {
+                    log_t: sizes[1],
+                    quantity: "allocation growth with chunk visits",
+                    actual: growth,
+                    limit,
+                }
+                .to_string(),
+            });
+        }
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 #[expect(
@@ -791,33 +557,7 @@ fn check_allocations() -> Result<(), RunnerError> {
             };
             let stats = pool
                 .install(|| -> Result<_, BenchError> {
-                    let source = Arc::new(SyntheticTrace::new(
-                        SynthProfile::UniformDigits,
-                        log_t,
-                        16,
-                        0x5eed,
-                    )?);
-                    let (mut core, mut claim) = if term_count == Some(9) {
-                        nine_term_allocation_core(source)?
-                    } else {
-                        let variant = if term_count.is_some() {
-                            Variant::EqTerms
-                        } else {
-                            Variant::Dense
-                        };
-                        let (core, claim) = TimedCore::new(source, variant, &Mutex::new(None))?;
-                        (core.inner, claim)
-                    };
-                    let challenges = seeded_challenges();
-                    let measurement = AllocationMeasurement::begin();
-                    let mut bind = None;
-                    for (round, &challenge) in challenges.iter().take(log_t).enumerate() {
-                        let message = core.prove_round(bind, round, claim)?;
-                        claim = message.evaluate(challenge);
-                        bind = Some(challenge);
-                    }
-                    core.finish_rounds(challenges[log_t - 1])?;
-                    let stats = measurement.finish();
+                    let stats = measure_round_allocations(log_t, term_count)?;
                     for (quantity, actual, limit) in [
                         ("allocation count", stats.allocs, limit.allocs),
                         ("peak bytes", stats.peak_bytes, limit.bytes),
@@ -840,45 +580,121 @@ fn check_allocations() -> Result<(), RunnerError> {
             println!("chunk_product_allocation/{name}/{log_t}/{workers} allocs={} limit={} peak_bytes={} final_bytes={} byte_limit={} kernel_alloc_limit={} kernel_byte_limit={} runtime_alloc_allowance={} runtime_byte_allowance={} PASS", stats.allocs, limit.allocs, stats.peak_bytes, stats.final_bytes, limit.bytes, kernel.allocs, kernel.bytes, RAYON_WORKER_ALLOWANCE.allocs * workers, RAYON_WORKER_ALLOWANCE.bytes * workers);
         }
     }
-    Ok(())
+    check_round_allocations_grow_with_rounds_not_chunk_visits(&pool)
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "model and option records are benchmark output"
+)]
 fn main() -> Result<(), RunnerError> {
     check_allocations()?;
-    let records = Mutex::new(Vec::new());
-    for variant in [Variant::Dense, Variant::EqTerms] {
-        let name = match variant {
-            Variant::Dense => "chunk_product",
-            Variant::DenseTwo => "chunk_product_dense_two",
-            Variant::EqTerms => "chunk_product_eq_terms",
-        };
-        let cache = Mutex::new(None);
-        run_core(
+    let cases: Vec<_> = [
+        ("chunk_product", Variant::Dense),
+        ("chunk_product_dense_two", Variant::DenseTwo),
+        ("chunk_product_eq_terms", Variant::EqTerms),
+    ]
+    .into_iter()
+    .map(|(name, variant)| {
+        let mut case = Case::core(
             name,
-            &[SynthProfile::UniformDigits],
-            |source| TimedCore::new(source, variant, &cache),
-            |core, _point| {
-                let values = core.inner.final_values()?;
-                records
-                    .lock()
-                    .map_err(|_| BenchError::TimingLock)?
-                    .push(Record {
-                        variant: variant.name(),
-                        log_t: core.log_t,
-                        threads: rayon::current_num_threads(),
-                        setup_ns: core.setup_ns,
-                        round_ns: core.round_ns,
-                        construct_ns: core.construct_ns,
-                        finish_ns: core.finish_ns,
-                        source_setup: core.source_setup,
-                    });
-                Ok::<_, BenchError>(values)
-            },
-        )?;
+            variant,
+            &["combined_weight", "first_four_rounds", "later_rounds"],
+        );
+        if matches!(variant, Variant::Dense) {
+            case.threshold = Some(|_, threads| if threads == 12 { 69.0 / 9.6 } else { 69.0 });
+        }
+        case
+    })
+    .collect();
+    let records = run_prepared_cases(
+        &[SynthProfile::UniformDigits],
+        &cases,
+        |source| {
+            Prepared::new(source).map_err(|error| RunnerError::Core {
+                message: error.to_string(),
+            })
+        },
+        |prepared, _| {
+            let (_, mut groups) = ValidatedTrace::prepare(
+                Arc::clone(prepared.trace.source()),
+                PrepareRequest {
+                    present: vec![(0..5).collect()],
+                    optional: vec![],
+                },
+            )
+            .map_err(|error| RunnerError::Core {
+                message: error.to_string(),
+            })?;
+            Ok(groups.present.remove(0))
+        },
+        |prepared, columns, &variant, challenges, times| {
+            let start = Clock::start();
+            let (mut core, claim) =
+                TimedCore::new(prepared, columns, variant).map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            times.set(0, start.elapsed());
+            let batch = core_rounds(&mut core, claim, challenges)?;
+            times.set(1, batch.rounds);
+            times.set(2, batch.finish);
+            let start = Clock::start();
+            let values = core
+                .inner
+                .final_values()
+                .map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            let _ = black_box(&values);
+            times.set(3, start.elapsed());
+            Ok::<_, RunnerError>((core, values))
+        },
+        |(core, _), times| {
+            times.set(4, core.combined);
+            times.set(5, core.rounds[0]);
+            times.set(6, core.rounds[1]);
+        },
+        |record, _, variant| {
+            let log_t = record.log_t;
+            let threads = record.threads;
+            let name = variant.name();
+            println!("chunk_product_split/{name}/{log_t}/{threads} validation_ns=outside_samples claim_preparation_ns=outside_samples combined_weight_ns={:.6} first_four_rounds_ns={:.6} later_rounds_ns={:.6} samples={} loaded_machine=true statistic=median parallel_evidence=false", record.phases[4].median, record.phases[5].median, record.phases[6].median, record.samples);
+            if matches!(variant, Variant::Dense) {
+                println!("chunk_product_model_split/{log_t}/{threads} combined_weight_ns={:.6} column_gathers_ns=separate_measurement rounds_minus_independent_gather_diagnostic_ns=unavailable difference_is_independent_phase=false model_combined_ns=5.1 model_gathers_ns=10.0 model_rounds_ns=40.1 loaded_machine=true statistic=median parallel_evidence=false", record.phases[4].median);
+            }
+        },
+    )?;
+    let mut wins = [None; 2];
+    for (index, log_t) in [20, 22].into_iter().enumerate() {
+        let dense = records.iter().find(|record| {
+            record.log_t == log_t
+                && record.threads == 1
+                && record.id.starts_with("chunk_product_dense_two/")
+        });
+        let eq = records.iter().find(|record| {
+            record.log_t == log_t
+                && record.threads == 1
+                && record.id.starts_with("chunk_product_eq_terms/")
+        });
+        if let (Some(dense), Some(eq)) = (dense, eq) {
+            eq.print_comparison(&format!("chunk_product_options/{log_t}/1"), dense);
+            wins[index] = Some(eq.improves_on(dense));
+        }
     }
-    let records = records.into_inner().map_err(|_| RunnerError::Core {
-        message: BenchError::TimingLock.to_string(),
-    })?;
-    report(&records)?;
-    compare_options(&records)
+    let complete = wins.iter().all(Option::is_some);
+    let winner = if complete && wins.iter().all(|win| *win == Some(true)) {
+        "eq_terms"
+    } else {
+        "dense"
+    };
+    println!("chunk_product_two_term_default recommendation={winner} compared_both_sizes={complete} criterion=median_gain_exceeds_sum_spreads_at_both_sizes loaded_machine=true");
+    println!("chunk_product_gather_note standalone_gathers_and_lazy_binds=separate_measurement_not_a_share_of_fused_rounds loaded_machine=true");
+    run_gathers(
+        &[SynthProfile::UniformDigits],
+        &[(
+            "chunk_product/standalone_gathers_and_lazy_binds",
+            (0..5).collect(),
+        )],
+        |_| digit_points(),
+    )
 }

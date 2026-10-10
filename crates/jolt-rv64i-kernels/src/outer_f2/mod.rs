@@ -87,7 +87,8 @@ impl Default for OuterF2Options {
     }
 }
 
-enum State {
+enum State<S> {
+    SourceRound { round: usize, source: Arc<S> },
     Round(usize),
     LastBind,
     Finished,
@@ -95,10 +96,12 @@ enum State {
 }
 
 /// Packed outer core emitting `8 + log_t` degree-three coefficient messages.
-/// The source is shared, and row and cycle coordinates are bound low first.
+/// Row and cycle coordinates are bound low first. The shared source is released
+/// after the seventh round materialises the group tables and tail bytes. This
+/// lowers the live set of later rounds, not the peak reached while those tables
+/// are built beside the source lanes.
 /// Final values are available after a successful `finish_rounds`.
 pub struct OuterF2Core<S: LaneSource> {
-    source: Arc<S>,
     tau: Vec<F128>,
     options: OuterF2Options,
     log_t: usize,
@@ -115,7 +118,7 @@ pub struct OuterF2Core<S: LaneSource> {
     tail_values: [[F128; 3]; 64],
     cycle_eq: Option<GruenSplitEqPolynomial<F128>>,
     final_values: [F128; 3],
-    state: State,
+    state: State<S>,
 }
 
 impl<S: LaneSource> OuterF2Core<S> {
@@ -146,7 +149,6 @@ impl<S: LaneSource> OuterF2Core<S> {
         let chunks = CycleChunks::new(log_t, 0)?;
         let (low, high) = chunks.split_point(&tau[8..])?;
         Ok(Self {
-            source,
             tau: tau.to_vec(),
             options,
             log_t,
@@ -165,7 +167,7 @@ impl<S: LaneSource> OuterF2Core<S> {
             tail_values: [[ZERO; 3]; 64],
             cycle_eq: None,
             final_values: [ZERO; 3],
-            state: State::Round(0),
+            state: State::SourceRound { round: 0, source },
         })
     }
 
@@ -190,7 +192,7 @@ impl<S: LaneSource> OuterF2Core<S> {
         Ok(())
     }
 
-    fn position<const AT_ONE: bool>(&mut self, k: usize) -> Result<Sums, OuterError> {
+    fn position<const AT_ONE: bool>(&mut self, source: &S, k: usize) -> Result<Sums, OuterError> {
         let rho = eq_table(&self.tau[k + 1..6], None);
         let sums = if k < self.options.monomial_rounds {
             let form = Monomial::new(&self.point, &rho, &self.omega, self.options.nibble_round_2)?;
@@ -201,7 +203,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                 ($k:literal, $nibble:literal) => {{
                     const GEOMETRY: MonomialGeometry = MonomialGeometry::new($k, $nibble);
                     form.pass::<$k, $nibble, AT_ONE, { GEOMETRY.n }, { GEOMETRY.tables }, { GEOMETRY.count }, { GEOMETRY.squared }, S>(
-                        &*self.source,
+                        source,
                         self.chunks,
                         &self.lo,
                         &self.hi,
@@ -232,7 +234,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                         &self.omega,
                         self.options.folded_group_weights,
                     )?
-                    .pass::<AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi)
+                    .pass::<AT_ONE, S>(source, self.chunks, &self.lo, &self.hi)
                 }};
             }
             match k {
@@ -314,7 +316,7 @@ impl<S: LaneSource> OuterF2Core<S> {
         sums.map(|sum| sum.reduce() * rho * self.omega[2])
     }
 
-    fn materialise(&mut self) -> Sums {
+    fn materialise(&mut self, source: &S) -> Sums {
         let weights = eq_table(&self.point, None);
         let lift = WordLift::new(&std::array::from_fn(|index| weights[index]));
         self.tail_values = std::array::from_fn(|byte| self.tail_at(byte));
@@ -329,7 +331,6 @@ impl<S: LaneSource> OuterF2Core<S> {
         let block_len = self.chunks.block_len();
         let lo = &self.lo;
         let hi = &self.hi;
-        let source = &self.source;
         let sums = a0
             .par_chunks_mut(chunk_len)
             .zip(b0.par_chunks_mut(chunk_len))
@@ -651,11 +652,14 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
         round: usize,
         previous_claim: F128,
     ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
-        let State::Round(expected) = self.state else {
-            return Err(SumcheckError::WrongNumberOfRounds {
-                expected: self.num_rounds(),
-                got: round,
-            });
+        let expected = match &self.state {
+            State::SourceRound { round, .. } | State::Round(round) => *round,
+            _ => {
+                return Err(SumcheckError::WrongNumberOfRounds {
+                    expected: self.num_rounds(),
+                    got: round,
+                });
+            }
         };
         if round != expected {
             return Err(SumcheckError::WrongNumberOfRounds {
@@ -668,7 +672,7 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
                 kind: "outer previous challenge",
             });
         }
-        self.state = State::Failed;
+        let mut state = std::mem::replace(&mut self.state, State::Failed);
         if let Some(r) = bind {
             if round <= 8 {
                 self.sigma *= ONE + self.tau[round - 1] + r;
@@ -677,14 +681,18 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
                 eq.bind(r);
             }
         }
-        let sums = match round {
-            0..=5 => self.position::<false>(round).map_err(|_| {
-                SumcheckError::MissingEvaluationSource {
+        let sums = match &state {
+            State::SourceRound { source, .. } if round < 6 => self
+                .position::<false>(source, round)
+                .map_err(|_| SumcheckError::MissingEvaluationSource {
                     kind: "outer position scratch",
-                }
-            })?,
-            6 => self.materialise(),
-            7.. => {
+                })?,
+            State::SourceRound { source, .. } => {
+                let sums = self.materialise(source);
+                state = State::Round(round);
+                sums
+            }
+            State::Round(_) => {
                 let Some(r) = bind else {
                     return Err(SumcheckError::MissingEvaluationSource {
                         kind: "outer previous challenge",
@@ -704,6 +712,12 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
                     _ => self.cycle_next(round - 8, r),
                 }
             }
+            _ => {
+                return Err(SumcheckError::WrongNumberOfRounds {
+                    expected: self.num_rounds(),
+                    got: round,
+                });
+            }
         };
         let row_linear = (round < 8).then(|| {
             (
@@ -714,7 +728,12 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
         let one = if let Some(linear) = row_linear {
             let endpoint = if linear.1 == ZERO {
                 if round < 6 {
-                    self.position::<true>(round).map_err(|_| {
+                    let State::SourceRound { source, .. } = &state else {
+                        return Err(SumcheckError::MissingEvaluationSource {
+                            kind: "outer position source",
+                        });
+                    };
+                    self.position::<true>(source, round).map_err(|_| {
                         SumcheckError::MissingEvaluationSource {
                             kind: "outer endpoint scratch",
                         }
@@ -755,10 +774,13 @@ impl<S: LaneSource> ProveRounds<F128> for OuterF2Core<S> {
             };
             eq.round_poly_from_q_coeffs(&coefficients)
         };
-        self.state = if round + 1 == self.num_rounds() {
-            State::LastBind
-        } else {
-            State::Round(round + 1)
+        self.state = match state {
+            State::SourceRound { source, .. } => State::SourceRound {
+                round: round + 1,
+                source,
+            },
+            _ if round + 1 == self.num_rounds() => State::LastBind,
+            _ => State::Round(round + 1),
         };
         Ok(poly)
     }

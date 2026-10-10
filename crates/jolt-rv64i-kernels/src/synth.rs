@@ -24,9 +24,17 @@
 //! 90% in a 64-word window. Register writes occur on three quarters of cycles.
 //! Uniform digits have no trace words and every column is independent of the
 //! bytecode row; all digits are present and uniform over their bit width.
+//!
+//! | Profile | Value-word distribution | Other fields |
+//! |---|---|---|
+//! | `local`, `all_rows` | Uniform 64-bit words | Locality described above |
+//! | `uniform_digits` | Zero trace words, uniform 64-bit Imm | Independent uniform digits |
+//! | `small_values` | Rs1Value, Rs2Value, RdPreValue, RamReadValue and Imm each choose 0, 8, 16, 32 or 64 bits with equal probability, then a uniform word of that width | Identical to `all_rows` at the same seed |
+//!
 //! Fixed chunks of 4,096 cycles use separate ChaCha20 streams indexed by the
 //! chunk, making generation independent of the rayon pool.
 
+use crate::reduction::ColumnMap;
 use crate::source::{CycleSource, LaneSource};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -41,12 +49,31 @@ const WIDTHS: [usize; DIGIT_COLUMNS] = [
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 6, 3, 4, 3, 0, 0, 0, 0, 0,
 ];
 
+const WORD_BITS: usize = 64;
+const INC_WORD: usize = 5;
+const INDICATOR_COLUMNS: usize = 12;
+const FLAG_FIRST: usize = 18;
+const INDICATOR_STARTS: [usize; INDICATOR_COLUMNS] = {
+    let mut starts = [0; INDICATOR_COLUMNS];
+    let mut start = WORD_BITS;
+    let mut column = 0;
+    while column < INDICATOR_COLUMNS {
+        starts[column] = start;
+        start += (1 << WIDTHS[column]) - 1;
+        column += 1;
+    }
+    starts
+};
+const FLAGS_START: usize =
+    INDICATOR_STARTS[INDICATOR_COLUMNS - 1] + (1 << WIDTHS[INDICATOR_COLUMNS - 1]) - 1;
+
 /// Synthetic instruction and locality distributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynthProfile {
     Local,
     AllRows,
     UniformDigits,
+    SmallValues,
 }
 
 impl SynthProfile {
@@ -55,6 +82,7 @@ impl SynthProfile {
             Self::Local => "local",
             Self::AllRows => "all_rows",
             Self::UniformDigits => "uniform_digits",
+            Self::SmallValues => "small_values",
         }
     }
 }
@@ -124,6 +152,11 @@ impl SyntheticTrace {
             .for_each(|(chunk, rows)| {
                 let mut rng = seeded_rng(seed);
                 rng.set_stream((chunk as u64) | (1_u64 << 63));
+                let mut values_rng = (profile == SynthProfile::SmallValues).then(|| {
+                    let mut rng = seeded_rng(seed);
+                    rng.set_stream((chunk as u64) | (3_u64 << 62));
+                    rng
+                });
                 for (offset, row) in rows.iter_mut().enumerate() {
                     let index = chunk * GENERATION_CHUNK + offset;
                     let class = rng.next_u32() % 100;
@@ -165,13 +198,18 @@ impl SyntheticTrace {
                     row.selectors = [PRESENT | variant, shift, access, key, branch, store];
                     let pc = (index as u64) * 4;
                     row.words = [rng.next_u64(), pc + 4, pc.wrapping_add(rng.next_u64()), pc];
+                    if let Some(rng) = &mut values_rng {
+                        row.words[0] = small_value(rng);
+                    }
                 }
             });
         let mut rows = vec![[0; 4]; count];
         let mut cycles = vec![Cycle::default(); count];
         let visited = match profile {
             SynthProfile::Local => (bytecode_rows / 16).max(1),
-            SynthProfile::AllRows | SynthProfile::UniformDigits => bytecode_rows,
+            SynthProfile::AllRows | SynthProfile::UniformDigits | SynthProfile::SmallValues => {
+                bytecode_rows
+            }
         };
         let row_offset = seed as usize & (bytecode_rows - 1);
         cycles
@@ -181,6 +219,11 @@ impl SyntheticTrace {
             .for_each(|(chunk, (cycles, rows))| {
                 let mut rng = seeded_rng(seed);
                 rng.set_stream(chunk as u64);
+                let mut values_rng = (profile == SynthProfile::SmallValues).then(|| {
+                    let mut rng = seeded_rng(seed);
+                    rng.set_stream((chunk as u64) | (1_u64 << 62));
+                    rng
+                });
                 for (offset, (cycle, row)) in cycles.iter_mut().zip(rows).enumerate() {
                     let j = chunk * GENERATION_CHUNK + offset;
                     let k = (row_offset + j % visited) & (bytecode_rows - 1);
@@ -216,6 +259,11 @@ impl SyntheticTrace {
                         for word in &mut cycle.words[..4] {
                             *word = rng.next_u64();
                         }
+                        if let Some(rng) = &mut values_rng {
+                            for word in &mut cycle.words[..4] {
+                                *word = small_value(rng);
+                            }
+                        }
                         cycle.words[4] = bytecode
                             [(row_offset + (j + 1) % visited) & (bytecode_rows - 1)]
                             .words[3];
@@ -226,21 +274,18 @@ impl SyntheticTrace {
                         let b = rng.next_u32() as u8 & 3;
                         cycle.tail = a | (b << 2) | ((a & b) << 4);
                     }
-                    for (column, &packed) in cycle.digits[..12].iter().enumerate() {
+                    for (column, &packed) in cycle.digits[..INDICATOR_COLUMNS].iter().enumerate() {
                         let digit = usize::from(packed & !PRESENT);
                         if digit != 0 {
-                            let start = if column < 10 {
-                                64 + 15 * column
-                            } else {
-                                214 + 7 * (column - 10)
-                            };
+                            let start = INDICATOR_STARTS[column];
                             let bit = start + digit - 1;
                             row[bit / 64] |= 1 << (bit % 64);
                         }
                     }
-                    for column in 18..21 {
+                    for column in FLAG_FIRST..DIGIT_COLUMNS {
                         if cycle.digits[column] != 0 {
-                            row[3] |= 1 << (228 + column - 18 - 192);
+                            let bit = FLAGS_START + column - FLAG_FIRST;
+                            row[bit / WORD_BITS] |= 1 << (bit % WORD_BITS);
                         }
                     }
                 }
@@ -251,6 +296,34 @@ impl SyntheticTrace {
             cycles,
             bytecode,
         })
+    }
+
+    /// Maps the encoded Inc word, nonzero digit indicators and flag presence
+    /// to their packed-row columns, for every synthetic profile. Padding and
+    /// bytecode-only selectors have no entry; the row encoder uses this layout.
+    pub fn column_map() -> Vec<ColumnMap> {
+        let mut map = vec![ColumnMap::Word {
+            start: 0,
+            trace_word: INC_WORD,
+        }];
+        map.extend(
+            INDICATOR_STARTS
+                .iter()
+                .enumerate()
+                .map(|(column, &start)| ColumnMap::Indicators { start, column }),
+        );
+        map.push(ColumnMap::Flags {
+            start: FLAGS_START,
+            columns: (FLAG_FIRST..DIGIT_COLUMNS).collect(),
+        });
+        map
+    }
+
+    /// First packed-row bit for a column's nonzero indicators, whose lengths
+    /// are `2^bits(column) - 1`. Returns `None` for flags, selectors and invalid
+    /// columns; digit zero has no stored indicator.
+    pub fn indicator_start(column: usize) -> Option<usize> {
+        INDICATOR_STARTS.get(column).copied()
     }
 
     pub fn rows(&self) -> &[[u64; 4]] {
@@ -289,7 +362,7 @@ impl CycleSource for SyntheticTrace {
     }
     #[inline]
     fn trace_word(&self, word: usize, cycle: usize) -> u64 {
-        if word == 5 {
+        if word == INC_WORD {
             self.rows.get(cycle).map_or(0, |row| row[0])
         } else {
             self.cycles
@@ -367,4 +440,16 @@ fn seeded_rng(seed: u64) -> ChaCha20Rng {
     let mut bytes = [0; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
     ChaCha20Rng::from_seed(bytes)
+}
+
+fn small_value(rng: &mut ChaCha20Rng) -> u64 {
+    let widths = [0, 8, 16, 32, 64];
+    let choice = loop {
+        let choice = rng.next_u32();
+        if choice != u32::MAX {
+            break choice as usize % widths.len();
+        }
+    };
+    let width = widths[choice];
+    rng.next_u64() & u64::MAX.checked_shr(64 - width).unwrap_or(0)
 }

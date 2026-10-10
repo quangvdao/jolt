@@ -1,7 +1,18 @@
 //! Packed passes at log_t=20 and 22, five samples, on warmed one- and twelve-thread
-//! pools. Lift prices one whole word. Bucket prices one nibble update in the
-//! complete no-byte-selector fold layout. Scatter prices one cycle, excluding
-//! plan construction and weight/output allocation. The requirement row uses
+//! pools. `validate` prices `ValidatedTrace::new` on the all-rows synthetic trace,
+//! including group writing, temporary row-cache allocation and release, excluding trace generation:
+//! `validate_tail` adds the two present five-column groups; `validate_all`
+//! adds the routers' optional group too. All three run with `--units validate`.
+//! Each cycle checks one bytecode index and all 21 digits, 11 of them compared with
+//! a one-byte row cache; each bytecode row reads those 11 digits once. It has no
+//! requirement. To run it alone:
+//! ```sh
+//! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels --features test-utils --bench machinery -- --units validate --log-t 20,22 --threads 1,12 --samples 5
+//! ```
+//! Lift prices one whole word. Bucket prices one nibble update in the
+//! complete no-byte-selector fold layout. `bucket_small_values` runs the same
+//! updates with the zero-heavy `small_values` profile, with no requirement.
+//! Scatter prices one cycle, excluding plan construction and weight/output allocation. The requirement row uses
 //! consecutive `all_rows` destinations; `scatter_permuted` uses a fixed seeded
 //! permutation of all bytecode rows, repeated over cycles, with no requirement. Merge prices each of the
 //! `(2W - 1) * layout_len` zero-fill and tree-merge element operations.
@@ -9,12 +20,16 @@
 pub mod support;
 
 use jolt_field::F128;
-use jolt_rv64i_kernels::packed::buckets::{BucketError, NibbleBuckets};
+use jolt_rv64i_kernels::packed::buckets::{BucketError, BucketPlacement, NibbleBuckets};
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
-use jolt_rv64i_kernels::router::fold::FoldLayout;
-use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::router::cycle::RoutersCycleCore;
+use jolt_rv64i_kernels::router::fold::FoldCalibration;
+use jolt_rv64i_kernels::router::shape::{synthetic_router_shapes, RouterError};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PreparedGroups, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -26,8 +41,6 @@ use support::allocator::CountingAllocator;
 use support::{run_machinery, MachineryKernel, RunnerError};
 use thiserror::Error;
 
-static FOLD: FoldLayout = FoldLayout::calibration(0);
-const LAYOUT: usize = FOLD.entries();
 const CHUNK: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -42,6 +55,8 @@ enum MachineryError {
     Source(#[from] SourceError),
     #[error(transparent)]
     Synth(#[from] SynthError),
+    #[error(transparent)]
+    Router(#[from] RouterError),
     #[error("unknown machinery case {name}")]
     Case { name: String },
 }
@@ -108,16 +123,15 @@ struct Inputs {
     trace: Arc<ValidatedTrace<MachinerySource>>,
     permuted: Arc<ValidatedTrace<MachinerySource>>,
     words: Vec<u64>,
+    calibration: FoldCalibration,
 }
 
 impl Inputs {
     fn new(log_t: usize) -> Result<Arc<Self>, MachineryError> {
-        let base = Arc::new(SyntheticTrace::new(
-            SynthProfile::AllRows,
-            log_t,
-            1 << 20,
-            51,
-        )?);
+        Self::with_profile(log_t, SynthProfile::AllRows)
+    }
+    fn with_profile(log_t: usize, profile: SynthProfile) -> Result<Arc<Self>, MachineryError> {
+        let base = Arc::new(SyntheticTrace::new(profile, log_t, 1 << 20, 51)?);
         let trace = Arc::new(ValidatedTrace::new(Arc::new(MachinerySource {
             base: Arc::clone(&base),
             permutation: None,
@@ -140,6 +154,7 @@ impl Inputs {
             trace,
             permuted,
             words,
+            calibration: FoldCalibration::new(0)?,
         }))
     }
     fn weight(&self, cycle: usize) -> F128 {
@@ -151,6 +166,11 @@ impl Inputs {
 }
 
 enum Machinery {
+    Validate {
+        source: Arc<SyntheticTrace>,
+        request: PrepareRequest,
+        validated: Option<(ValidatedTrace<SyntheticTrace>, PreparedGroups)>,
+    },
     Lift {
         inputs: Arc<Inputs>,
         lift: Box<WordLift>,
@@ -171,13 +191,15 @@ enum Machinery {
     Merge {
         pool: ScratchPool,
         threads: usize,
+        layout_entries: usize,
     },
 }
 
 impl Machinery {
     fn new(name: &str, inputs: Arc<Inputs>, threads: usize) -> Result<Self, MachineryError> {
+        let layout_entries = inputs.calibration.entries();
         let populated = || -> Result<ScratchPool, PoolError> {
-            let pool = ScratchPool::new(LAYOUT)?;
+            let pool = ScratchPool::new(layout_entries)?;
             let mut guards: Vec<_> = (0..threads)
                 .map(|_| pool.take())
                 .collect::<Result<_, _>>()?;
@@ -188,6 +210,22 @@ impl Machinery {
             Ok(pool)
         };
         match name {
+            "validate" | "validate_tail" | "validate_all" => Ok(Self::Validate {
+                source: Arc::clone(&inputs.trace.source().base),
+                request: PrepareRequest {
+                    present: if name == "validate" {
+                        vec![]
+                    } else {
+                        vec![(0..5).collect(), (5..10).collect()]
+                    },
+                    optional: if name == "validate_all" {
+                        vec![RoutersCycleCore::columns(&synthetic_router_shapes()?)]
+                    } else {
+                        vec![]
+                    },
+                },
+                validated: None,
+            }),
             "lift" => {
                 let mut rng = ChaCha20Rng::seed_from_u64(54);
                 let weights = std::array::from_fn(|_| {
@@ -198,7 +236,7 @@ impl Machinery {
                     lift: Box::new(WordLift::new(&weights)),
                 })
             }
-            "bucket" => {
+            "bucket" | "bucket_small_values" => {
                 let source = inputs.trace.source();
                 let operations = (0..source.cycles())
                     .map(|cycle| {
@@ -240,6 +278,7 @@ impl Machinery {
             "merge" => Ok(Self::Merge {
                 pool: populated()?,
                 threads,
+                layout_entries,
             }),
             _ => Err(MachineryError::Case {
                 name: name.to_owned(),
@@ -248,9 +287,11 @@ impl Machinery {
     }
 
     #[inline(always)]
-    fn word(buckets: &mut NibbleBuckets<'_>, base: usize, slot: usize, word: u64, e: F128) {
-        let start = base + slot * 16;
-        let positions = &mut buckets.positions_mut()[start..start + 16];
+    fn word(buckets: &mut [F128], base: usize, slot: usize, word: u64, e: F128) {
+        let start = base + slot * BucketPlacement::Nibble.word_entries();
+        let positions = buckets[start..start + NibbleBuckets::ELEMENTS_PER_WORD]
+            .as_chunks_mut::<{ NibbleBuckets::ENTRIES_PER_POSITION }>()
+            .0;
         for (positions, byte) in positions
             .as_chunks_mut::<2>()
             .0
@@ -267,10 +308,15 @@ impl MachineryKernel for Machinery {
     type Error = MachineryError;
     fn operations(&self) -> usize {
         match self {
+            Self::Validate { source, .. } => source.cycles(),
             Self::Lift { inputs, .. } => inputs.words.len(),
             Self::Bucket { operations, .. } => *operations,
             Self::Scatter { plan, .. } => plan.cycles(),
-            Self::Merge { threads, .. } => (2 * threads - 1) * LAYOUT,
+            Self::Merge {
+                threads,
+                layout_entries,
+                ..
+            } => (2 * threads - 1) * layout_entries,
         }
     }
     fn plan_construction_ns(&self) -> Option<f64> {
@@ -300,15 +346,34 @@ impl MachineryKernel for Machinery {
                     weights.capacity() * std::mem::size_of::<F128>(),
                 ))
             }
-            Self::Bucket { .. } | Self::Merge { .. } => Some((
+            Self::Bucket { inputs, .. } => Some((
                 0,
-                rayon::current_num_threads() * LAYOUT * std::mem::size_of::<F128>(),
+                rayon::current_num_threads()
+                    * inputs.calibration.entries()
+                    * std::mem::size_of::<F128>(),
             )),
+            Self::Merge { layout_entries, .. } => Some((
+                0,
+                rayon::current_num_threads() * layout_entries * std::mem::size_of::<F128>(),
+            )),
+            Self::Validate { .. } => None,
             Self::Lift { .. } => Some((std::mem::size_of::<WordLift>(), 0)),
         }
     }
     fn run(&mut self) -> Result<F128, MachineryError> {
         match self {
+            Self::Validate {
+                source,
+                request,
+                validated,
+            } => {
+                *validated = Some(ValidatedTrace::prepare(
+                    Arc::clone(black_box(source)),
+                    std::mem::take(request),
+                )?);
+                let _ = black_box(&*validated);
+                Ok(F128::from_raw(0))
+            }
             Self::Lift { inputs, lift } => Ok(black_box(&inputs.words)
                 .par_chunks(CHUNK)
                 .map(|words| {
@@ -339,41 +404,42 @@ impl MachineryKernel for Machinery {
             }
             Self::Bucket { inputs, pool, .. } => {
                 let source = black_box(inputs.trace.source());
+                let calibration = black_box(&inputs.calibration);
                 let pool = black_box(&*pool);
                 (0..source.cycles().div_ceil(CHUNK))
                     .into_par_iter()
                     .try_for_each(|chunk| -> Result<(), MachineryError> {
                         let mut guard = pool.take()?;
-                        let mut buckets = NibbleBuckets::new(&mut guard)?;
                         for cycle in chunk * CHUNK..((chunk + 1) * CHUNK).min(source.cycles()) {
                             let e = inputs.weight(cycle);
                             let selector = source.digit(12, cycle).unwrap_or(0);
                             for (slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 Self::word(
-                                    &mut buckets,
-                                    FOLD.variant_base(selector) / 16,
+                                    &mut guard,
+                                    calibration.variant_base(selector)?,
                                     slot,
                                     source.trace_word(word, cycle),
                                     e,
                                 );
                             }
+                            let metadata = calibration.variant_metadata_base(selector)?;
+                            let mut buckets = NibbleBuckets::new(
+                                &mut guard
+                                    [metadata..metadata + 8 * NibbleBuckets::ENTRIES_PER_POSITION],
+                            )?;
                             for (slot, column) in (5..12).enumerate() {
-                                buckets.xor(
-                                    FOLD.variant_metadata_base(selector) / 16 + slot,
-                                    source.digit(column, cycle).unwrap_or(0),
-                                    e,
-                                )?;
+                                buckets.xor(slot, source.digit(column, cycle).unwrap_or(0), e)?;
                             }
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets.xor(FOLD.variant_metadata_base(selector) / 16 + 7, flags, e)?;
+                            buckets.xor(7, flags, e)?;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
                                 Self::word(
-                                    &mut buckets,
-                                    FOLD.shape_base(1, low + 8 * high + 64 * kind) / 16,
+                                    &mut guard,
+                                    calibration.shape_base(1, low + 8 * high + 64 * kind)?,
                                     0,
                                     source.trace_word(0, cycle),
                                     e,
@@ -382,8 +448,8 @@ impl MachineryKernel for Machinery {
                             if let Some(kind) = source.digit(14, cycle) {
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     Self::word(
-                                        &mut buckets,
-                                        FOLD.shape_base(2, low + 8 * kind) / 16,
+                                        &mut guard,
+                                        calibration.shape_base(2, low + 8 * kind)?,
                                         slot,
                                         source.trace_word(word, cycle),
                                         e,
@@ -399,8 +465,8 @@ impl MachineryKernel for Machinery {
                                         source.bytecode_word(0, row)
                                     };
                                     Self::word(
-                                        &mut buckets,
-                                        FOLD.shape_base(3, low + 8 * high + 64 * kind) / 16,
+                                        &mut guard,
+                                        calibration.shape_base(3, low + 8 * high + 64 * kind)?,
                                         slot,
                                         word,
                                         e,
@@ -412,8 +478,8 @@ impl MachineryKernel for Machinery {
                             {
                                 for slot in 0..2 {
                                     Self::word(
-                                        &mut buckets,
-                                        FOLD.shape_base(4, 0) / 16,
+                                        &mut guard,
+                                        calibration.shape_base(4, 0)?,
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         e,
@@ -433,6 +499,9 @@ impl MachineryKernel for Machinery {
 fn main() -> Result<(), RunnerError> {
     run_machinery(
         &[
+            ("validate", None),
+            ("validate_tail", None),
+            ("validate_all", None),
             ("lift", Some(4.8)),
             ("bucket", Some(0.9)),
             ("scatter", Some(2.1)),
@@ -440,6 +509,11 @@ fn main() -> Result<(), RunnerError> {
             ("merge", Some(0.45)),
         ],
         Inputs::new,
+        Machinery::new,
+    )?;
+    run_machinery(
+        &[("bucket_small_values", None)],
+        |log_t| Inputs::with_profile(log_t, SynthProfile::SmallValues),
         Machinery::new,
     )
 }

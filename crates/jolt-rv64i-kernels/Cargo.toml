@@ -16,8 +16,8 @@ test-utils = ["dep:rand_chacha"]
 jolt-field = { workspace = true, features = ["binary"] }
 jolt-poly.workspace = true
 jolt-sumcheck.workspace = true
-jolt-utils = { workspace = true }
 jolt-kernels.workspace = true
+jolt-utils = { workspace = true }
 rayon.workspace = true
 thiserror.workspace = true
 rand_chacha = { workspace = true, optional = true }

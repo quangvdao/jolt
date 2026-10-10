@@ -29,6 +29,43 @@ mod tests {
     }
 
     #[test]
+    fn equal_value_tables_do_not_alias() {
+        use jolt_rv64i_kernels::packed::buckets::BucketPlacement;
+        use std::collections::HashSet;
+        use std::mem::size_of;
+
+        let check = |offsets: Vec<usize>, values: usize| {
+            for value in 0..values {
+                let mut residues = HashSet::new();
+                for &offset in &offsets {
+                    assert!(residues.insert((offset + value) * size_of::<F128>() % 4096));
+                }
+            }
+        };
+        check(
+            (0..32)
+                .map(|p| BucketPlacement::Byte.position_offset(p))
+                .collect(),
+            256,
+        );
+        for (placement, positions, values) in [
+            (BucketPlacement::Nibble, 16, 16),
+            (BucketPlacement::Byte, 8, 256),
+        ] {
+            check(
+                (0..9)
+                    .flat_map(|word| {
+                        (0..positions).map(move |p| {
+                            word * placement.word_entries() + placement.position_offset(p)
+                        })
+                    })
+                    .collect(),
+                values,
+            );
+        }
+    }
+
+    #[test]
     fn lifts_equal_weighted_bits() {
         let mut rng = ChaCha20Rng::seed_from_u64(73);
         let weights: [F128; 64] = std::array::from_fn(|_| field(&mut rng));
@@ -138,6 +175,66 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn read_only_bucket_sums_match_value_bit_definitions() {
+        let mut rng = ChaCha20Rng::seed_from_u64(79);
+        for bits in [4, 5, 8, 12] {
+            let storage: Vec<_> = (0..1 << bits).map(|_| field(&mut rng)).collect();
+            let mut expected = vec![F128::from_raw(0); bits];
+            let mut total = F128::from_raw(0);
+            for (value, &weight) in storage.iter().enumerate() {
+                total += weight;
+                for (bit, sum) in expected.iter_mut().enumerate() {
+                    if value & (1 << bit) != 0 {
+                        *sum += weight;
+                    }
+                }
+            }
+            for (bit, &expected) in expected.iter().enumerate() {
+                assert_eq!(
+                    DigitHistogram::sum_bit(&storage, bits, bit).unwrap(),
+                    expected
+                );
+            }
+            if bits == 4 {
+                let position: &[F128; 16] = storage.as_slice().try_into().unwrap();
+                assert_eq!(NibbleBuckets::position_bits(position).as_slice(), expected);
+                assert_eq!(NibbleBuckets::position_total(position), total);
+                for (bit, &expected) in expected.iter().enumerate() {
+                    assert_eq!(
+                        NibbleBuckets::position_bit(position, bit).unwrap(),
+                        expected
+                    );
+                }
+            } else if bits == 8 {
+                let position: &[F128; 256] = storage.as_slice().try_into().unwrap();
+                assert_eq!(ByteBuckets::position_bits(position).as_slice(), expected);
+                assert_eq!(ByteBuckets::position_total(position), total);
+                for (bit, &expected) in expected.iter().enumerate() {
+                    assert_eq!(ByteBuckets::position_bit(position, bit).unwrap(), expected);
+                }
+            }
+        }
+        assert_eq!(
+            (
+                NibbleBuckets::BITS_PER_POSITION,
+                NibbleBuckets::ENTRIES_PER_POSITION,
+                NibbleBuckets::POSITIONS_PER_WORD,
+                NibbleBuckets::ELEMENTS_PER_WORD
+            ),
+            (4, 16, 16, 256)
+        );
+        assert_eq!(
+            (
+                ByteBuckets::BITS_PER_POSITION,
+                ByteBuckets::ENTRIES_PER_POSITION,
+                ByteBuckets::POSITIONS_PER_WORD,
+                ByteBuckets::ELEMENTS_PER_WORD
+            ),
+            (8, 256, 8, 2048)
+        );
     }
 
     #[test]
@@ -464,6 +561,40 @@ mod tests {
             })
         );
         assert_eq!(buckets.bit(0, 4), Err(BucketError::Bit { bit: 4, bits: 4 }));
+        assert_eq!(
+            NibbleBuckets::position_bit(&[F128::from_raw(0); 16], usize::MAX),
+            Err(BucketError::Bit {
+                bit: usize::MAX,
+                bits: 4
+            })
+        );
+        assert_eq!(
+            ByteBuckets::position_bit(&[F128::from_raw(0); 256], 8),
+            Err(BucketError::Bit { bit: 8, bits: 8 })
+        );
+        assert_eq!(
+            DigitHistogram::sum_bit(&[F128::from_raw(0); 32], 5, 5),
+            Err(BucketError::Bit { bit: 5, bits: 5 })
+        );
+        assert_eq!(
+            DigitHistogram::sum_bit(&[F128::from_raw(0)], 0, 0),
+            Err(BucketError::Bit { bit: 0, bits: 0 })
+        );
+        assert_eq!(
+            DigitHistogram::sum_bit(&[], 0, 0),
+            Err(BucketError::HistogramLength { len: 0, bound: 1 })
+        );
+        assert_eq!(
+            DigitHistogram::sum_bit(&[F128::from_raw(0); 16], 5, 0),
+            Err(BucketError::HistogramLength { len: 16, bound: 32 })
+        );
+        assert_eq!(
+            DigitHistogram::sum_bit(&[], usize::BITS as usize, 0),
+            Err(BucketError::Width {
+                bits: usize::BITS as usize
+            })
+        );
+
         assert!(matches!(
             DigitHistogram::new(&mut storage, usize::BITS as usize),
             Err(BucketError::Width { bits }) if bits == usize::BITS as usize

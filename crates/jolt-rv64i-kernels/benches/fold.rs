@@ -18,7 +18,6 @@ use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::cmp::Reverse;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -94,10 +93,8 @@ impl FoldBench {
         let trace = Arc::new(ValidatedTrace::new(source)?);
         let shapes = synthetic_router_shapes()?;
         let counts = selector_counts(&trace, &shapes[0])?;
-        let mut selectors: Vec<_> = (0..counts.len()).collect();
-        selectors.sort_unstable_by_key(|&h| (Reverse(counts[h]), h));
         let mut values = vec![vec![]; shapes.len()];
-        values[0] = selectors.into_iter().take(byte_count).collect();
+        values[0] = FoldLayout::byte_bucket_values(&counts, byte_count);
         let calibration = FoldCalibration::new(0)?;
         let word_sets = calibration.word_sets();
         let variant_xors: usize = counts
@@ -194,7 +191,11 @@ impl FoldBench {
 }
 
 fn main() -> Result<(), RunnerError> {
-    let variants = [("none", 0), ("default", 8), ("all", 64)];
+    let variants = [
+        ("none", 0),
+        ("default", FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT),
+        ("all", 64),
+    ];
     run_core_variants(
         "fold",
         &[SynthProfile::AllRows],

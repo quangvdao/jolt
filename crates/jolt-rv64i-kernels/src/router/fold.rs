@@ -12,6 +12,7 @@ use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use readout::{BankStorage, ReadBit, ReadoutShape};
+use std::cmp::Reverse;
 
 #[cfg(feature = "test-utils")]
 mod calibration;
@@ -69,6 +70,19 @@ const fn word_sets(selectors: usize, words: usize, bytes: usize) -> usize {
 }
 
 impl FoldLayout {
+    /// Performance defaults to eight selector values, saving bucket XORs with limited extra scratch.
+    pub const DEFAULT_BYTE_BUCKET_LIMIT: usize = 8;
+
+    /// Choose up to `limit` selector values from `selector_counts`, ordered by
+    /// descending count. Ties put the lower value first, making the layout a
+    /// deterministic function of the trace. A larger limit selects every value.
+    pub fn byte_bucket_values(counts: &[usize], limit: usize) -> Vec<usize> {
+        let mut values: Vec<_> = (0..counts.len()).collect();
+        values.sort_unstable_by_key(|&value| (Reverse(counts[value]), value));
+        values.truncate(limit);
+        values
+    }
+
     /// Construct ranges for validated shapes and chosen byte-bucket selector
     /// values. Checks source indices and selector-set lengths and membership.
     pub fn new<S: CycleSource>(

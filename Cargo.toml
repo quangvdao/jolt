@@ -46,6 +46,8 @@ members = [
   "crates/jolt-spartan-prover",
   "crates/jolt-riscv",
   "crates/jolt-rv64i-arith",
+  "crates/jolt-rv64i-verifier",
+  "crates/jolt-rv64i-prover",
   "crates/jolt-tracer-x86",
   "crates/jolt-transcript",
   "crates/jolt-utils",
@@ -464,6 +466,8 @@ jolt-utils = { path = "./crates/jolt-utils" }
 jolt-sumcheck = { path = "./crates/jolt-sumcheck" }
 jolt-riscv = { path = "./crates/jolt-riscv", default-features = false }
 jolt-rv64i-arith = { path = "./crates/jolt-rv64i-arith" }
+jolt-rv64i-verifier = { path = "./crates/jolt-rv64i-verifier" }
+jolt-rv64i-prover = { path = "./crates/jolt-rv64i-prover" }
 jolt-program = { path = "./crates/jolt-program", default-features = false }
 jolt-tracer-x86 = { path = "./crates/jolt-tracer-x86" }
 jolt-lookup-tables = { path = "./crates/jolt-lookup-tables" }

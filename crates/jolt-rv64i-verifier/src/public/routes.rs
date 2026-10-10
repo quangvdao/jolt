@@ -668,7 +668,7 @@ impl Builder<'_> {
             Source::Rs2Value => self.toggle(r, c, self.word(r, BankWord::Rs2Value, bit)?, h),
             Source::Imm => self.toggle(r, c, self.word(r, BankWord::Imm, bit)?, h),
             Source::FallThroughPC => {
-                self.toggle(r, c, self.word(r, BankWord::FallThroughPC, bit)?, h)
+                self.toggle(r, c, self.word(r, BankWord::FallThroughPC, bit)?, h);
             }
             Source::PCPlusImm => self.toggle(r, c, self.word(r, BankWord::PCPlusImm, bit)?, h),
             Source::PC => self.toggle(r, c, self.word(r, BankWord::PC, bit)?, h),

@@ -1,13 +1,38 @@
 //! Routers adapters for the packed RV64I kernels.
 
-use crate::optimized::source::WitnessColumns;
+use crate::optimized::source::{SharedSource, WitnessColumns};
+use crate::plane::{Rv64iPlane, Rv64iWitness};
+#[cfg(feature = "allocative")]
+use allocative::Allocative;
+use jolt_claims::NoChallenges;
+use jolt_field::F128;
+use jolt_kernels::{
+    KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
+};
+use jolt_poly::UnivariatePoly;
 use jolt_rv64i_arith::Layout;
+use jolt_rv64i_kernels::router::cycle::RoutersCycleCore;
+use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout};
 use jolt_rv64i_kernels::router::shape::{
     BitEntry, RouteEntry, RouterError, RouterShape, RouterShapeRequest, SelectorFactor, WordSlot,
 };
+use jolt_rv64i_kernels::router::short::RouterShortCore;
+use jolt_rv64i_verifier::ids::{DerivedId, Router, RouterShortDerived};
 use jolt_rv64i_verifier::public::routes::{
     bank, selector_slots, source_slots, BankWord, Factor, RouteTensors, ROUTERS,
 };
+use jolt_rv64i_verifier::stages::stage3a::{
+    RouterShort, RouterShortInputClaims, RouterShortOutputClaims,
+};
+use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_verifier::stages::relations::ConcreteSumcheck;
+use std::fmt::Display;
+
+fn geometry(error: impl Display) -> KernelError<F128> {
+    KernelError::InvalidGeometry {
+        reason: error.to_string(),
+    }
+}
 
 fn word_slot(word: BankWord) -> WordSlot {
     match word {
@@ -139,4 +164,117 @@ pub fn router_shapes(
             })
         })
         .collect()
+}
+
+/// Runs `fold_pass` and `RouterShortCore`, sharing preparation and the plan with
+/// batch 3b. Checks each final idle-weight scalar against `RouteWeight`.
+#[derive(Default)]
+pub struct RouterShortPrepare;
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct ShortKernel {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    core: RouterShortCore,
+}
+
+impl PrepareKernel<F128, RouterShort<F128>, Rv64iPlane> for RouterShortPrepare {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &Rv64iWitness,
+        inputs: ProverInputs<'_, F128, RouterShort<F128>>,
+    ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RouterShort<F128>>>, KernelError<F128>>
+    {
+        let columns = WitnessColumns::new(&witness.layout);
+        let shapes = router_shapes(&columns, &witness.layout, Some(inputs.relation.routes()))
+            .map_err(geometry)?;
+        let shared = session.state_or_insert_with(SharedSource::default);
+        let trace = shared.prepare(witness, Some(RoutersCycleCore::columns(&shapes)))?;
+        let plan = shared.plan()?;
+        let mut values = vec![Vec::new(); shapes.len()];
+        let variant = ROUTERS
+            .iter()
+            .position(|router| *router == Router::Variant)
+            .ok_or_else(|| geometry("Variant shape is absent"))?;
+        let counts = witness.variant_cycles.map(|count| count as usize);
+        values[variant] =
+            FoldLayout::byte_bucket_values(&counts, FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT);
+        let layout = FoldLayout::new(&trace, &shapes, &values).map_err(geometry)?;
+        let folded = fold_pass(&trace, &shapes, inputs.relation.r_1(), &plan, &layout, &[])
+            .map_err(geometry)?;
+        drop(folded.ra_fold);
+        let core =
+            RouterShortCore::new(&shapes, inputs.relation.w(), folded.folds).map_err(geometry)?;
+        Ok(Box::new(ShortKernel { core }))
+    }
+}
+
+impl ProveRounds<F128> for ShortKernel {
+    fn num_rounds(&self) -> usize {
+        self.core.num_rounds()
+    }
+    fn prove_round(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+        previous_claim: F128,
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        self.core.prove_round(bind, round, previous_claim)
+    }
+    fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
+        self.core.finish_rounds(bind)
+    }
+}
+
+fn output_error(_: impl Display) -> SumcheckKernelError<F128> {
+    SumcheckKernelError::InvariantViolation {
+        reason: "router output state is incomplete",
+    }
+}
+
+impl SumcheckKernel<F128> for ShortKernel {
+    type Relation = RouterShort<F128>;
+    fn output_claims(
+        &mut self,
+        _: &RouterShortInputClaims<F128>,
+    ) -> Result<RouterShortOutputClaims<F128>, SumcheckKernelError<F128>> {
+        let pairs = self.core.final_values().map_err(output_error)?;
+        let value = |router| {
+            ROUTERS
+                .iter()
+                .zip(&pairs)
+                .find(|(name, _)| **name == router)
+                .map(|(_, pair)| pair.0)
+                .ok_or_else(|| output_error("missing fold"))
+        };
+        Ok(RouterShortOutputClaims {
+            variant: value(Router::Variant)?,
+            shift: value(Router::Shift)?,
+            memory: value(Router::Memory)?,
+            compare: value(Router::Compare)?,
+            branch: value(Router::Branch)?,
+        })
+    }
+    fn validate_derived_tables(
+        &self,
+        relation: &Self::Relation,
+        input_points: &RouterShortInputClaims<Vec<F128>>,
+        output_points: &RouterShortOutputClaims<Vec<F128>>,
+        challenges: &NoChallenges<F128>,
+    ) -> Result<(), SumcheckKernelError<F128>> {
+        let pairs = self.core.final_values().map_err(output_error)?;
+        for (router, (_, got)) in ROUTERS.into_iter().zip(pairs) {
+            let id = DerivedId::RouterShort(RouterShortDerived::RouteWeight(router));
+            let expected =
+                relation.derive_output_term(&id, input_points, output_points, challenges)?;
+            if got != expected {
+                return Err(SumcheckKernelError::DerivedTableDrift {
+                    id: id.into(),
+                    expected,
+                    got,
+                });
+            }
+        }
+        Ok(())
+    }
 }

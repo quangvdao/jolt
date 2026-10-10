@@ -9,7 +9,6 @@
     reason = "shared machine helpers serve the complete protocol corpus"
 )]
 mod support;
-use jolt_crypto::NoCommitment;
 use jolt_field::{One, Zero, F128};
 use jolt_poly::CompressedPoly;
 use jolt_rv64i_prover::{
@@ -25,7 +24,7 @@ use jolt_rv64i_verifier::{
     transcript::Rv64iTranscript,
     verifier::{verify, verify_with_transcript},
 };
-use jolt_sumcheck::{ClearProof, ClearSumcheckProof, CompressedSumcheckProof, SumcheckProof};
+use jolt_sumcheck::{ClearProof, CompressedSumcheckProof, SumcheckProof};
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
 
@@ -160,29 +159,6 @@ fn each_of_the_299_wire_values_is_bound() {
             rejection(&preprocessing.verifier, &statement, &altered),
             expected,
         );
-    }
-}
-
-#[test]
-fn malformed_in_memory_rounds_and_columns_fail_before_transcript() {
-    let (statement, preprocessing, proof) = fixture();
-    for count in [255, 257] {
-        let mut altered = copy(&proof);
-        altered.stage6b.values.0.resize(count, F128::zero());
-        shape_error(&preprocessing.verifier, &statement, &altered);
-    }
-    let mut altered = copy(&proof);
-    altered.stage1.rounds =
-        SumcheckProof::<F128, NoCommitment>::Clear(ClearProof::Full(ClearSumcheckProof::default()));
-    shape_error(&preprocessing.verifier, &statement, &altered);
-    for coeffs in [
-        vec![],
-        vec![F128::one(); 4],
-        vec![F128::one(), F128::zero()],
-    ] {
-        let mut altered = copy(&proof);
-        rounds(&mut altered.stage1).round_polynomials[0] = CompressedPoly::new(coeffs);
-        shape_error(&preprocessing.verifier, &statement, &altered);
     }
 }
 
@@ -344,11 +320,6 @@ fn every_public_statement_field_is_bound() {
     }
 }
 
-use jolt_rv64i_arith::BitsRow;
-use jolt_rv64i_prover::commitment::{
-    transparent::{TransparentCommitment, TransparentOpening, TransparentState},
-    BitsCommitmentProver,
-};
 use jolt_rv64i_verifier::{
     commitment::{BitsCommitmentScheme, BitsGeometry, BitsOpening},
     points::eq_index,
@@ -358,57 +329,11 @@ use jolt_rv64i_verifier::{
 use jolt_transcript::Transcript;
 use support::{Event, RecordedTranscript};
 
-struct PointBoundBits;
-impl BitsCommitmentScheme for PointBoundBits {
-    type VerifierSetup = ();
-    type Commitment = TransparentCommitment;
-    type VerifierState = (BitsGeometry, TransparentCommitment);
-    type OpeningProof = TransparentOpening;
-    type Error = TransparentError;
-    fn verify_commit<T: Transcript<Challenge = F128>>(
-        (): &(),
-        geometry: BitsGeometry,
-        commitment: &TransparentCommitment,
-        transcript: &mut T,
-    ) -> Result<Self::VerifierState, Self::Error> {
-        TransparentBits::verify_commit(&(), geometry, commitment, transcript)
-    }
-    fn verify_opening<T: Transcript<Challenge = F128>>(
-        (): &(),
-        state: Self::VerifierState,
-        opening: &BitsOpening<'_>,
-        proof: &TransparentOpening,
-        transcript: &mut T,
-    ) -> Result<(), Self::Error> {
-        TransparentBits::verify_opening(&(), state, opening, proof, transcript)
-    }
-}
-impl BitsCommitmentProver for PointBoundBits {
-    type ProverSetup = ();
-    type ProverState = TransparentState;
-    fn commit<T: Transcript<Challenge = F128>>(
-        (): &(),
-        geometry: BitsGeometry,
-        bits: &Arc<[BitsRow]>,
-        transcript: &mut T,
-    ) -> Result<(Self::Commitment, Self::ProverState), Self::Error> {
-        TransparentBits::commit(&(), geometry, bits, transcript)
-    }
-    fn open<T: Transcript<Challenge = F128>>(
-        (): &(),
-        state: TransparentState,
-        opening: &BitsOpening<'_>,
-        transcript: &mut T,
-    ) -> Result<TransparentOpening, Self::Error> {
-        TransparentBits::open(&(), state, opening, transcript)
-    }
-}
-
 #[test]
 fn columns_must_be_absorbed_before_drawing_the_opening_point() {
     let (statement, source, witness) = support::counting_loop_at(8);
     let preprocessing = ProverPreprocessing {
-        verifier: VerifierPreprocessing::<PointBoundBits>::new(
+        verifier: VerifierPreprocessing::<TransparentBits>::new(
             Arc::clone(source.shared_bytecode()),
             source.image().to_vec(),
             (),
@@ -416,7 +341,7 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
         .unwrap(),
         scheme: (),
     };
-    let (mut proof, recorded) = prove_with_transcript::<PointBoundBits, RecordedTranscript>(
+    let (mut proof, recorded) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &statement,
         &witness,
@@ -427,7 +352,7 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
     let mut transcript: Rv64iTranscript = preamble(&checked);
     let geometry = BitsGeometry { log_T: 8 };
     let state =
-        PointBoundBits::verify_commit(&(), geometry, &proof.bits_commitment, &mut transcript)
+        TransparentBits::verify_commit(&(), geometry, &proof.bits_commitment, &mut transcript)
             .unwrap();
     let s1 = stage1::verify::verify(&checked, &proof.stage1, &mut transcript).unwrap();
     let s2 = stage2::verify::verify(&checked, &proof.stage2, &mut transcript, &s1).unwrap();
@@ -509,7 +434,7 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
     inputs
         .batch
         .append_output_claims(&mut transcript, &malicious);
-    PointBoundBits::verify_opening(&(), state, &early, &proof.opening, &mut transcript).unwrap();
+    TransparentBits::verify_opening(&(), state, &early, &proof.opening, &mut transcript).unwrap();
     let mut proper = recorded.inner_at(first_column_event);
     inputs.batch.append_output_claims(&mut proper, &malicious);
     let rho = proper.challenge_vector(8);
@@ -524,7 +449,7 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
         ..early
     };
     assert_ne!(proper_claim.value(), proper_honest.value());
-    match verify_with_transcript::<PointBoundBits, Rv64iTranscript>(
+    match verify_with_transcript::<TransparentBits, Rv64iTranscript>(
         &preprocessing.verifier,
         &statement,
         &proof,

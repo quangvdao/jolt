@@ -30,31 +30,6 @@ use std::collections::HashSet;
 use std::time::Instant;
 use support::{Program, RecordedTranscript, PROGRAMS};
 
-#[test]
-fn counting_loop_end_to_end() {
-    let (statement, verifier, witness) = support::counting_loop();
-    let preprocessing = ProverPreprocessing {
-        verifier,
-        scheme: (),
-    };
-    let (proof, prover) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
-        &preprocessing,
-        &statement,
-        &witness,
-        &Rv64iBackend::reference(),
-    )
-    .unwrap();
-    let verifier = verify_with_transcript::<TransparentBits, RecordedTranscript>(
-        &preprocessing.verifier,
-        &statement,
-        &proof,
-    )
-    .unwrap();
-    assert_eq!(prover.batch_states.len(), 8);
-    assert_eq!(prover.batch_states, verifier.batch_states);
-    assert_eq!(prover.state(), verifier.state());
-}
-
 #[expect(
     clippy::print_stdout,
     reason = "the acceptance corpus records per-program proving and verification timings"

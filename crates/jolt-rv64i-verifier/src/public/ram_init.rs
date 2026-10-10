@@ -4,7 +4,6 @@ use crate::commitment::BitsCommitmentScheme;
 use crate::points::{self, PointsError, WordLift};
 use crate::statement::CheckedInputs;
 use jolt_field::{Zero, F128};
-use jolt_poly::EqPolynomial;
 
 /// Evaluates canonical sparse initial RAM with two split address tables.
 pub fn evaluate<S: BitsCommitmentScheme>(
@@ -26,9 +25,7 @@ pub fn evaluate<S: BitsCommitmentScheme>(
     }
     let lift = WordLift::new(r_bit)?;
     let split = a_ram.len() / 2;
-    let (lo, hi) = a_ram.split_at(split);
-    let low = EqPolynomial::new(points::to_high_to_low(lo)).evaluations();
-    let high = EqPolynomial::new(points::to_high_to_low(hi)).evaluations();
+    let (low, high) = points::split_eq_tables(a_ram)?;
     let mask = low.len() - 1;
     checked
         .initial_ram()

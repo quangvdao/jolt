@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use jolt_rv64i_arith::{BaseWords, BitsBuilder, BitsRow, Layout, RowSystem, Variant, WitnessRow};
+use jolt_rv64i_arith::{
+    BaseWords, BitsBuilder, BitsRow, BytecodeRow, Chunk, CycleFacts, Layout, RowSystem, Variant,
+    WitnessRow,
+};
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -138,13 +141,8 @@ fn setup(f: &Fixture) -> (Layout, Vec<(u64, u32)>, State) {
 fn one_hot(layout: &Layout, bits: &BitsRow) -> bool {
     layout.chunks().all(|c| c.full(bits).is_power_of_two())
 }
-fn free_column(
-    layout: &Layout,
-    row: &jolt_rv64i_arith::BytecodeRow,
-    fact: &jolt_rv64i_arith::CycleFacts,
-    column: usize,
-) -> bool {
-    let in_chunk = |c: jolt_rv64i_arith::Chunk| {
+fn free_column(layout: &Layout, row: &BytecodeRow, fact: &CycleFacts, column: usize) -> bool {
+    let in_chunk = |c: Chunk| {
         (usize::from(c.start())..usize::from(c.start()) + c.indicators()).contains(&column)
     };
     let variant = row.variant.unwrap();

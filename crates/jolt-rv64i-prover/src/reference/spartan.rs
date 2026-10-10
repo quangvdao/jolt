@@ -2,21 +2,23 @@
 
 use crate::error::Rv64iProverError;
 use crate::plane::{Rv64iPlane, Rv64iWitness};
-use crate::reference::views::bits_column;
+use jolt_claims::{InputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
-use jolt_poly::{BindingOrder, EqPolynomial, Polynomial};
+use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_arith::{RowSystem, WitnessRow, WITNESS_COLUMNS};
+use jolt_rv64i_verifier::claims::spartan_inner::{SpartanInnerInputClaims, SpartanInnerSymbolic};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, InnerDerived, OpeningId, OuterDerived, RelationId, RowBlock,
     VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{to_high_to_low, PointsError};
+use jolt_rv64i_verifier::points::{equality_table, PointsError};
 use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::{SpartanOuterF128, SpartanOuterF2};
 use jolt_rv64i_verifier::stages::stage2::SpartanInner;
 use std::collections::BTreeMap;
+use std::fmt::Display;
 
 fn row(witness: &Rv64iWitness, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
     let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
@@ -54,7 +56,7 @@ pub fn witness_column(
     ))
 }
 
-fn geometry(error: impl std::fmt::Display) -> KernelError<F128> {
+fn geometry(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
         reason: error.to_string(),
     }
@@ -118,7 +120,7 @@ macro_rules! prepare_outer {
             fn prepare(&self, _session: &mut ProofSession, witness: &Rv64iWitness, inputs: ProverInputs<'_, F128, $relation<F128>>) -> Result<Box<dyn SumcheckKernel<F128, Relation = $relation<F128>>>, KernelError<F128>> {
                 let tables = outer_tables(witness, inputs.relation.block(), inputs.relation.row_variables())?;
                 let openings = [VirtualPolynomial::Az, VirtualPolynomial::Bz, VirtualPolynomial::Cz].into_iter().zip(tables).map(|(p, table)| (OpeningId::virtual_polynomial(p, RelationId::$id), table)).collect();
-                let eq = EqPolynomial::new(to_high_to_low(inputs.relation.tau())).evaluations();
+                let eq = equality_table(inputs.relation.tau()).map_err(|error| geometry(&error.to_string()))?;
                 let derived = BTreeMap::from([(DerivedId::SpartanOuter(inputs.relation.block(), OuterDerived::EqTau), Polynomial::new(eq))]);
                 Ok(Box::new(NaiveSumcheckProver::new(&inputs, openings, derived, BindingOrder::LowToHigh)?))
             }
@@ -138,35 +140,84 @@ impl PrepareKernel<F128, SpartanInner<F128>, Rv64iPlane> for SpartanInnerPrepare
         inputs: ProverInputs<'_, F128, SpartanInner<F128>>,
     ) -> Result<Box<dyn SumcheckKernel<F128, Relation = SpartanInner<F128>>>, KernelError<F128>>
     {
-        let r_1 = to_high_to_low(inputs.relation.r_1());
+        let weights = equality_table(inputs.relation.r_1()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
         let mut routed = vec![F128::zero(); WITNESS_COLUMNS];
-        for c in (1..4).chain(16..27).chain(64..768) {
-            let value = witness_column(witness, c).map_err(geometry)?.evaluate(&r_1)
-                + if c == 16 { F128::one() } else { F128::zero() };
-            let entry = routed
-                .get_mut(c)
-                .ok_or_else(|| geometry("routed column exceeds the witness domain"))?;
-            *entry = value;
-        }
         let mut direct = vec![F128::zero(); WITNESS_COLUMNS];
-        for c in 64..=witness.layout.keys_differ() {
-            let entry = direct
-                .get_mut(768 + c)
-                .ok_or_else(|| geometry("direct column exceeds the witness domain"))?;
-            *entry = bits_column(witness, c).evaluate(&r_1);
+        for (cycle, (bits, weight)) in witness.bits.iter().zip(weights).enumerate() {
+            let z = row(witness, cycle).map_err(geometry)?;
+            for column in (1..4).chain(16..27).chain(64..768) {
+                if z.bit(column)
+                    .ok_or_else(|| geometry("routed column exceeds the witness domain"))?
+                {
+                    *routed
+                        .get_mut(column)
+                        .ok_or_else(|| geometry("routed column exceeds the witness domain"))? +=
+                        weight;
+                }
+            }
+            for column in 64..=witness.layout.keys_differ() {
+                if bits
+                    .get(column / 64)
+                    .is_some_and(|word| (word >> (column % 64)) & 1 != 0)
+                {
+                    *direct
+                        .get_mut(768 + column)
+                        .ok_or_else(|| geometry("direct column exceeds the witness domain"))? +=
+                        weight;
+                }
+            }
         }
-        let mut matrix = Vec::with_capacity(WITNESS_COLUMNS);
-        for c in 0..WITNESS_COLUMNS {
-            let w: Vec<_> = (0..10)
-                .map(|i| F128::from_u64(((c >> i) & 1) as u64))
-                .collect();
-            matrix.push(
-                inputs
-                    .relation
-                    .matrix_weight(&w, inputs.challenges)
-                    .map_err(geometry)?,
-            );
-        }
+        *routed
+            .get_mut(16)
+            .ok_or_else(|| geometry("routed column exceeds the witness domain"))? += F128::one();
+        let matrices = RowMatrices::new(&witness.layout);
+        let rho_f2 = inputs
+            .points
+            .az_f2
+            .get(..8)
+            .ok_or_else(|| geometry("binary row point is missing its row coordinates"))?;
+        let rho_f128 = inputs
+            .points
+            .az_f128
+            .get(..matrices.f128_row_variables())
+            .ok_or_else(|| geometry("extension row point is missing its row coordinates"))?;
+        let expression = SpartanInnerSymbolic.input_expression::<F128>();
+        let matrix = matrices
+            .column_evaluations(rho_f2, rho_f128)
+            .map_err(geometry)?
+            .into_iter()
+            .map(|[[az_f2, bz_f2, cz_f2], [az_f128, bz_f128, cz_f128]]| {
+                let columns = SpartanInnerInputClaims {
+                    az_f2,
+                    bz_f2,
+                    cz_f2,
+                    az_f128,
+                    bz_f128,
+                    cz_f128,
+                };
+                expression.try_evaluate(
+                    |id| {
+                        columns
+                            .resolve_input(id)
+                            .ok_or_else(|| geometry("matrix fold references an absent row block"))
+                    },
+                    |id| {
+                        inputs
+                            .challenges
+                            .resolve_challenge(id)
+                            .ok_or_else(|| geometry("matrix fold references an absent challenge"))
+                    },
+                    |_| {
+                        Err(geometry(
+                            "matrix fold references an unsupported derived term",
+                        ))
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, KernelError<F128>>>()?;
         let public = (0..WITNESS_COLUMNS)
             .map(|c| F128::from_u64(u64::from(c == 0 || c == 16)))
             .collect();

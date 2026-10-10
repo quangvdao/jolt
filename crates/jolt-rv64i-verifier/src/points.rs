@@ -7,8 +7,8 @@
 //! calling the polynomial layer's infallible evaluators.
 
 use jolt_field::JoltField;
-use jolt_poly::{EqPlusOnePolynomial, EqPolynomial};
-use jolt_rv64i_arith::Chunk;
+use jolt_poly::EqPlusOnePolynomial;
+use jolt_rv64i_arith::{BitsRow, Chunk};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -23,6 +23,9 @@ pub enum PointsError {
     #[error("column {column} is absent from the column values")]
     /// A chunk indicator references a column absent from the supplied values.
     MissingColumn { column: usize },
+    #[error("cannot allocate an equality table for {variables} coordinates")]
+    /// The table's capacity or byte size is unrepresentable, or reservation failed.
+    Allocation { variables: usize },
 }
 
 /// Converts a low-variable-first point to the most-significant-variable-first order of `jolt-poly`.
@@ -53,14 +56,70 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
             variables: point.len(),
         });
     }
-    let vertex: Vec<F> = (0..point.len())
-        .map(|i| F::from_u64(((index >> i) & 1) as u64))
-        .collect();
-    eq(point, &vertex)
+    Ok(point
+        .iter()
+        .enumerate()
+        .map(|(bit, coordinate)| {
+            if (index >> bit) & 1 != 0 {
+                *coordinate
+            } else {
+                F::one() - *coordinate
+            }
+        })
+        .product())
+}
+
+/// Allocates one equality table in low-variable-first index order, expanding it
+/// serially with `2^n - 2` multiplications for a nonempty point. Rejects dimensions that cannot be
+/// shifted on this host before allocating.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the doubling loop stays inside the checked final table length"
+)]
+pub fn equality_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
+    let maximum = usize::BITS as usize - 1;
+    if point.len() > maximum {
+        return Err(PointsError::Dimension {
+            expected: maximum,
+            actual: point.len(),
+        });
+    }
+    let allocation_error = || PointsError::Allocation {
+        variables: point.len(),
+    };
+    let shift = u32::try_from(point.len()).map_err(|_| allocation_error())?;
+    let elements = 1_usize.checked_shl(shift).ok_or_else(allocation_error)?;
+    let maximum_bytes = usize::try_from(isize::MAX).map_err(|_| allocation_error())?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<F>())
+        .ok_or_else(allocation_error)?;
+    if elements > maximum_bytes || bytes > maximum_bytes {
+        return Err(allocation_error());
+    }
+    let mut weights = Vec::new();
+    weights
+        .try_reserve_exact(elements)
+        .map_err(|_| allocation_error())?;
+    weights.resize(elements, F::zero());
+    if let Some((first, rest)) = point.split_first() {
+        weights[0] = F::one() - *first;
+        weights[1] = *first;
+        let mut width = 2;
+        for coordinate in rest {
+            for index in 0..width {
+                let upper = weights[index] * *coordinate;
+                weights[index + width] = upper;
+                weights[index] -= upper;
+            }
+            width *= 2;
+        }
+    } else {
+        weights[0] = F::one();
+    }
+    Ok(weights)
 }
 
 /// Materializes at most 1,024 equality weights in low-variable-first index order.
-/// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
     if point.len() > 10 {
         return Err(PointsError::Dimension {
@@ -68,7 +127,13 @@ pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError>
             actual: point.len(),
         });
     }
-    Ok(EqPolynomial::new(point.iter().rev().copied().collect()).evaluations())
+    equality_table(point)
+}
+
+/// Holds the two address halves for a pass, with no intermediate prefix copies.
+pub(crate) fn split_eq_tables<F: JoltField>(point: &[F]) -> Result<(Vec<F>, Vec<F>), PointsError> {
+    let (low, high) = point.split_at(point.len() / 2);
+    Ok((equality_table(low)?, equality_table(high)?))
 }
 
 /// Evaluates the extension of unsigned `x < y`, with low-variable-first integer bits.
@@ -82,11 +147,11 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     }
     Ok(x.iter().zip(y).fold(F::zero(), |less, (x, y)| {
         if y.is_zero() {
-            (F::one() + *x) * less
+            (F::one() - *x) * less
         } else if *y == F::one() {
-            F::one() + *x + *x * less
+            F::one() - *x + *x * less
         } else {
-            (F::one() + *x) * *y + (F::one() + *x + *y) * less
+            (F::one() - *x) * *y + (F::one() + *x + *y) * less
         }
     }))
 }
@@ -101,6 +166,35 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
         });
     }
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
+}
+
+/// Evaluates `next(point, index)` over the Boolean cube in low-variable-first
+/// order. Shifting the equality table omits the all-ones source and forbids wrap.
+pub fn next_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
+    let mut weights = equality_table(point)?;
+    for index in (0..weights.len()).rev() {
+        let value = shifted_next_weight(&weights, index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })?;
+        *weights.get_mut(index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })? = value;
+    }
+    Ok(weights)
+}
+
+/// Reads the nonwrapping successor weight from an existing equality table.
+/// Returns `None` for an index outside that table.
+pub fn shifted_next_weight<F: JoltField>(weights: &[F], index: usize) -> Option<F> {
+    if index >= weights.len() {
+        None
+    } else if let Some(previous) = index.checked_sub(1) {
+        weights.get(previous).copied()
+    } else {
+        Some(F::zero())
+    }
 }
 
 /// A word lift against one reusable 64-entry equality table of a six-coordinate
@@ -153,29 +247,70 @@ pub fn chunk<F: JoltField>(
     point: &[F],
     columns: &[F],
 ) -> Result<F, PointsError> {
-    let expected = usize::from(descriptor.bits());
-    if point.len() != expected {
-        return Err(PointsError::Dimension {
-            expected,
-            actual: point.len(),
-        });
+    ChunkWeights::new(descriptor, point)?.evaluate(columns)
+}
+
+/// Prepared digit weights shared by a pass over stored chunk indicators.
+pub struct ChunkWeights<F: JoltField> {
+    descriptor: Chunk,
+    weights: Vec<F>,
+}
+
+impl<F: JoltField> ChunkWeights<F> {
+    /// Checks the digit width before building its equality table.
+    pub fn new(descriptor: Chunk, point: &[F]) -> Result<Self, PointsError> {
+        let expected = usize::from(descriptor.bits());
+        if point.len() != expected {
+            return Err(PointsError::Dimension {
+                expected,
+                actual: point.len(),
+            });
+        }
+        let mut weights = eq_table(point)?;
+        if let Some((zero, differences)) = weights.split_first_mut() {
+            for difference in differences {
+                *difference -= *zero;
+            }
+        }
+        Ok(Self {
+            descriptor,
+            weights,
+        })
     }
-    let weights = eq_table(point)?;
-    let zero = weights.first().copied().ok_or(PointsError::Index {
-        index: 0,
-        variables: expected,
-    })?;
-    (1..=descriptor.indicators()).try_fold(zero, |sum, digit| {
-        let column = usize::from(descriptor.start()) + digit - 1;
-        let value = columns
-            .get(column)
-            .ok_or(PointsError::MissingColumn { column })?;
-        let weight = weights.get(digit).copied().ok_or(PointsError::Index {
-            index: digit,
-            variables: expected,
+
+    /// Evaluates the affine selector from packed indicators, including rows with
+    /// multiple indicators set, without field multiplications.
+    pub fn evaluate_packed(&self, row: &BitsRow) -> F {
+        let stored = self.descriptor.stored(row);
+        let Some((zero, differences)) = self.weights.split_first() else {
+            return F::zero();
+        };
+        differences
+            .iter()
+            .enumerate()
+            .filter(|(indicator, _)| stored & (1_u16 << indicator) != 0)
+            .fold(*zero, |value, (_, difference)| value + *difference)
+    }
+
+    /// Reconstructs digit zero from the stored indicators; missing columns return an error.
+    pub fn evaluate(&self, columns: &[F]) -> Result<F, PointsError> {
+        let variables = usize::from(self.descriptor.bits());
+        let zero = self.weights.first().copied().ok_or(PointsError::Index {
+            index: 0,
+            variables,
         })?;
-        Ok(sum + (weight + zero) * *value)
-    })
+        (1..=self.descriptor.indicators()).try_fold(zero, |sum, digit| {
+            let column = usize::from(self.descriptor.start()) + digit - 1;
+            let value = columns
+                .get(column)
+                .ok_or(PointsError::MissingColumn { column })?;
+            let weight = self.weights.get(digit).copied().ok_or(PointsError::Index {
+                index: digit,
+                variables,
+            })?;
+            Ok(sum + weight * *value)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +323,21 @@ mod tests {
     use super::*;
     use jolt_field::{One, Ring, Zero, F128};
     use jolt_poly::Polynomial;
+
+    #[test]
+    fn packed_chunk_preserves_affine_multiple_indicators() {
+        let chunk = Chunk::new(63, 2).unwrap();
+        let weights = ChunkWeights::new(chunk, &[F128::from_raw(2), F128::from_raw(4)]).unwrap();
+        for (row, literal) in [
+            ([0, 0, 0, 0], 15),
+            ([1_u64 << 63, 0, 0, 0], 10),
+            ([0, 1, 0, 0], 12),
+            ([0, 2, 0, 0], 8),
+            ([1_u64 << 63, 1, 0, 0], 9),
+        ] {
+            assert_eq!(weights.evaluate_packed(&row), F128::from_raw(literal));
+        }
+    }
 
     fn vertex(index: usize, variables: usize) -> Vec<F128> {
         (0..variables)
@@ -310,6 +460,34 @@ mod tests {
         let expected = Polynomial::new(table).evaluate(&to_high_to_low(&point));
         assert_eq!(lift(word, &point).unwrap(), expected);
         assert_eq!(WordLift::new(&point).unwrap().evaluate(word), expected);
+    }
+
+    #[test]
+    fn equality_table_uses_low_variable_first_indices() {
+        assert_eq!(
+            equality_table(&[F128::zero(), F128::one()]).unwrap(),
+            vec![F128::zero(), F128::zero(), F128::one(), F128::zero()]
+        );
+        assert_eq!(equality_table::<F128>(&[]).unwrap(), vec![F128::one()]);
+        assert!(matches!(
+            equality_table(&vec![F128::one(); usize::BITS as usize]),
+            Err(PointsError::Dimension { .. })
+        ));
+    }
+
+    #[test]
+    fn equality_tables_reject_unrepresentable_byte_capacity() {
+        let point = [F128::zero(); usize::BITS as usize - 5];
+        for result in [equality_table(&point), next_table(&point)] {
+            assert!(matches!(result, Err(PointsError::Allocation { .. })));
+        }
+    }
+
+    #[test]
+    fn split_address_tables_fit_the_twenty_two_bit_budget() {
+        let (low, high) = split_eq_tables(&[F128::zero(); 22]).unwrap();
+        assert_eq!((low.len(), high.len()), (2048, 2048));
+        assert_eq!(low.len() + high.len(), 4096);
     }
 
     #[test]

@@ -6,6 +6,7 @@
     reason = "benchmark setup and frozen-corpus assertions fail on invalid input"
 )]
 
+use interp::Machine;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -65,7 +66,7 @@ const PARALLEL_CHUNK: usize = 1 << 14;
 const VALUES_BATCH: usize = 128;
 
 fn facts(bytecode: &Bytecode, program: &[(u64, u32)], cycles: usize) -> Vec<CycleFacts> {
-    let mut machine = interp::Machine::new(program, ENTRY_PC, LOWEST_ADDRESS, 20, 256).unwrap();
+    let mut machine = Machine::new(program, ENTRY_PC, LOWEST_ADDRESS, 20, 256).unwrap();
     machine.set_register(1, SEED).unwrap();
     machine.set_register(2, LOWEST_ADDRESS).unwrap();
     let mut facts = Vec::with_capacity(cycles);

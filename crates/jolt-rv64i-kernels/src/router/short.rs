@@ -1,6 +1,6 @@
 //! Shared low-first slot sum-check over complete folds and sparse public routing tensors.
 
-use super::shape::{RouteEntry, RouterError, RouterShape, SlotVariable};
+use super::shape::{RouteEntry, RouterError, RouterShape};
 use crate::round::eq::eq_table;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_poly::UnivariatePoly;
@@ -99,13 +99,14 @@ impl RouterShortCore {
     /// Builds each `W` by scattering `eq(w,o)` over the shape's route set.
     /// Checks one complete fold per shape, common slot counts and output-point
     /// dimensions. Agreement of the supplied folds with the committed source is
-    /// required of the caller, not checked, and detected by the verifier.
+    /// required of the caller, not checked. Detection rests on the verifier's final
+    /// evaluation check against the committed source, with the sum-check's soundness error.
     pub fn new(
         shapes: &[RouterShape],
         w: &[F128],
         folds: Vec<Vec<F128>>,
     ) -> Result<Self, RouterError> {
-        let first = shapes.first().ok_or(RouterError::Factors { count: 0 })?;
+        let first = shapes.first().ok_or(RouterError::EmptyShapes)?;
         if folds.len() != shapes.len() {
             return Err(RouterError::TableLength {
                 table: "fold list",
@@ -124,7 +125,7 @@ impl RouterShortCore {
         let output_weights = eq_table(w, None);
         for (shape, fold) in shapes.iter().zip(folds) {
             if shape.slots() != slots {
-                return Err(RouterError::PointLength {
+                return Err(RouterError::SlotCount {
                     expected: slots,
                     actual: shape.slots(),
                 });
@@ -149,21 +150,7 @@ impl RouterShortCore {
                 selector,
             } in shape.route()
             {
-                let mut index = 0;
-                for (bit, &(_, variable)) in shape.slot_map().iter().enumerate() {
-                    let value = match variable {
-                        SlotVariable::Bit(bit) => (source >> bit) & 1,
-                        SlotVariable::Word(bit) => (source >> (6 + bit)) & 1,
-                        SlotVariable::Selector { factor, bit } => {
-                            let shift: usize = shape.factors()[..factor]
-                                .iter()
-                                .map(|f| f.slots.len())
-                                .sum();
-                            (selector >> (shift + bit)) & 1
-                        }
-                    };
-                    index |= value << bit;
-                }
+                let index = shape.fold_index(source, selector);
                 let eq = output_weights[output];
                 weight[index] += eq;
             }
@@ -204,13 +191,9 @@ impl RouterShortCore {
     }
 
     /// After the final bind, returns `(Fold(x), Idle(x) * W(x))` in shape order.
-    /// Calls before completion return `TableLength` for the unfinished cube.
+    /// Calls before completion return `RouterError::Unfinished`.
     pub fn final_values(&self) -> Result<Vec<(F128, F128)>, RouterError> {
-        self.values.clone().ok_or(RouterError::TableLength {
-            table: "finished short fold",
-            expected: 1,
-            actual: self.shapes.first().map_or(0, |shape| shape.fold.len()),
-        })
+        self.values.clone().ok_or(RouterError::Unfinished)
     }
 }
 

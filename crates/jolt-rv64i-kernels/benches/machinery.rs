@@ -1,5 +1,13 @@
 //! Packed passes at log_t=20 and 22, five samples, on warmed one- and twelve-thread
-//! pools. Lift prices one whole word. Bucket prices one nibble update in the
+//! pools. `validate` prices `ValidatedTrace::new` on the all-rows synthetic trace,
+//! including temporary row-cache allocation and release, excluding trace generation:
+//! each cycle reads one bytecode index and all 21 digits, 11 of them compared with
+//! a one-byte row cache; each bytecode row reads those 11 digits once. It has no
+//! requirement. To run it alone:
+//! ```sh
+//! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels --features test-utils --bench machinery -- --units validate --log-t 20,22 --threads 1,12 --samples 5
+//! ```
+//! Lift prices one whole word. Bucket prices one nibble update in the
 //! complete no-byte-selector fold layout. Scatter prices one cycle, excluding
 //! plan construction and weight/output allocation. The requirement row uses
 //! consecutive `all_rows` destinations; `scatter_permuted` uses a fixed seeded
@@ -154,6 +162,10 @@ impl Inputs {
 }
 
 enum Machinery {
+    Validate {
+        source: Arc<SyntheticTrace>,
+        validated: Option<ValidatedTrace<SyntheticTrace>>,
+    },
     Lift {
         inputs: Arc<Inputs>,
         lift: Box<WordLift>,
@@ -193,6 +205,10 @@ impl Machinery {
             Ok(pool)
         };
         match name {
+            "validate" => Ok(Self::Validate {
+                source: Arc::clone(&inputs.trace.source().base),
+                validated: None,
+            }),
             "lift" => {
                 let mut rng = ChaCha20Rng::seed_from_u64(54);
                 let weights = std::array::from_fn(|_| {
@@ -273,6 +289,7 @@ impl MachineryKernel for Machinery {
     type Error = MachineryError;
     fn operations(&self) -> usize {
         match self {
+            Self::Validate { source, .. } => source.cycles(),
             Self::Lift { inputs, .. } => inputs.words.len(),
             Self::Bucket { operations, .. } => *operations,
             Self::Scatter { plan, .. } => plan.cycles(),
@@ -320,11 +337,17 @@ impl MachineryKernel for Machinery {
                 0,
                 rayon::current_num_threads() * layout_entries * std::mem::size_of::<F128>(),
             )),
+            Self::Validate { .. } => None,
             Self::Lift { .. } => Some((std::mem::size_of::<WordLift>(), 0)),
         }
     }
     fn run(&mut self) -> Result<F128, MachineryError> {
         match self {
+            Self::Validate { source, validated } => {
+                *validated = Some(ValidatedTrace::new(Arc::clone(black_box(source)))?);
+                let _ = black_box(&*validated);
+                Ok(F128::from_raw(0))
+            }
             Self::Lift { inputs, lift } => Ok(black_box(&inputs.words)
                 .par_chunks(CHUNK)
                 .map(|words| {
@@ -454,6 +477,7 @@ impl MachineryKernel for Machinery {
 fn main() -> Result<(), RunnerError> {
     run_machinery(
         &[
+            ("validate", None),
             ("lift", Some(4.8)),
             ("bucket", Some(0.9)),
             ("scatter", Some(2.1)),

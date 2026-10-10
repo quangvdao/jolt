@@ -14,6 +14,7 @@ use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
 use jolt_rv64i_kernels::par::CycleChunks;
+use jolt_rv64i_kernels::round::RoundError;
 use jolt_rv64i_kernels::router::claims::claims_pass;
 use jolt_rv64i_kernels::router::cycle::{RouterCycleMember, RoutersCycleCore};
 use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout};
@@ -42,33 +43,8 @@ const ZERO: F128 = F128::from_raw(0);
 const ONE: F128 = F128::from_raw(1);
 const LABEL: &[u8] = b"rv64i-routers-definition";
 
-struct ShapeRequest {
-    slots: usize,
-    bank: Vec<WordSlot>,
-    factors: Vec<SelectorFactor>,
-    word_slots: Vec<usize>,
-    log_outputs: usize,
-    route: Vec<(usize, usize, usize)>,
-}
-
-fn shape(request: ShapeRequest) -> RouterShape {
-    RouterShape::new(RouterShapeRequest {
-        slots: request.slots,
-        bank: request.bank,
-        factors: request.factors,
-        word_slots: request.word_slots,
-        log_outputs: request.log_outputs,
-        route: request
-            .route
-            .into_iter()
-            .map(|(output, source, selector)| RouteEntry {
-                output,
-                source,
-                selector,
-            })
-            .collect(),
-    })
-    .unwrap()
+fn shape(request: RouterShapeRequest) -> RouterShape {
+    RouterShape::new(request).unwrap()
 }
 
 fn routed_shapes(rng: &mut ChaCha20Rng) -> Vec<RouterShape> {
@@ -79,14 +55,14 @@ fn routed_shapes(rng: &mut ChaCha20Rng) -> Vec<RouterShape> {
             let route = (0..48)
                 .map(|_| {
                     let value = F128::random(rng).to_raw();
-                    (
-                        value as usize & ((1 << base.log_outputs()) - 1),
-                        (value >> 32) as usize & (64 * base.bank().len() - 1),
-                        (value >> 64) as usize & (base.selectors() - 1),
-                    )
+                    RouteEntry {
+                        output: value as usize & ((1 << base.log_outputs()) - 1),
+                        source: (value >> 32) as usize & (64 * base.bank().len() - 1),
+                        selector: (value >> 64) as usize & (base.selectors() - 1),
+                    }
                 })
                 .collect();
-            shape(ShapeRequest {
+            shape(RouterShapeRequest {
                 slots: base.slots(),
                 bank: base.bank().to_vec(),
                 factors: base.factors().to_vec(),
@@ -719,8 +695,8 @@ impl CycleSource for TinyTrace {
     }
 }
 
-fn tiny_shape(bank: WordSlot, slots: usize, route: Vec<(usize, usize, usize)>) -> RouterShape {
-    shape(ShapeRequest {
+fn tiny_shape(bank: WordSlot, slots: usize, route: Vec<RouteEntry>) -> RouterShape {
+    shape(RouterShapeRequest {
         slots,
         bank: vec![bank],
         factors: vec![SelectorFactor {
@@ -740,7 +716,15 @@ fn complete_fold_smallest_case_keeps_unrouted_bit_and_literal_quadratic() {
         digits: vec![Some(0); 8],
     });
     let trace = Arc::new(ValidatedTrace::new(source.clone()).unwrap());
-    let shapes = vec![tiny_shape(WordSlot::Trace(0), 6, vec![(0, 0, 0)])];
+    let shapes = vec![tiny_shape(
+        WordSlot::Trace(0),
+        6,
+        vec![RouteEntry {
+            output: 0,
+            source: 0,
+            selector: 0,
+        }],
+    )];
     let plan = ScatterPlan::new(trace.clone()).unwrap();
     let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
     let fold = fold_pass(&trace, &shapes, &[ZERO; 3], &plan, &layout, &[]).unwrap();
@@ -804,7 +788,11 @@ fn complete_fold_constant_bank_covers_absence_and_boolean_cycle_points() {
         let shapes = vec![tiny_shape(
             WordSlot::Bits(vec![BitEntry::One]),
             6,
-            vec![(0, 0, 0)],
+            vec![RouteEntry {
+                output: 0,
+                source: 0,
+                selector: 0,
+            }],
         )];
         let plan = ScatterPlan::new(trace.clone()).unwrap();
         let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
@@ -842,7 +830,15 @@ fn cycle_scalar_becoming_zero_and_short_idle_zero_match_definitions() {
         digits: vec![Some(0); 8],
     });
     let trace = ValidatedTrace::new(source.clone()).unwrap();
-    let shapes = vec![tiny_shape(WordSlot::Trace(0), 7, vec![(0, 0, 0)])];
+    let shapes = vec![tiny_shape(
+        WordSlot::Trace(0),
+        7,
+        vec![RouteEntry {
+            output: 0,
+            source: 0,
+            selector: 0,
+        }],
+    )];
     let r_cycle = vec![F128::from_raw(83), ZERO, ONE];
     let mut x = point(7, &mut rng);
     x[6] = ONE;
@@ -906,6 +902,11 @@ fn malformed_router_sources_and_points_return_named_errors() {
         })
     ));
     let lifted = source_lift(&trace, &shapes, &x).unwrap();
+    let partial_lifts = source_lift(&trace, &shapes[..1], &x).unwrap();
+    assert!(matches!(
+        claims_pass(&trace, &partial_lifts.lifts, &[3], &plan, &r_cycle),
+        Err(RouterError::MissingRetainedWord { word: 3 })
+    ));
     assert!(matches!(
         claims_pass(&trace, &lifted.lifts, &[0], &plan, &r_cycle[..2]),
         Err(RouterError::PointLength {
@@ -1059,7 +1060,7 @@ fn malformed_router_sources_and_points_return_named_errors() {
         ),
     ];
     for (bank, factor, expected) in invalid_shapes {
-        let invalid = vec![shape(ShapeRequest {
+        let invalid = vec![shape(RouterShapeRequest {
             slots: 17,
             bank: vec![bank],
             factors: vec![factor],
@@ -1242,7 +1243,8 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
         let x = point(17, &mut rng);
         let mut lift_allocations = None;
         let mut claim_allocations = None;
-        for log_t in [8, 14, 17] {
+        let mut cycle_allocations = None;
+        for log_t in [8, 14, 19] {
             let source = Arc::new(
                 SyntheticTrace::new(
                     SynthProfile::AllRows,
@@ -1256,7 +1258,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
             let plan = ScatterPlan::new(trace.clone()).unwrap();
             let r_cycle = point(log_t, &mut rng);
             let challenges = point(log_t, &mut rng);
-            if log_t == 17 {
+            if log_t == 19 {
                 assert!(CycleChunks::new(log_t, 0).unwrap().ranges().len() >= 32);
             }
             drop(source_lift(&trace, &shapes, &x).unwrap());
@@ -1314,11 +1316,26 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
             let measurement = AllocationMeasurement::begin();
             drive_members(&mut members, &mut claims, &challenges);
             let stats = measurement.finish();
-            assert!(
-                stats.allocs <= 16 * log_t + 64 + allowance_allocs,
-                "cycle allocations {} at log_t={log_t}",
-                stats.allocs
-            );
+            if log_t >= 14 {
+                let pass_chunks: usize = (1..=log_t)
+                    .map(|round| CycleChunks::new(log_t, round).unwrap().ranges().len())
+                    .sum();
+                if let Some((first_log_t, first_allocs, first_chunks)) = cycle_allocations {
+                    // One jobs vector, eight shared dense selector binds, and
+                    // coefficient/message vectors for each of the five members.
+                    let per_round = 1 + 8 + 2 * shapes.len();
+                    let growth_bound = per_round * (log_t - first_log_t) + allowance_allocs;
+                    assert!(CycleChunks::new(log_t, 1).unwrap().ranges().len() >= 32);
+                    assert!(pass_chunks - first_chunks > growth_bound);
+                    assert!(
+                        stats.allocs <= first_allocs + growth_bound,
+                        "cycle allocations scale with chunks: {} at log_t={log_t} versus {first_allocs} at log_t={first_log_t}, growth bound {growth_bound}",
+                        stats.allocs
+                    );
+                } else {
+                    cycle_allocations = Some((log_t, stats.allocs, pass_chunks));
+                }
+            }
             let words: Vec<_> = (0..source.trace_words()).collect();
             drop(claims_pass(&trace, &lifted.lifts, &words, &plan, &challenges).unwrap());
             let measurement = AllocationMeasurement::begin();
@@ -1383,7 +1400,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
 fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
     assert!(matches!(
         RouterShortCore::new(&[], &[], vec![]),
-        Err(RouterError::Factors { count: 0 })
+        Err(RouterError::EmptyShapes)
     ));
     let shapes = synthetic_router_shapes().unwrap();
     assert!(matches!(
@@ -1403,10 +1420,7 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
             .collect(),
     )
     .unwrap();
-    assert!(matches!(
-        core.final_values(),
-        Err(RouterError::TableLength { .. })
-    ));
+    assert!(matches!(core.final_values(), Err(RouterError::Unfinished)));
     let source = Arc::new(TinyTrace {
         words: vec![0; 2],
         digits: vec![Some(0); 2],
@@ -1418,7 +1432,7 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
     ];
     assert!(matches!(
         RouterShortCore::new(&mixed, &[], vec![vec![ZERO; 64]; 2]),
-        Err(RouterError::PointLength {
+        Err(RouterError::SlotCount {
             expected: 6,
             actual: 7
         })
@@ -1431,8 +1445,14 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
         vec![vec![ZERO; 2]],
     )
     .unwrap();
-    assert!(core.members()[0].final_values().is_err());
-    assert!(RoutersCycleCore::new(&trace, &[], &[ZERO], &[], vec![]).is_err());
+    assert!(matches!(
+        core.members()[0].final_values(),
+        Err(RouterError::Unfinished)
+    ));
+    assert!(matches!(
+        RoutersCycleCore::new(&trace, &[], &[ZERO], &[], vec![]),
+        Err(RouterError::EmptyShapes)
+    ));
     assert!(RoutersCycleCore::new(&trace, &mixed[..1], &[ZERO], &[ZERO; 6], vec![]).is_err());
 }
 
@@ -1499,7 +1519,7 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
         matches!(source_lift(&trace, &shapes, &[ZERO; 6]), Err(RouterError::Dimension { variables }) if variables == width)
     );
     let trace = ValidatedTrace::new(Arc::new(WideColumns { width: 8 })).unwrap();
-    let shapes = vec![shape(ShapeRequest {
+    let shapes = vec![shape(RouterShapeRequest {
         slots: 14,
         bank: vec![WordSlot::Zero],
         factors: vec![SelectorFactor {
@@ -1512,10 +1532,10 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     })];
     assert!(matches!(
         RoutersCycleCore::new(&trace, &shapes, &[ZERO], &[ZERO; 14], vec![vec![ZERO; 2]]),
-        Err(RouterError::FactorWidth {
+        Err(RouterError::FactorCapacity {
             column: 1,
-            expected: 7,
-            actual: 8
+            bound: 7,
+            width: 8
         })
     ));
     let trace = ValidatedTrace::new(Arc::new(TinyTrace {
@@ -1526,10 +1546,7 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     let shapes = vec![tiny_shape(WordSlot::Zero, 6, vec![])];
     assert!(matches!(
         RoutersCycleCore::new(&trace, &shapes, &[], &[ZERO; 6], vec![vec![ZERO]]),
-        Err(RouterError::PointLength {
-            expected: 1,
-            actual: 0
-        })
+        Err(RouterError::Round(RoundError::EmptyPoint))
     ));
 }
 
@@ -1640,4 +1657,171 @@ fn singular_cycle_batch_endpoints_match_definitions_for_all_factor_counts() {
     for reverse in [false, true] {
         prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
     }
+}
+
+#[test]
+fn digit_bit_and_explicit_zero_bank_entries_match_definitions() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1410);
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1410).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes = vec![shape(RouterShapeRequest {
+        slots: 12,
+        bank: vec![
+            WordSlot::Trace(0),
+            WordSlot::Bits(vec![
+                BitEntry::DigitBit { column: 5, bit: 3 },
+                BitEntry::Zero,
+                BitEntry::One,
+            ]),
+            WordSlot::Bytecode(0),
+            WordSlot::Zero,
+        ],
+        factors: vec![SelectorFactor {
+            column: 5,
+            slots: (6..10).collect(),
+        }],
+        word_slots: vec![10, 11],
+        log_outputs: 0,
+        route: vec![],
+    })];
+    let r_cycle = point(8, &mut rng);
+    let x = point(12, &mut rng);
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    for reverse in [false, true] {
+        prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
+    }
+}
+
+#[test]
+fn nine_distinct_factor_columns_match_definitions_on_uncached_gathers() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1411);
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1411).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes: Vec<_> = (0..9)
+        .map(|column| {
+            shape(RouterShapeRequest {
+                slots: 10,
+                bank: vec![WordSlot::Trace(column % 4)],
+                factors: vec![SelectorFactor {
+                    column,
+                    slots: (6..10).collect(),
+                }],
+                word_slots: vec![],
+                log_outputs: 0,
+                route: vec![],
+            })
+        })
+        .collect();
+    let r_cycle = point(8, &mut rng);
+    let x = point(10, &mut rng);
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    for reverse in [false, true] {
+        prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
+    }
+}
+
+#[test]
+fn nine_bytecode_shapes_match_definitions_across_row_tile_batches() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1412);
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1412).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes: Vec<_> = (0..9)
+        .map(|index| {
+            shape(RouterShapeRequest {
+                slots: 14,
+                bank: vec![
+                    WordSlot::Bytecode(index % 4),
+                    WordSlot::Bytecode((index + 1) % 4),
+                    WordSlot::Bits(vec![BitEntry::One]),
+                    WordSlot::Zero,
+                ],
+                factors: vec![SelectorFactor {
+                    column: 12,
+                    slots: (6..12).collect(),
+                }],
+                word_slots: vec![12, 13],
+                log_outputs: 0,
+                route: vec![],
+            })
+        })
+        .collect();
+    let r_cycle = point(8, &mut rng);
+    let x = point(14, &mut rng);
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    for reverse in [false, true] {
+        prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
+    }
+}
+
+#[test]
+fn singular_cycle_endpoint_with_zero_source_member_matches_definitions() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1413);
+    let source = Arc::new(TinyTrace {
+        words: vec![
+            0x2f13, 0x751b, 0x916d, 0x836f, 0xa481, 0xc697, 0xe2b9, 0x13df,
+        ],
+        digits: vec![Some(0); 8],
+    });
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes = vec![
+        tiny_shape(WordSlot::Zero, 6, vec![]),
+        tiny_shape(WordSlot::Trace(0), 6, vec![]),
+    ];
+    let r_cycle = vec![ZERO, ONE, F128::random(&mut rng)];
+    let x = point(6, &mut rng);
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    assert!(definition.sources[0].iter().all(|&value| value == ZERO));
+    assert!(definition.sources[1].iter().any(|&value| value != ZERO));
+    for reverse in [false, true] {
+        prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
+    }
+}
+
+#[test]
+fn cycle_subset_members_match_definitions_with_dropped_and_undriven_handles() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1414);
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1414).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes = synthetic_router_shapes().unwrap();
+    let r_cycle = point(8, &mut rng);
+    let x = point(17, &mut rng);
+    let challenges = point(8, &mut rng);
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    let lifted = source_lift(&trace, &shapes, &x).unwrap();
+    let core = RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, lifted.source_tables).unwrap();
+    let mut members = core.members().into_iter();
+    drop(members.next().unwrap());
+    let mut first = members.next().unwrap();
+    drop(members.next().unwrap());
+    let mut third = members.next().unwrap();
+    let undriven = members.next().unwrap();
+    let mut claims = definition.claims(&shapes, &x);
+    for (round, &challenge) in challenges.iter().enumerate() {
+        let expected = definition.cycle_messages(&challenges[..round]);
+        for (member, index) in [(&mut third, 3), (&mut first, 1)] {
+            let message = member
+                .prove_round(
+                    round.checked_sub(1).map(|previous| challenges[previous]),
+                    round,
+                    claims[index],
+                )
+                .unwrap();
+            assert_eq!(message.coefficients(), expected[index].coefficients());
+            claims[index] = message.evaluate(challenge);
+        }
+    }
+    third.finish_rounds(challenges[7]).unwrap();
+    first.finish_rounds(challenges[7]).unwrap();
+    for (member, index) in [(&third, 3), (&first, 1)] {
+        let leaves = &definition.cycle_leaves[index];
+        let expected = (
+            mle_at(&leaves[1], &challenges).unwrap(),
+            leaves[2..]
+                .iter()
+                .map(|table| mle_at(table, &challenges).unwrap())
+                .collect(),
+        );
+        assert_eq!(member.final_values().unwrap(), expected);
+    }
+    drop(undriven);
 }

@@ -1,12 +1,13 @@
 //! Source lifting sums out bit and word variables and retains shared trace-word lifts.
 
+#[cfg(feature = "test-utils")]
 use std::time::{Duration, Instant};
 
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
-use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
+use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot, BIT_VARIABLES};
 use crate::packed::lift::WordLift;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
@@ -20,7 +21,8 @@ const SHAPES_PER_TILE: usize = 8;
 /// Each distinct trace word used by a bank, lifted once at the common bit point.
 /// Tables are in `word_indices()` order and retain their full cycle domain.
 /// Agreement with the source subsequently passed to `claims_pass` is required
-/// of the caller, not checked, and incorrect claims are detected by the verifier.
+/// of the caller, not checked. Detection rests on the verifier's final evaluation
+/// check against the committed source, with the sum-check's soundness error.
 pub struct RetainedWordLifts {
     pub(crate) lift: WordLift,
     pub(crate) words: Vec<usize>,
@@ -44,8 +46,6 @@ impl RetainedWordLifts {
 pub struct SourceLiftOutput {
     pub source_tables: Vec<Vec<F128>>,
     pub lifts: RetainedWordLifts,
-    pub row_tables_time: Duration,
-    pub cycles_time: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +71,7 @@ struct Flags<const N: usize, const SIZE: usize> {
 }
 impl<const N: usize, const SIZE: usize> Flags<N, SIZE> {
     fn new(entries: &[FlagEntry; N]) -> Self {
-        assert_eq!(SIZE, 1 << N);
+        const { assert!(SIZE == 1 << N) };
         Self {
             columns: std::array::from_fn(|index| entries[index].column),
             table: std::array::from_fn(|index| {
@@ -104,6 +104,50 @@ struct ShapePlan {
     flags_two: Vec<Flags<2, 4>>,
     flags_three: Vec<Flags<3, 8>>,
 }
+struct TileSums {
+    indices: [Option<usize>; SHAPES_PER_TILE],
+    count: usize,
+}
+
+impl TileSums {
+    fn new(shapes: &[ShapePlan], active: impl Fn(&ShapePlan) -> bool) -> Self {
+        let mut indices = [None; SHAPES_PER_TILE];
+        let mut count = 0;
+        for (index, shape) in shapes.iter().enumerate() {
+            if active(shape) {
+                indices[index] = Some(count);
+                count += 1;
+            }
+        }
+        Self { indices, count }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the plan marks every weighted term-bearing shape as active"
+    )]
+    fn index(&self, shape: usize) -> usize {
+        self.indices[shape].expect("weighted term has an accumulator")
+    }
+
+    #[inline]
+    fn with(&self, body: impl FnOnce(&mut [[F128Accumulator; TILE]])) {
+        const { assert!(SHAPES_PER_TILE == 8) };
+        debug_assert!(self.count <= SHAPES_PER_TILE);
+        match self.count {
+            0 => body(&mut []),
+            1 => body(&mut [[F128Accumulator::default(); TILE]; 1]),
+            2 => body(&mut [[F128Accumulator::default(); TILE]; 2]),
+            3 => body(&mut [[F128Accumulator::default(); TILE]; 3]),
+            4 => body(&mut [[F128Accumulator::default(); TILE]; 4]),
+            5 => body(&mut [[F128Accumulator::default(); TILE]; 5]),
+            6 => body(&mut [[F128Accumulator::default(); TILE]; 6]),
+            7 => body(&mut [[F128Accumulator::default(); TILE]; 7]),
+            _ => body(&mut [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE]),
+        }
+    }
+}
+
 struct Plan {
     shapes: Vec<ShapePlan>,
     trace: Vec<WordPlan>,
@@ -314,7 +358,11 @@ impl Plan {
     ) {
         let row_count = rows.len();
         let mut targets = chunk_views(rows, chunk);
-        let shapes = self.shapes.len();
+        let tiles: Vec<_> = self
+            .shapes
+            .chunks(SHAPES_PER_TILE)
+            .map(|shapes| TileSums::new(shapes, |shape| shape.bytecode_terms != 0))
+            .collect();
         let row_shapes: Vec<_> = self
             .shapes
             .iter()
@@ -329,43 +377,45 @@ impl Plan {
                 let len = outputs[0].len();
                 for offset in (0..len).step_by(TILE) {
                     let count = TILE.min(len - offset);
-                    for base in (0..shapes).step_by(SHAPES_PER_TILE) {
-                        let group = SHAPES_PER_TILE.min(shapes - base);
-                        let mut sums = [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE];
-                        for word in &self.bytecode {
-                            let mut values = [ZERO; TILE];
-                            for (row, value) in values[..count].iter_mut().enumerate() {
-                                *value = lift
-                                    .lift(source.bytecode_word(word.word, start + offset + row));
-                            }
-                            for term in word
-                                .terms
-                                .iter()
-                                .filter(|term| term.shape >= base && term.shape < base + group)
-                            {
-                                let sums = &mut sums[term.shape - base];
-                                for (sum, &value) in sums[..count].iter_mut().zip(&values) {
-                                    sum.fmadd(value, term.coefficient);
+                    for (tile_index, tile) in tiles.iter().enumerate() {
+                        let base = tile_index * SHAPES_PER_TILE;
+                        let end = base + SHAPES_PER_TILE;
+                        tile.with(|sums| {
+                            for word in &self.bytecode {
+                                let mut values = [ZERO; TILE];
+                                for (row, value) in values[..count].iter_mut().enumerate() {
+                                    *value = lift.lift(
+                                        source.bytecode_word(word.word, start + offset + row),
+                                    );
+                                }
+                                for term in word
+                                    .terms
+                                    .iter()
+                                    .filter(|term| term.shape >= base && term.shape < end)
+                                {
+                                    let sums = &mut sums[tile.index(term.shape - base)];
+                                    for (sum, &value) in sums[..count].iter_mut().zip(&values) {
+                                        sum.fmadd(value, term.coefficient);
+                                    }
                                 }
                             }
-                        }
-                        for &(shape_index, row) in row_shapes
-                            .iter()
-                            .filter(|&&(shape, _)| shape >= base && shape < base + group)
-                        {
-                            let shape = &self.shapes[shape_index];
-                            for (output, sum) in outputs[row][offset..offset + count]
-                                .iter_mut()
-                                .zip(sums[shape_index - base].iter().copied())
+                            for &(shape_index, row) in row_shapes
+                                .iter()
+                                .filter(|&&(shape, _)| shape >= base && shape < end)
                             {
-                                *output = shape.constant
-                                    + if shape.bytecode_terms == 0 {
-                                        ZERO
-                                    } else {
-                                        sum.reduce()
-                                    };
+                                let shape = &self.shapes[shape_index];
+                                let output = &mut outputs[row][offset..offset + count];
+                                if let Some(index) = tile.indices[shape_index - base] {
+                                    for (output, sum) in
+                                        output.iter_mut().zip(sums[index].iter().copied())
+                                    {
+                                        *output = shape.constant + sum.reduce();
+                                    }
+                                } else {
+                                    output.fill(shape.constant);
+                                }
                             }
-                        }
+                        });
                     }
                 }
             });
@@ -384,6 +434,15 @@ impl Plan {
         let mut lift_views = chunk_views(lifts, chunk);
         let mut outputs = chunk_views(tables, chunk);
         let shape_count = self.shapes.len();
+        let tiles: Vec<_> = self
+            .shapes
+            .chunks(SHAPES_PER_TILE)
+            .map(|shapes| {
+                TileSums::new(shapes, |shape| {
+                    shape.trace_terms != 0 && !shape.direct_trace
+                })
+            })
+            .collect();
         let mut lift_chunks = lift_views.chunks_mut(word_count.max(1));
         let mut target_chunks = outputs.chunks_mut(shape_count);
         let chunks: Vec<_> = (0..source.cycles() / chunk)
@@ -414,67 +473,71 @@ impl Plan {
                             ZERO
                         });
                     }
-                    for base in (0..shape_count).step_by(SHAPES_PER_TILE) {
+                    for (tile_index, tile) in tiles.iter().enumerate() {
+                        let base = tile_index * SHAPES_PER_TILE;
                         let group = SHAPES_PER_TILE.min(shape_count - base);
-                        let mut sums = [[F128Accumulator::default(); TILE]; SHAPES_PER_TILE];
-                        for (word, values) in self.trace.iter().zip(words.iter()) {
-                            for term in word
-                                .terms
-                                .iter()
-                                .filter(|term| term.shape >= base && term.shape < base + group)
-                            {
-                                if self.shapes[term.shape].direct_trace {
-                                    for (output, &value) in outputs[term.shape]
-                                        [offset..offset + count]
-                                        .iter_mut()
-                                        .zip(&values[offset..offset + count])
-                                    {
-                                        *output += value;
-                                    }
-                                } else {
-                                    for (sum, &value) in sums[term.shape - base][..count]
-                                        .iter_mut()
-                                        .zip(&values[offset..offset + count])
-                                    {
-                                        sum.fmadd(value, term.coefficient);
-                                    }
-                                }
-                            }
-                        }
-                        for (local, shape) in self.shapes[base..base + group].iter().enumerate() {
-                            let output = &mut outputs[base + local][offset..offset + count];
-                            if shape.trace_terms != 0 && !shape.direct_trace {
-                                for (output, sum) in
-                                    output.iter_mut().zip(sums[local].iter().copied())
+                        tile.with(|sums| {
+                            for (word, values) in self.trace.iter().zip(words.iter()) {
+                                for term in word
+                                    .terms
+                                    .iter()
+                                    .filter(|term| term.shape >= base && term.shape < base + group)
                                 {
-                                    *output += sum.reduce();
+                                    if self.shapes[term.shape].direct_trace {
+                                        for (output, &value) in outputs[term.shape]
+                                            [offset..offset + count]
+                                            .iter_mut()
+                                            .zip(&values[offset..offset + count])
+                                        {
+                                            *output += value;
+                                        }
+                                    } else {
+                                        let sums = &mut sums[tile.index(term.shape - base)];
+                                        for (sum, &value) in sums[..count]
+                                            .iter_mut()
+                                            .zip(&values[offset..offset + count])
+                                        {
+                                            sum.fmadd(value, term.coefficient);
+                                        }
+                                    }
                                 }
                             }
-                            if let Some(row) = shape.row_table {
-                                let row_table = &rows[row];
-                                for (cycle, output) in output.iter_mut().enumerate() {
-                                    *output +=
-                                        row_table[source.bytecode_index(start + offset + cycle)];
+                            for (local, shape) in self.shapes[base..base + group].iter().enumerate()
+                            {
+                                let output = &mut outputs[base + local][offset..offset + count];
+                                if let Some(index) = tile.indices[local] {
+                                    for (output, sum) in
+                                        output.iter_mut().zip(sums[index].iter().copied())
+                                    {
+                                        *output += sum.reduce();
+                                    }
+                                }
+                                if let Some(row) = shape.row_table {
+                                    let row_table = &rows[row];
+                                    for (cycle, output) in output.iter_mut().enumerate() {
+                                        *output += row_table
+                                            [source.bytecode_index(start + offset + cycle)];
+                                    }
+                                }
+                                for digit in &shape.digits {
+                                    for (cycle, output) in output.iter_mut().enumerate() {
+                                        let value = source
+                                            .digit(digit.column, start + offset + cycle)
+                                            .map_or(0, |digit| digit + 1);
+                                        *output += digit.table[value];
+                                    }
+                                }
+                                for flags in &shape.flags_one {
+                                    flags.add(source, start + offset, output);
+                                }
+                                for flags in &shape.flags_two {
+                                    flags.add(source, start + offset, output);
+                                }
+                                for flags in &shape.flags_three {
+                                    flags.add(source, start + offset, output);
                                 }
                             }
-                            for digit in &shape.digits {
-                                for (cycle, output) in output.iter_mut().enumerate() {
-                                    let value = source
-                                        .digit(digit.column, start + offset + cycle)
-                                        .map_or(0, |digit| digit + 1);
-                                    *output += digit.table[value];
-                                }
-                            }
-                            for flags in &shape.flags_one {
-                                flags.add(source, start + offset, output);
-                            }
-                            for flags in &shape.flags_two {
-                                flags.add(source, start + offset, output);
-                            }
-                            for flags in &shape.flags_three {
-                                flags.add(source, start + offset, output);
-                            }
-                        }
+                        });
                     }
                 }
             });
@@ -507,15 +570,45 @@ fn chunk_views(tables: &mut [Vec<F128>], chunk: usize) -> Vec<&mut [F128]> {
 /// Each shape combines its trace lifts by one unreduced sum, its digit lookup
 /// tables, and a temporary bytecode-row table that also contains its constant.
 /// Source immutability and the source's agreement with committed bits are
-/// required of the caller, not checked, and false claims are detected by the verifier.
+/// required of the caller, not checked. Detection rests on the verifier's final
+/// evaluation check against the committed source, with the sum-check's soundness error.
 pub fn source_lift<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
     x: &[F128],
 ) -> Result<SourceLiftOutput, RouterError> {
+    source_lift_impl(trace, shapes, x, |_| {})
+}
+
+/// The source pass with diagnostic durations for row tables and cycles, in that
+/// order. It has the same checked and unchecked preconditions as `source_lift`.
+#[cfg(feature = "test-utils")]
+pub fn source_lift_timed<S: CycleSource>(
+    trace: &ValidatedTrace<S>,
+    shapes: &[RouterShape],
+    x: &[F128],
+) -> Result<(SourceLiftOutput, [Duration; 2]), RouterError> {
+    let mut times = [Duration::ZERO; 2];
+    let mut previous = None;
+    let output = source_lift_impl(trace, shapes, x, |phase| {
+        let now = Instant::now();
+        if let Some(start) = previous {
+            times[phase - 1] = now.duration_since(start);
+        }
+        previous = Some(now);
+    })?;
+    Ok((output, times))
+}
+
+fn source_lift_impl<S: CycleSource>(
+    trace: &ValidatedTrace<S>,
+    shapes: &[RouterShape],
+    x: &[F128],
+    mut phase: impl FnMut(usize),
+) -> Result<SourceLiftOutput, RouterError> {
     let source = trace.source().as_ref();
-    let bit_point = x.get(..6).ok_or(RouterError::PointLength {
-        expected: shapes.first().map_or(6, RouterShape::slots),
+    let bit_point = x.get(..BIT_VARIABLES).ok_or(RouterError::PointLength {
+        expected: shapes.first().map_or(BIT_VARIABLES, RouterShape::slots),
         actual: x.len(),
     })?;
     let bit_weights = eq_table(bit_point, None);
@@ -525,9 +618,7 @@ pub fn source_lift<S: CycleSource>(
     let log_t = source.cycles().ilog2() as usize;
     let _ = table_len(log_t)?;
     let _ = table_len(source.bytecode_rows().ilog2() as usize)?;
-    let geometry = CycleChunks::new(log_t, 0).map_err(|_| RouterError::Dimension {
-        variables: source.cycles().ilog2() as usize,
-    })?;
+    let geometry = CycleChunks::new(log_t, 0)?;
     let mut source_tables: Vec<Vec<F128>> = shapes
         .iter()
         .map(|_| unsafe_allocate_zero_vec(source.cycles()))
@@ -537,7 +628,7 @@ pub fn source_lift<S: CycleSource>(
         .iter()
         .map(|_| unsafe_allocate_zero_vec(source.cycles()))
         .collect();
-    let row_start = Instant::now();
+    phase(0);
     let mut rows: Vec<Vec<F128>> = plan
         .shapes
         .iter()
@@ -547,8 +638,7 @@ pub fn source_lift<S: CycleSource>(
     if !rows.is_empty() {
         plan.rows(source, &lift, &mut rows, geometry.chunk_len());
     }
-    let row_tables_time = row_start.elapsed();
-    let cycles_start = Instant::now();
+    phase(1);
     if !shapes.is_empty() {
         plan.cycles(
             source,
@@ -559,7 +649,7 @@ pub fn source_lift<S: CycleSource>(
             geometry.chunk_len(),
         );
     }
-    let cycles_time = cycles_start.elapsed();
+    phase(2);
     Ok(SourceLiftOutput {
         source_tables,
         lifts: RetainedWordLifts {
@@ -567,7 +657,5 @@ pub fn source_lift<S: CycleSource>(
             words: plan.trace.iter().map(|word| word.word).collect(),
             tables: lifts,
         },
-        row_tables_time,
-        cycles_time,
     })
 }

@@ -28,26 +28,6 @@ use std::sync::Arc;
 mod allocator;
 use allocator::{AllocationMeasurement, CountingAllocator, RAYON_WORKER_ALLOWANCE};
 
-fn map() -> Vec<ColumnMap> {
-    let mut map = vec![ColumnMap::Word {
-        start: 0,
-        trace_word: 5,
-    }];
-    map.extend((0..10).map(|column| ColumnMap::Indicators {
-        start: 64 + 15 * column,
-        column,
-    }));
-    map.extend((10..12).map(|column| ColumnMap::Indicators {
-        start: 214 + 7 * (column - 10),
-        column,
-    }));
-    map.push(ColumnMap::Flags {
-        start: 228,
-        columns: vec![18, 19, 20],
-    });
-    map
-}
-
 fn weights(rng: &mut ChaCha20Rng) -> Vec<Vec<F128>> {
     (0..4)
         .map(|support| {
@@ -117,7 +97,7 @@ fn digit_tables_equal_summation_on_indicator_rows() {
         for count in 1..=4 {
             let weights = &supported_weights[..count];
             assert_eq!(
-                g_pass_digits(&validated, &map(), weights).unwrap(),
+                g_pass_digits(&validated, &SyntheticTrace::column_map(), weights).unwrap(),
                 defining_tables(trace.rows(), weights),
                 "{count} weights at log_t={log_t}"
             );
@@ -137,7 +117,12 @@ fn digit_tables_equal_summation_on_indicator_rows() {
                 })
                 .collect();
             assert_eq!(
-                g_pass_digits(&validated, &map(), &covered_support_weights).unwrap(),
+                g_pass_digits(
+                    &validated,
+                    &SyntheticTrace::column_map(),
+                    &covered_support_weights
+                )
+                .unwrap(),
                 defining_tables(trace.rows(), &covered_support_weights)
             );
         }
@@ -459,7 +444,11 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
     let trace = Arc::new(SyntheticTrace::new(SynthProfile::Local, 3, 2, 817).unwrap());
     let validated = ValidatedTrace::new(trace.clone()).unwrap();
     assert!(matches!(
-        g_pass_digits(&validated, &map(), &[vec![zero; 255]]),
+        g_pass_digits(
+            &validated,
+            &SyntheticTrace::column_map(),
+            &[vec![zero; 255]]
+        ),
         Err(ReductionError::WeightLength { actual: 255, .. })
     ));
     assert!(matches!(
@@ -515,7 +504,7 @@ fn reduction_rejects_malformed_tables_legs_weights_and_maps() {
     let mut uncovered = vec![zero; 256];
     uncovered[255] = one;
     assert!(matches!(
-        g_pass_digits(&validated, &map(), &[uncovered]),
+        g_pass_digits(&validated, &SyntheticTrace::column_map(), &[uncovered]),
         Err(ReductionError::Uncovered { column: 255, .. })
     ));
     let core = ReductionCore::new(
@@ -742,7 +731,11 @@ fn reduction_rejects_weight_and_leg_counts_above_the_bounds() {
     ))
     .unwrap();
     assert_eq!(
-        g_pass_digits(&trace, &map(), &vec![vec![zero; 256]; 5]),
+        g_pass_digits(
+            &trace,
+            &SyntheticTrace::column_map(),
+            &vec![vec![zero; 256]; 5]
+        ),
         Err(ReductionError::WeightCount { count: 5 })
     );
     assert!(matches!(
@@ -770,7 +763,7 @@ fn two_chunk_tables_round_messages_and_final_values_match_the_definition_on_each
     let mut rng = ChaCha20Rng::seed_from_u64(173);
     let weights = weights(&mut rng);
     let weights = &weights[1..];
-    let map = map();
+    let map = SyntheticTrace::column_map();
     let expected_tables = defining_tables(source.rows(), weights);
     let fixture = Fixture::from_tables(expected_tables, log_t, true, &mut rng);
     let challenges: Vec<_> = (0..log_t).map(|_| F128::random(&mut rng)).collect();
@@ -830,7 +823,7 @@ fn digit_builder_allocations_are_bounded_per_pass_and_only_outputs_remain() {
             let mut rng = ChaCha20Rng::seed_from_u64(818);
             let weights = weights(&mut rng);
             let weights = &weights[1..];
-            let map = map();
+            let map = SyntheticTrace::column_map();
             let expected = defining_tables(source.rows(), weights);
             drop(g_pass_digits(&trace, &map, weights).unwrap());
             let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();

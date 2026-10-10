@@ -1,18 +1,18 @@
 //! Complete source-selector folds; routing support is deliberately absent from this pass.
 
 use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
-mod compiled;
+mod readout;
 use crate::packed::buckets::{ByteBuckets, DigitHistogram, NibbleBuckets};
 use crate::packed::pool::ScratchPool;
 use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::{CycleSource, ValidatedTrace};
-use compiled::{BankStorage, CompiledShape, ReadBit};
 use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use readout::{BankStorage, ReadBit, ReadoutShape};
+use std::cmp::Reverse;
 
 #[cfg(feature = "test-utils")]
 mod calibration;
@@ -45,7 +45,7 @@ pub struct FoldLayout {
     shapes: Vec<ShapeLayout>,
     entries: usize,
     row_entries: usize,
-    compiled: Vec<CompiledShape>,
+    readout_shapes: Vec<ReadoutShape>,
 }
 
 const fn word_entries(bytes: bool) -> usize {
@@ -70,6 +70,19 @@ const fn word_sets(selectors: usize, words: usize, bytes: usize) -> usize {
 }
 
 impl FoldLayout {
+    /// Performance defaults to eight selector values, saving bucket XORs with limited extra scratch.
+    pub const DEFAULT_BYTE_BUCKET_LIMIT: usize = 8;
+
+    /// Choose up to `limit` selector values from `selector_counts`, ordered by
+    /// descending count. Ties put the lower value first, making the layout a
+    /// deterministic function of the trace. A larger limit selects every value.
+    pub fn byte_bucket_values(counts: &[usize], limit: usize) -> Vec<usize> {
+        let mut values: Vec<_> = (0..counts.len()).collect();
+        values.sort_unstable_by_key(|&value| (Reverse(counts[value]), value));
+        values.truncate(limit);
+        values
+    }
+
     /// Construct ranges for validated shapes and chosen byte-bucket selector
     /// values. Checks source indices and selector-set lengths and membership.
     pub fn new<S: CycleSource>(
@@ -217,13 +230,13 @@ impl FoldLayout {
                 variables: usize::BITS as usize,
             });
         }
-        let compiled = shapes
+        let readout_shapes = shapes
             .iter()
             .zip(&layouts)
-            .map(|(shape, layout)| CompiledShape::new(shape, layout, source.as_ref()))
+            .map(|(shape, layout)| ReadoutShape::new(shape, layout, source.as_ref()))
             .collect();
         Ok(Self {
-            compiled,
+            readout_shapes,
             shapes: layouts,
             entries: entries.max(row_entries),
             row_entries,
@@ -272,10 +285,10 @@ impl FoldLayout {
             shape.check_source(source.as_ref())?;
         }
         if self
-            .compiled
+            .readout_shapes
             .iter()
             .zip(shapes)
-            .all(|(compiled, shape)| compiled.matches(shape, source.as_ref()))
+            .all(|(geometry, shape)| geometry.matches(shape, source.as_ref()))
         {
             return Ok(());
         }
@@ -290,23 +303,6 @@ impl FoldLayout {
             expected: checked.entries,
             actual: self.entries,
         })
-    }
-
-    /// Benchmark-only observation of the identical fold implementation. Durations
-    /// cover fused equality/buckets/emission, scatter application, visited-row
-    /// buckets, and preparation/merges/read-out, respectively. Lazy scratch
-    /// zero-fill is included in its bucket phase; the first phase cannot isolate
-    /// its fused multiplication and XORs without instrumenting every cycle.
-    #[cfg(feature = "test-utils")]
-    pub fn measure<S: CycleSource>(
-        &self,
-        source: &ValidatedTrace<S>,
-        shapes: &[RouterShape],
-        point: &[F128],
-        plan: &ScatterPlan<S>,
-        histogram_columns: &[usize],
-    ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-        fold_impl::<S, true>(source, shapes, point, plan, self, histogram_columns)
     }
 
     /// Cycle bucket elements per worker; includes metadata and any constant totals.
@@ -390,7 +386,7 @@ enum HistogramPlan {
 /// `ra_fold` and the requested digit histograms. The cycle pass emits each
 /// equality weight through the caller's scatter plan, without recomputing it.
 /// `layout` must be made by `FoldLayout::new` for these shapes and this source;
-/// this is checked against its compiled identity. The plan must refer to the
+/// this is checked against its read-out identity. The plan must refer to the
 /// same immutable source: required of the caller, not checked, detected by the
 /// verifier through the resulting claims. `route` is never read.
 pub fn fold_pass<S: CycleSource>(
@@ -401,8 +397,15 @@ pub fn fold_pass<S: CycleSource>(
     layout: &FoldLayout,
     histogram_columns: &[usize],
 ) -> Result<FoldOutput, RouterError> {
-    fold_impl::<S, false>(trace, shapes, r_cycle, plan, layout, histogram_columns)
-        .map(|(output, _)| output)
+    fold_impl(
+        trace,
+        shapes,
+        r_cycle,
+        plan,
+        layout,
+        histogram_columns,
+        &mut NoPhases,
+    )
 }
 
 struct Histograms<'a, S> {
@@ -710,20 +713,30 @@ impl<S: CycleSource> RowPass<'_, S> {
     }
 }
 
+trait PhaseHook {
+    fn finish_phase(&mut self, phase: usize);
+}
+
+struct NoPhases;
+
+impl PhaseHook for NoPhases {
+    #[inline]
+    fn finish_phase(&mut self, _: usize) {}
+}
+
 #[expect(
     clippy::expect_used,
     reason = "validated geometry, private scratch ownership and freshly sized scatter buffers cannot fail"
 )]
-fn fold_impl<S: CycleSource, const MEASURE: bool>(
+fn fold_impl<S: CycleSource, H: PhaseHook>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
     r_cycle: &[F128],
     plan: &ScatterPlan<S>,
     layout: &FoldLayout,
     histogram_columns: &[usize],
-) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-    let mut times = [Duration::ZERO; 4];
-    let mut start = MEASURE.then(Instant::now);
+    phases: &mut H,
+) -> Result<FoldOutput, RouterError> {
     let source = trace.source().as_ref();
     let log_t = layout.validate(trace, shapes, r_cycle, plan)?;
     let histograms = Histograms::new(source, layout, histogram_columns)?;
@@ -735,10 +748,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         variables: usize::BITS as usize,
     })?;
     let mut weights = unsafe_allocate_zero_vec(source.cycles());
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(3);
     CyclePass {
         source,
         layout,
@@ -751,20 +761,14 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         weights: &mut weights,
     }
     .run();
-    if let Some(clock) = start {
-        times[0] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(0);
     drop(low);
     drop(high);
     let mut ra_fold = unsafe_allocate_zero_vec(source.bytecode_rows());
     plan.apply_buffer(&weights, &mut ra_fold)
         .expect("freshly sized scatter buffers");
     drop(weights);
-    if let Some(clock) = start {
-        times[1] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(1);
     let mut buckets = pool.merge().expect("all chunk loans returned");
     let mut folds: Vec<_> = shapes
         .iter()
@@ -777,10 +781,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         ScratchPool::new(histograms.row_entries).map_err(|_| RouterError::Dimension {
             variables: usize::BITS as usize,
         })?;
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(3);
     RowPass {
         source,
         layout,
@@ -790,24 +791,16 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         weights: &ra_fold,
     }
     .run(geometry.chunk_len());
-    if let Some(clock) = start {
-        times[2] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(2);
     let row_buckets = row_pool.merge().expect("all row loans returned");
     readout(layout, FoldStorage::Rows(&row_buckets), &mut folds);
     histograms.read_rows(layout, &row_buckets, &mut histogram_outputs);
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-    }
-    Ok((
-        FoldOutput {
-            folds,
-            ra_fold,
-            histograms: histogram_outputs,
-        },
-        times,
-    ))
+    phases.finish_phase(3);
+    Ok(FoldOutput {
+        folds,
+        ra_fold,
+        histograms: histogram_outputs,
+    })
 }
 
 enum FoldStorage<'a> {
@@ -817,14 +810,14 @@ enum FoldStorage<'a> {
 
 #[expect(
     clippy::expect_used,
-    reason = "compiled metadata has checked power-of-two domains and valid bit indices"
+    reason = "checked metadata has checked power-of-two domains and valid bit indices"
 )]
 fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>]) {
     let (buckets, rows) = match storage {
         FoldStorage::Cycles(buckets) => (buckets, false),
         FoldStorage::Rows(buckets) => (buckets, true),
     };
-    for ((sl, compiled), fold) in layout.shapes.iter().zip(&layout.compiled).zip(folds) {
+    for ((sl, geometry), fold) in layout.shapes.iter().zip(&layout.readout_shapes).zip(folds) {
         if rows && sl.row_words.is_empty() {
             continue;
         }
@@ -841,8 +834,8 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                 ZERO
             };
             let metadata = sl.metadata + h * sl.meta_len;
-            for (word, bank) in compiled.bank_storage.iter().enumerate() {
-                let destination = compiled.destinations[h * compiled.bank_storage.len() + word];
+            for (word, bank) in geometry.bank_storage.iter().enumerate() {
+                let destination = geometry.destinations[h * geometry.bank_storage.len() + word];
                 match bank {
                     BankStorage::Cycle(index) if !rows => read_word(
                         buckets,
@@ -875,7 +868,7 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                                     bound.ilog2() as usize,
                                     bit,
                                 )
-                                .expect("compiled bit domain"),
+                                .expect("checked bit domain"),
                                 ReadBit::Zero => ZERO,
                             };
                         }

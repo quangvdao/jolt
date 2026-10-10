@@ -1,313 +1,332 @@
+use super::map::{Groups, Plan};
 use super::{ColumnMap, ReductionError};
-use crate::packed::lift::WordLift;
 use crate::par::CycleChunks;
 use crate::source::{CycleSource, ValidatedTrace};
 use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
-fn check_weights(weights: &[Vec<F128>]) -> Result<(), ReductionError> {
-    if weights.len() > 4 {
-        return Err(ReductionError::WeightCount {
-            count: weights.len(),
-        });
-    }
-    for (weight, values) in weights.iter().enumerate() {
-        if values.len() != 256 {
-            return Err(ReductionError::WeightLength {
-                weight,
-                actual: values.len(),
-            });
-        }
-    }
-    Ok(())
+const ZERO: F128 = F128::from_raw(0);
+
+pub(super) enum Encoding {
+    Bits,
+    Indicators,
 }
 
-fn output_views(tables: &mut [Vec<F128>], chunk: usize) -> Vec<(usize, &mut [F128])> {
-    let mut views: Vec<_> = tables
-        .iter_mut()
-        .flat_map(|table| table.chunks_mut(chunk).enumerate())
-        .collect();
-    views.sort_by_key(|&(index, _)| index);
-    views
-}
-
-#[derive(Default)]
-struct Sums {
-    a: F128,
-    b: F128,
-    c: F128,
-    d: F128,
-}
-impl Sums {
-    #[inline(always)]
-    fn values(self) -> [F128; 4] {
-        [self.a, self.b, self.c, self.d]
-    }
-}
-
-enum GroupTables {
-    Eight([Option<Box<[F128; 8]>>; 4]),
-    Sixteen([Option<Box<[F128; 16]>>; 4]),
-    Byte([Option<Box<[F128; 256]>>; 4]),
-    Other([Option<Vec<F128>>; 4]),
-}
-impl GroupTables {
-    fn new(tables: Vec<(usize, Vec<F128>)>) -> Self {
-        match tables.first().map(|(_, table)| table.len()) {
-            Some(8) => Self::Eight(Self::fixed_tables(tables)),
-            Some(16) => Self::Sixteen(Self::fixed_tables(tables)),
-            Some(256) => Self::Byte(Self::fixed_tables(tables)),
-            _ => {
-                let mut entries = std::array::from_fn(|_| None);
-                for (weight, table) in tables {
-                    entries[weight] = Some(table);
-                }
-                Self::Other(entries)
-            }
-        }
-    }
-    fn fixed_tables<const N: usize>(
-        tables: Vec<(usize, Vec<F128>)>,
-    ) -> [Option<Box<[F128; N]>>; 4] {
-        let mut entries = std::array::from_fn(|_| None);
-        for (weight, table) in tables {
-            let mut values = Box::new([F128::from_raw(0); N]);
-            values.copy_from_slice(&table);
-            entries[weight] = Some(values);
-        }
-        entries
-    }
-    #[inline(always)]
-    fn add_fixed<const N: usize>(
-        entries: &[Option<Box<[F128; N]>>; 4],
-        index: usize,
-        sums: &mut Sums,
-    ) {
-        let index = index & (N - 1);
-        if let Some(table) = &entries[0] {
-            sums.a += table[index];
-        }
-        if let Some(table) = &entries[1] {
-            sums.b += table[index];
-        }
-        if let Some(table) = &entries[2] {
-            sums.c += table[index];
-        }
-        if let Some(table) = &entries[3] {
-            sums.d += table[index];
-        }
-    }
-    #[inline(always)]
-    fn add(&self, index: usize, sums: &mut Sums) {
-        match self {
-            Self::Eight(entries) => Self::add_fixed(entries, index, sums),
-            Self::Sixteen(entries) => Self::add_fixed(entries, index, sums),
-            Self::Byte(entries) => Self::add_fixed(entries, index, sums),
-            Self::Other(entries) => {
-                if let Some(table) = &entries[0] {
-                    sums.a += table[index];
-                }
-                if let Some(table) = &entries[1] {
-                    sums.b += table[index];
-                }
-                if let Some(table) = &entries[2] {
-                    sums.c += table[index];
-                }
-                if let Some(table) = &entries[3] {
-                    sums.d += table[index];
-                }
-            }
-        }
-    }
-}
-enum GroupLift {
-    Word {
-        trace_word: usize,
-        lifts: [Option<Box<WordLift>>; 4],
-    },
-    Indicators {
-        column: usize,
-        tables: GroupTables,
-    },
-    Flags {
-        columns: Vec<usize>,
-        tables: GroupTables,
-    },
-}
-
-#[inline(always)]
-fn group_values<S: CycleSource>(source: &S, groups: &[GroupLift], cycle: usize) -> [F128; 4] {
-    let mut sums = Sums::default();
-    for group in groups {
-        match group {
-            GroupLift::Word { trace_word, lifts } => {
-                let word = source.trace_word(*trace_word, cycle);
-                if let Some(lift) = &lifts[0] {
-                    sums.a += lift.lift(word);
-                }
-                if let Some(lift) = &lifts[1] {
-                    sums.b += lift.lift(word);
-                }
-                if let Some(lift) = &lifts[2] {
-                    sums.c += lift.lift(word);
-                }
-                if let Some(lift) = &lifts[3] {
-                    sums.d += lift.lift(word);
-                }
-            }
-            GroupLift::Indicators { column, tables } => {
-                tables.add(source.digit(*column, cycle).unwrap_or(0), &mut sums);
-            }
-            GroupLift::Flags { columns, tables } => {
-                let mask = columns.iter().enumerate().fold(0, |mask, (bit, &column)| {
-                    mask | (usize::from(source.digit(column, cycle).is_some()) << bit)
+pub(super) fn fill_table<const K: usize>(
+    arena: &mut Vec<[F128; K]>,
+    weights: &[Vec<F128>],
+    destinations: &[usize; K],
+    start: usize,
+    bits: usize,
+    encoding: Encoding,
+) {
+    let offset = arena.len();
+    arena.resize(offset + (1 << bits), [ZERO; K]);
+    let table = &mut arena[offset..];
+    for index in 1_usize..table.len() {
+        match encoding {
+            Encoding::Bits => {
+                let bit = index.trailing_zeros() as usize;
+                let prior = table[index & (index - 1)];
+                table[index] = std::array::from_fn(|slot| {
+                    prior[slot] + weights[destinations[slot]][start + bit]
                 });
-                tables.add(mask, &mut sums);
+            }
+            Encoding::Indicators => {
+                // A digit selects a one-hot column, not the bits of its index.
+                table[index] =
+                    std::array::from_fn(|slot| weights[destinations[slot]][start + index - 1]);
             }
         }
     }
-    sums.values()
 }
 
-/// Build every `G_i[j] = sum_y weights[i][y] * Bits[y,j]` in one cycle pass.
-/// The validated source must remain immutable. Map ranges must be disjoint and
-/// cover every nonzero weight; words span 64 columns, indicators `2^bits - 1`.
+struct WordView<'a, const K: usize> {
+    word: usize,
+    tables: &'a [[[F128; K]; 256]; 8],
+}
+struct DigitView<'a, const K: usize> {
+    column: usize,
+    table: &'a [[F128; K]],
+    mask: usize,
+}
+struct FlagView<'a, const K: usize> {
+    columns: [usize; 8],
+    count: usize,
+    table: &'a [[F128; K]],
+    mask: usize,
+}
+struct Views<R, const K: usize> {
+    destinations: [usize; K],
+    ranges: Vec<R>,
+}
+struct GroupViews<'a, const K: usize> {
+    words: Vec<Views<WordView<'a, K>, K>>,
+    indicators: Vec<Views<DigitView<'a, K>, K>>,
+    flags: Vec<Views<FlagView<'a, K>, K>>,
+}
+impl<const K: usize> Groups<K> {
+    #[expect(
+        clippy::expect_used,
+        reason = "compiled arena offsets and byte-table dimensions are fixed"
+    )]
+    fn views(&self) -> GroupViews<'_, K> {
+        GroupViews {
+            words: self
+                .words
+                .iter()
+                .map(|group| Views {
+                    destinations: group.destinations,
+                    ranges: group
+                        .ranges
+                        .iter()
+                        .map(|range| WordView {
+                            word: range.word,
+                            tables: group.arena[range.offset..range.offset + 2048]
+                                .as_chunks::<256>()
+                                .0
+                                .try_into()
+                                .expect("eight complete byte tables"),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            indicators: self
+                .indicators
+                .iter()
+                .map(|group| Views {
+                    destinations: group.destinations,
+                    ranges: group
+                        .ranges
+                        .iter()
+                        .map(|range| DigitView {
+                            column: range.column,
+                            table: &group.arena[range.offset..=range.offset + range.mask],
+                            mask: range.mask,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            flags: self
+                .flags
+                .iter()
+                .map(|group| Views {
+                    destinations: group.destinations,
+                    ranges: group
+                        .ranges
+                        .iter()
+                        .map(|range| FlagView {
+                            columns: range.columns,
+                            count: range.count,
+                            table: &group.arena[range.offset..=range.offset + range.mask],
+                            mask: range.mask,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<const K: usize> GroupViews<'_, K> {
+    #[inline(always)]
+    fn add(
+        output: &mut [[F128; 4]; 256],
+        destinations: &[usize; K],
+        sums: &[[F128; K]],
+        len: usize,
+    ) {
+        for (output, values) in output[..len].iter_mut().zip(sums) {
+            for (&destination, &sum) in destinations.iter().zip(values) {
+                output[destination & 3] += sum;
+            }
+        }
+    }
+    #[inline(always)]
+    #[expect(
+        clippy::expect_used,
+        reason = "the table dispatcher selects its exact fixed width"
+    )]
+    fn fixed<const W: usize, I: Fn(usize) -> usize>(
+        table: &[[F128; K]],
+        sums: &mut [[F128; K]],
+        index: I,
+    ) {
+        let table: &[[F128; K]; W] = table.try_into().expect("fixed table width");
+        for (cycle, sums) in sums.iter_mut().enumerate() {
+            for (sum, value) in sums.iter_mut().zip(table[index(cycle) & (W - 1)]) {
+                *sum += value;
+            }
+        }
+    }
+    fn indexed<I: Fn(usize) -> usize>(table: &[[F128; K]], sums: &mut [[F128; K]], index: I) {
+        macro_rules! widths {
+            ($($width:literal),*) => {
+                match table.len() {
+                    $($width => Self::fixed::<$width, _>(table, sums, index),)*
+                    _ => {},
+                }
+            };
+        }
+        widths!(1, 2, 4, 8, 16, 32, 64, 128, 256);
+    }
+    fn accumulate<S: CycleSource>(
+        &self,
+        source: &S,
+        start: usize,
+        len: usize,
+        output: &mut [[F128; 4]; 256],
+    ) {
+        for group in &self.words {
+            let mut sums = [[ZERO; K]; 256];
+            for range in &group.ranges {
+                for (cycle, sums) in sums[..len].iter_mut().enumerate() {
+                    let bytes = source.trace_word(range.word, start + cycle).to_le_bytes();
+                    let mut value = [ZERO; K];
+                    for (table, byte) in range.tables.iter().zip(bytes) {
+                        for (sum, value) in value.iter_mut().zip(table[usize::from(byte)]) {
+                            *sum += value;
+                        }
+                    }
+                    for (sum, value) in sums.iter_mut().zip(value) {
+                        *sum += value;
+                    }
+                }
+            }
+            Self::add(output, &group.destinations, &sums, len);
+        }
+        for group in &self.indicators {
+            let mut sums = [[ZERO; K]; 256];
+            for range in &group.ranges {
+                Self::indexed(range.table, &mut sums[..len], |cycle| {
+                    source.digit(range.column, start + cycle).unwrap_or(0) & range.mask
+                });
+            }
+            Self::add(output, &group.destinations, &sums, len);
+        }
+        for group in &self.flags {
+            let mut sums = [[ZERO; K]; 256];
+            for range in &group.ranges {
+                Self::indexed(range.table, &mut sums[..len], |cycle| {
+                    let mut mask = 0;
+                    for (bit, &column) in range.columns[..range.count].iter().enumerate() {
+                        mask |= usize::from(source.digit(column, start + cycle).is_some()) << bit;
+                    }
+                    mask & range.mask
+                });
+            }
+            Self::add(output, &group.destinations, &sums, len);
+        }
+    }
+}
+struct Pass<'a> {
+    one: GroupViews<'a, 1>,
+    two: GroupViews<'a, 2>,
+    three: GroupViews<'a, 3>,
+    four: GroupViews<'a, 4>,
+}
+impl Pass<'_> {
+    #[expect(
+        clippy::expect_used,
+        reason = "the caller dispatches exactly N validated outputs with identical geometry"
+    )]
+    fn run<const N: usize, S: CycleSource>(
+        &self,
+        source: &S,
+        tables: &mut [Vec<F128>],
+        chunk: usize,
+    ) {
+        let tables: &mut [Vec<F128>; N] = tables.try_into().expect("N outputs");
+        let mut iterators = tables.each_mut().map(|table| table.chunks_mut(chunk));
+        let mut views: Vec<[&mut [F128]; N]> = (0..source.cycles() / chunk)
+            .map(|_| std::array::from_fn(|slot| iterators[slot].next().expect("complete chunks")))
+            .collect();
+        views
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, outputs)| {
+                let start = index * chunk;
+                let chunk_len = outputs[0].len();
+                let mut tiles = outputs.each_mut().map(|output| output.chunks_mut(256));
+                let mut offset = 0;
+                while offset < chunk_len {
+                    let mut output = [[ZERO; 4]; 256];
+                    let len = 256.min(chunk_len - offset);
+                    self.one
+                        .accumulate(source, start + offset, len, &mut output);
+                    self.two
+                        .accumulate(source, start + offset, len, &mut output);
+                    self.three
+                        .accumulate(source, start + offset, len, &mut output);
+                    self.four
+                        .accumulate(source, start + offset, len, &mut output);
+                    let mut targets: [&mut [F128]; N] =
+                        std::array::from_fn(|slot| tiles[slot].next().expect("complete tile"));
+                    match targets.as_mut_slice() {
+                        [a] => {
+                            for (a, value) in a.iter_mut().zip(&output[..len]) {
+                                *a = value[0];
+                            }
+                        }
+                        [a, b] => {
+                            for ((a, b), value) in
+                                a.iter_mut().zip(b.iter_mut()).zip(&output[..len])
+                            {
+                                *a = value[0];
+                                *b = value[1];
+                            }
+                        }
+                        [a, b, c] => {
+                            for (((a, b), c), value) in a
+                                .iter_mut()
+                                .zip(b.iter_mut())
+                                .zip(c.iter_mut())
+                                .zip(&output[..len])
+                            {
+                                *a = value[0];
+                                *b = value[1];
+                                *c = value[2];
+                            }
+                        }
+                        [a, b, c, d] => {
+                            for ((((a, b), c), d), value) in a
+                                .iter_mut()
+                                .zip(b.iter_mut())
+                                .zip(c.iter_mut())
+                                .zip(d.iter_mut())
+                                .zip(&output[..len])
+                            {
+                                *a = value[0];
+                                *b = value[1];
+                                *c = value[2];
+                                *d = value[3];
+                            }
+                        }
+                        _ => {}
+                    }
+                    offset += len;
+                }
+            });
+    }
+}
+
+/// Build up to four tables `G_i[j] = sum_y weights[i][y] * Bits[y,j]` in one
+/// parallel cycle pass. Map ranges are disjoint and cover every nonzero weight.
+/// Words span 64 columns, indicators `2^bits - 1`, and flags encode presence.
+/// Source immutability and agreement of the map with the committed bits are
+/// required of the caller, not checked; the verifier detects a false statement
+/// through its final batched check.
 pub fn g_pass_digits<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     map: &[ColumnMap],
     weights: &[Vec<F128>],
 ) -> Result<Vec<Vec<F128>>, ReductionError> {
-    check_weights(weights)?;
     let source = trace.source();
-    let mut covered = [false; 256];
-    let mut ranges = Vec::with_capacity(map.len());
-    for entry in map.iter().cloned() {
-        let (start, length) = match entry.clone() {
-            ColumnMap::Word { start, trace_word } => {
-                if trace_word >= source.trace_words() {
-                    return Err(ReductionError::MapTraceWord {
-                        trace_word,
-                        words: source.trace_words(),
-                    });
-                }
-                (start, 64)
-            }
-            ColumnMap::Indicators { start, column } => {
-                if column >= source.digit_columns() {
-                    return Err(ReductionError::MapColumn {
-                        column,
-                        columns: source.digit_columns(),
-                    });
-                }
-                (start, (1_usize << source.bits(column)) - 1)
-            }
-            ColumnMap::Flags { start, columns } => {
-                if columns.is_empty() || columns.len() > 8 {
-                    return Err(ReductionError::MapFlags {
-                        count: columns.len(),
-                        offending_column: None,
-                    });
-                }
-                for &column in &columns {
-                    if column >= source.digit_columns() {
-                        return Err(ReductionError::MapColumn {
-                            column,
-                            columns: source.digit_columns(),
-                        });
-                    }
-                    if source.bits(column) != 0 {
-                        return Err(ReductionError::MapFlags {
-                            count: columns.len(),
-                            offending_column: Some((column, source.bits(column))),
-                        });
-                    }
-                }
-                (start, columns.len())
-            }
-        };
-        if start > 256 || length > 256 - start {
-            return Err(ReductionError::MapRange { start, length });
-        }
-        for (offset, flag) in covered[start..start + length].iter_mut().enumerate() {
-            if *flag {
-                return Err(ReductionError::MapOverlap {
-                    column: start + offset,
-                });
-            }
-            *flag = true;
-        }
-        ranges.push((entry, start..start + length));
-    }
-    for (weight, values) in weights.iter().enumerate() {
-        for (column, (&value, &covered)) in values.iter().zip(&covered).enumerate() {
-            if !covered && value != F128::from_raw(0) {
-                return Err(ReductionError::Uncovered { weight, column });
-            }
-        }
-    }
-    let groups: Vec<_> = ranges
-        .iter()
-        .map(|(entry, range)| {
-            let supported: Vec<_> = weights
-                .iter()
-                .enumerate()
-                .filter(|(_, weight)| {
-                    weight[range.clone()]
-                        .iter()
-                        .any(|&v| v != F128::from_raw(0))
-                })
-                .collect();
-            match entry {
-                ColumnMap::Word { trace_word, .. } => {
-                    let mut lifts = std::array::from_fn(|_| None);
-                    for (index, weight) in supported {
-                        let mut values = [F128::from_raw(0); 64];
-                        values.copy_from_slice(&weight[range.clone()]);
-                        lifts[index] = Some(Box::new(WordLift::new(&values)));
-                    }
-                    GroupLift::Word {
-                        trace_word: *trace_word,
-                        lifts,
-                    }
-                }
-                ColumnMap::Indicators { column, .. } => GroupLift::Indicators {
-                    column: *column,
-                    tables: GroupTables::new(
-                        supported
-                            .into_iter()
-                            .map(|(index, weight)| {
-                                let mut values = Vec::with_capacity(range.len() + 1);
-                                values.push(F128::from_raw(0));
-                                values.extend_from_slice(&weight[range.clone()]);
-                                (index, values)
-                            })
-                            .collect(),
-                    ),
-                },
-                ColumnMap::Flags { columns, .. } => GroupLift::Flags {
-                    columns: columns.clone(),
-                    tables: GroupTables::new(
-                        supported
-                            .into_iter()
-                            .map(|(index, weight)| {
-                                let mut values = vec![F128::from_raw(0); 1 << columns.len()];
-                                for mask in 1_usize..values.len() {
-                                    let bit = mask.trailing_zeros() as usize;
-                                    values[mask] =
-                                        values[mask & (mask - 1)] + weight[range.start + bit];
-                                }
-                                (index, values)
-                            })
-                            .collect(),
-                    ),
-                },
-            }
-        })
-        .collect();
-    let mut tables = (0..weights.len())
+    let plan = Plan::compile(source.as_ref(), map, weights)?;
+    let mut tables: Vec<Vec<F128>> = (0..weights.len())
         .map(|_| unsafe_allocate_zero_vec(source.cycles()))
-        .collect::<Vec<Vec<F128>>>();
+        .collect();
     if weights.is_empty() {
         return Ok(tables);
     }
@@ -318,30 +337,17 @@ pub fn g_pass_digits<S: CycleSource>(
             expected: None,
         })?
         .chunk_len();
-    let mut views = output_views(&mut tables, chunk);
-    views
-        .par_chunks_mut(weights.len())
-        .enumerate()
-        .for_each(|(index, outputs)| {
-            if let [(_, a), (_, b), (_, c)] = outputs {
-                for (cycle, ((a, b), c)) in
-                    a.iter_mut().zip(b.iter_mut()).zip(c.iter_mut()).enumerate()
-                {
-                    let values = group_values(source.as_ref(), &groups, index * chunk + cycle);
-                    *a = values[0];
-                    *b = values[1];
-                    *c = values[2];
-                }
-                return;
-            }
-
-            for cycle in 0..outputs[0].1.len() {
-                let values = group_values(source.as_ref(), &groups, index * chunk + cycle);
-                for ((_, output), value) in outputs.iter_mut().zip(values) {
-                    output[cycle] = value;
-                }
-            }
-        });
-    drop(views);
+    let pass = Pass {
+        one: plan.one.views(),
+        two: plan.two.views(),
+        three: plan.three.views(),
+        four: plan.four.views(),
+    };
+    match weights.len() {
+        1 => pass.run::<1, _>(source.as_ref(), &mut tables, chunk),
+        2 => pass.run::<2, _>(source.as_ref(), &mut tables, chunk),
+        3 => pass.run::<3, _>(source.as_ref(), &mut tables, chunk),
+        _ => pass.run::<4, _>(source.as_ref(), &mut tables, chunk),
+    }
     Ok(tables)
 }

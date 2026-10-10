@@ -8,7 +8,8 @@ use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
-/// One input equality claim. Its defining equality sum is required of the
+/// One input equality claim, selecting an input table and a low-variable-first
+/// point. Its defining equality sum is required of the
 /// caller, not checked by construction. A false claim produces messages of
 /// another polynomial and is detected by the verifier's final batched check,
 /// except when its coefficient is zero or legs at one point cancel.
@@ -57,8 +58,8 @@ pub struct ReductionCore {
 }
 
 impl ReductionCore {
-    /// All tables have the
-    /// same nonzero power-of-two length and points have its logarithm coordinates.
+    /// Accept at most eight legs. All tables have the same power-of-two length
+    /// of at least two, and points have its logarithm coordinates.
     /// Each claim must equal `sum_j eq(point,j)*table[j]`: this is required of the
     /// caller, not checked here; the verifier detects a false batched statement
     /// at its final check. Zero coefficients or cancelling legs at one point
@@ -148,8 +149,8 @@ impl ReductionCore {
     }
 
     /// Returns one value per input table, in table order, after `finish_rounds`,
-    /// dropping all dense
-    /// tables and second buffers before the finished state becomes observable.
+    /// dropping all dense tables and second buffers before the finished state
+    /// becomes observable.
     pub fn final_values(&self) -> Result<&[F128], ReductionError> {
         match &self.state {
             State::Finished(values) => Ok(values),

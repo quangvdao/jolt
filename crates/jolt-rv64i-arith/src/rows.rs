@@ -7,7 +7,7 @@ use crate::words::column::{
     LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, LESS_THAN as COLUMN_LESS_THAN, ONE as COLUMN_ONE,
     RIGHT_KEY_BIT as COLUMN_RIGHT_KEY_BIT,
 };
-use crate::words::{F2Words, Lane, WitnessRow, WITNESS_COLUMNS};
+use crate::words::{F2Lane, F2Words, Lane, WitnessRow, WITNESS_COLUMNS};
 use jolt_field::F128;
 use jolt_r1cs::{ConstraintMatrices, SparseRow};
 use thiserror::Error;
@@ -51,16 +51,32 @@ impl LaneRows {
     /// Returns `Az`, `Bz`, `Cz`, with bit i the value of row i in the family.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> [u64; 3] {
-        self.values_from(|lane| z.lane(lane))
+        Self::values_from(self.ab_mask, [self.a, self.b, self.c], |lane| z.lane(lane))
     }
 
     #[inline]
-    fn values_from(&self, lane: impl Fn(Lane) -> u64) -> [u64; 3] {
-        [
-            lane(self.a) & self.ab_mask,
-            lane(self.b) & self.ab_mask,
-            lane(self.c),
-        ]
+    fn values_from<L>(ab_mask: u64, [a, b, c]: [L; 3], lane: impl Fn(L) -> u64) -> [u64; 3] {
+        [lane(a) & ab_mask, lane(b) & ab_mask, lane(c)]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct F2LaneRows {
+    lanes: [F2Lane; 3],
+    ab_mask: u64,
+    group: RowGroup,
+}
+
+impl From<F2LaneRows> for LaneRows {
+    fn from(row: F2LaneRows) -> Self {
+        let [a, b, c] = row.lanes.map(Lane::from);
+        Self {
+            a,
+            b,
+            c,
+            ab_mask: row.ab_mask,
+            group: row.group,
+        }
     }
 }
 
@@ -331,6 +347,7 @@ pub struct RowFailure {
 #[derive(Clone, Debug)]
 pub struct RowSystem {
     lanes: [LaneRows; 2],
+    f2_lanes: [F2LaneRows; 2],
     keys_differ_column: usize,
     packed: Vec<PackedRow>,
 }
@@ -371,6 +388,18 @@ impl RowSystem {
     /// Constructs `136 + ceil(log_K_bytecode/4) + ceil(log_K_ram/4) + 2`
     /// equations; stored digits k use coefficients `1 + x^(m·k)`, m=1,2,3.
     pub fn new(layout: &Layout) -> Self {
+        let lane_rows = [
+            F2LaneRows {
+                lanes: [F2Lane::CarryLeft, F2Lane::CarryRight, F2Lane::CarryStep],
+                ab_mask: u64::MAX >> 1,
+                group: RowGroup::Adder,
+            },
+            F2LaneRows {
+                lanes: [F2Lane::AndLeft, F2Lane::AndRight, F2Lane::AndOut],
+                ab_mask: u64::MAX,
+                group: RowGroup::And,
+            },
+        ];
         let bit = |col: usize| PackedForm {
             one: false,
             terms: vec![PackedTerm::table(col as u16, 1, 0, 0, false)],
@@ -457,22 +486,8 @@ impl RowSystem {
         }
         Self {
             keys_differ_column: COLUMN_BITS + layout.keys_differ(),
-            lanes: [
-                LaneRows {
-                    a: Lane::CarryLeft,
-                    b: Lane::CarryRight,
-                    c: Lane::CarryStep,
-                    ab_mask: u64::MAX >> 1,
-                    group: RowGroup::Adder,
-                },
-                LaneRows {
-                    a: Lane::AndLeft,
-                    b: Lane::AndRight,
-                    c: Lane::AndOut,
-                    ab_mask: u64::MAX,
-                    group: RowGroup::And,
-                },
-            ],
+            lanes: lane_rows.map(LaneRows::from),
+            f2_lanes: lane_rows,
             packed,
         }
     }
@@ -482,8 +497,8 @@ impl RowSystem {
     #[inline]
     pub fn f2_values(&self, words: &F2Words, keys_differ: bool) -> ([[u64; 3]; 2], [[F128; 3]; 2]) {
         let lanes = self
-            .lanes
-            .map(|row| row.values_from(|lane| words.lane(lane)));
+            .f2_lanes
+            .map(|row| LaneRows::values_from(row.ab_mask, row.lanes, |lane| words.lane(lane)));
         let word = |i| {
             if i == 0 {
                 1 | ((words.left_key_bit & 1) << COLUMN_LEFT_KEY_BIT)

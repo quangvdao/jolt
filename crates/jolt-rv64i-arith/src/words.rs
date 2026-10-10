@@ -44,6 +44,29 @@ impl BaseWords {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum F2Lane {
+    CarryLeft,
+    CarryRight,
+    CarryStep,
+    AndLeft,
+    AndRight,
+    AndOut,
+}
+
+impl From<F2Lane> for Lane {
+    fn from(lane: F2Lane) -> Self {
+        match lane {
+            F2Lane::CarryLeft => Self::CarryLeft,
+            F2Lane::CarryRight => Self::CarryRight,
+            F2Lane::CarryStep => Self::CarryStep,
+            F2Lane::AndLeft => Self::AndLeft,
+            F2Lane::AndRight => Self::AndRight,
+            F2Lane::AndOut => Self::AndOut,
+        }
+    }
+}
+
 /// Decode rails, carry words and selected key bits, without positional forms,
 /// expected words or residuals. `NextPC` remains an input to the JALR rail.
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,24 +145,14 @@ impl F2Words {
     }
 
     #[inline]
-    pub(crate) fn lane(&self, lane: Lane) -> u64 {
+    pub(crate) fn lane(&self, lane: F2Lane) -> u64 {
         match lane {
-            Lane::CarryLeft => self.carry_left,
-            Lane::CarryRight => self.carry_right,
-            Lane::CarryStep => self.carry_step,
-            Lane::AndLeft => self.and_left,
-            Lane::AndRight => self.and_right,
-            Lane::AndOut => self.and_out,
-            Lane::Small
-            | Lane::KeyDiff
-            | Lane::KeyDiffAbove
-            | Lane::RdResidual
-            | Lane::RamResidual
-            | Lane::NextPCResidual
-            | Lane::Bits0
-            | Lane::Bits1
-            | Lane::Bits2
-            | Lane::Bits3 => 0,
+            F2Lane::CarryLeft => self.carry_left,
+            F2Lane::CarryRight => self.carry_right,
+            F2Lane::CarryStep => self.carry_step,
+            F2Lane::AndLeft => self.and_left,
+            F2Lane::AndRight => self.and_right,
+            F2Lane::AndOut => self.and_out,
         }
     }
 }

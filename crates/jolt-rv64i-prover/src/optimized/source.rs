@@ -41,6 +41,17 @@ pub struct WitnessColumns {
     map: Vec<ColumnMap>,
 }
 impl WitnessColumns {
+    const RS1_VALUE: usize = 0;
+    const RS2_VALUE: usize = 1;
+    const RD_PRE_VALUE: usize = 2;
+    const RAM_READ_VALUE: usize = 3;
+    const NEXT_PC: usize = 4;
+    const INC_WORD: usize = 5;
+    const IMM: usize = 0;
+    const FALL_THROUGH_PC: usize = 1;
+    const PC_PLUS_IMM: usize = 2;
+    const PC: usize = 3;
+
     pub fn new(layout: &Layout) -> Self {
         let fields = DigitFields::new(layout);
         let mut reads = Vec::new();
@@ -171,53 +182,54 @@ impl WitnessColumns {
     }
     #[inline]
     fn trace_value(word: usize, row: &CycleWords) -> u64 {
-        [
-            row.rs1_value,
-            row.rs2_value,
-            row.rd_pre_value,
-            row.ram_read_value,
-            row.next_pc,
-        ]
-        .get(word)
-        .copied()
-        .unwrap_or(0)
+        match word {
+            Self::RS1_VALUE => row.rs1_value,
+            Self::RS2_VALUE => row.rs2_value,
+            Self::RD_PRE_VALUE => row.rd_pre_value,
+            Self::RAM_READ_VALUE => row.ram_read_value,
+            Self::NEXT_PC => row.next_pc,
+            _ => 0,
+        }
     }
     #[inline]
     fn bytecode_value(word: usize, row: &BytecodeRow) -> u64 {
-        [row.imm, row.fall_through_pc, row.pc_plus_imm, row.pc]
-            .get(word)
-            .copied()
-            .unwrap_or(0)
+        match word {
+            Self::IMM => row.imm,
+            Self::FALL_THROUGH_PC => row.fall_through_pc,
+            Self::PC_PLUS_IMM => row.pc_plus_imm,
+            Self::PC => row.pc,
+            _ => 0,
+        }
     }
     pub const fn rs1_value() -> usize {
-        0
+        Self::RS1_VALUE
     }
     pub const fn rs2_value() -> usize {
-        1
+        Self::RS2_VALUE
     }
     pub const fn rd_pre_value() -> usize {
-        2
+        Self::RD_PRE_VALUE
     }
     pub const fn ram_read_value() -> usize {
-        3
+        Self::RAM_READ_VALUE
     }
     pub const fn next_pc() -> usize {
-        4
+        Self::NEXT_PC
     }
     pub const fn inc_word() -> usize {
-        5
+        Self::INC_WORD
     }
     pub const fn imm() -> usize {
-        0
+        Self::IMM
     }
     pub const fn fall_through_pc() -> usize {
-        1
+        Self::FALL_THROUGH_PC
     }
     pub const fn pc_plus_imm() -> usize {
-        2
+        Self::PC_PLUS_IMM
     }
     pub const fn pc() -> usize {
-        3
+        Self::PC
     }
 }
 

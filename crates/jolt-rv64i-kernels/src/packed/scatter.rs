@@ -85,7 +85,8 @@ pub struct ScatterPlan<S: CycleSource> {
 impl<S: CycleSource> ScatterPlan<S> {
     /// Count and place destinations in parallel over [`CycleChunks`] at round
     /// zero, independently of the thread count. Each chunk owns disjoint slot
-    /// and row-offset slices; only one prefix array per chunk is temporary.
+    /// and row-offset slices. A reusable chunk-local index buffer avoids reading
+    /// the source twice; prefix arrays retain the range ends for segment assembly.
     /// Rejects more than 2^24 rows or chunks longer than 2^16 cycles before
     /// allocation. One row and fewer than 256 rows use one-row ranges.
     #[expect(
@@ -129,26 +130,32 @@ impl<S: CycleSource> ScatterPlan<S> {
             .zip(row_offsets.par_chunks_mut(chunk_len))
             .zip(prefixes.par_iter_mut())
             .enumerate()
-            .for_each(|(chunk, ((slots, row_offsets), counts))| {
-                let start = chunk * chunk_len;
-                for cycle in start..start + chunk_len {
-                    counts[source.bytecode_index(cycle) >> range_shift] += 1;
-                }
-                let mut cursors = [0_u32; RANGES];
-                let mut next = 0_u32;
-                for (cursor, count) in cursors.iter_mut().zip(counts.iter_mut()) {
-                    *cursor = next;
-                    next += *count;
-                    *count = next;
-                }
-                for (cycle, slot) in slots.iter_mut().enumerate() {
-                    let row = source.bytecode_index(start + cycle);
-                    let cursor = &mut cursors[row >> range_shift];
-                    *slot = *cursor as u16;
-                    row_offsets[*cursor as usize] = (row & (range_len - 1)) as u16;
-                    *cursor += 1;
-                }
-            });
+            .for_each_init(
+                || Vec::with_capacity(chunk_len),
+                |indices, (chunk, ((slots, row_offsets), counts))| {
+                    let start = chunk * chunk_len;
+                    indices.clear();
+                    for cycle in start..start + chunk_len {
+                        let row = source.bytecode_index(cycle);
+                        counts[row >> range_shift] += 1;
+                        indices.push(row as u32);
+                    }
+                    let mut cursors = [0_u32; RANGES];
+                    let mut next = 0_u32;
+                    for (cursor, count) in cursors.iter_mut().zip(counts.iter_mut()) {
+                        *cursor = next;
+                        next += *count;
+                        *count = next;
+                    }
+                    for (slot, &row) in slots.iter_mut().zip(indices.iter()) {
+                        let row = row as usize;
+                        let cursor = &mut cursors[row >> range_shift];
+                        *slot = *cursor as u16;
+                        row_offsets[*cursor as usize] = (row & (range_len - 1)) as u16;
+                        *cursor += 1;
+                    }
+                },
+            );
         segments
             .par_chunks_mut(chunks)
             .enumerate()

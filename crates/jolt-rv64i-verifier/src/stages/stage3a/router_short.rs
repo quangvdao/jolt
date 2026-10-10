@@ -4,9 +4,11 @@ pub use crate::claims::router_short::{RouterShortInputClaims, RouterShortOutputC
 use crate::ids::RouterShortDerived;
 use crate::ids::{DerivedId, Router};
 use crate::points::{equality_table, PointsError};
+use crate::proof::DimensionedRelation;
 use crate::public::routes::{restriction, short_point, RouteTensors};
 use jolt_claims::{NoChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::{stages::relations::ConcreteSumcheck, VerifierError};
 use std::sync::Arc;
 
@@ -65,6 +67,10 @@ impl<F: JoltField> RouterShort<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RouterShort<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RouterShortSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -102,5 +108,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterShort<F> {
             }
             _ => Err(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
         }
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterShort<F> {
+    fn symbolic_for(_log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterShortSymbolic::new(())
     }
 }

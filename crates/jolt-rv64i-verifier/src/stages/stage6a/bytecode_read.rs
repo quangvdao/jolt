@@ -1,7 +1,9 @@
 //! Concrete address phase of public bytecode read checking.
 
+use crate::proof::DimensionedRelation;
 use jolt_claims::SymbolicSumcheck;
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 
@@ -60,6 +62,10 @@ impl<F: JoltField> BytecodeReadAddress<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for BytecodeReadAddress<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = BytecodeReadAddressSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -106,5 +112,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for BytecodeReadAddress<F> {
         _challenges: &BytecodeReadAddressChallenges<F>,
     ) -> Result<F, VerifierError> {
         Err(VerifierError::MissingStageClaimDerived { id: (*id).into() })
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for BytecodeReadAddress<F> {
+    fn symbolic_for(_log_T: usize, layout: &Layout) -> Self::Symbolic {
+        BytecodeReadAddressSymbolic::new(layout.log_K_bytecode())
     }
 }

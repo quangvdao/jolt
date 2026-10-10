@@ -30,5 +30,5 @@ impl<F: JoltField> Stage3aSumchecks<F> {
     }
 }
 
-use crate::proof::unit_batch_geometry;
-stage3a_sumchecks_members!(unit_batch_geometry);
+use crate::proof::batch_geometry;
+stage3a_sumchecks_members!(batch_geometry);

@@ -6,10 +6,12 @@ pub use crate::claims::spartan_inner::{
 };
 use crate::ids::{DerivedId, InnerDerived};
 use crate::points::PointsError;
+use crate::proof::DimensionedRelation;
 use crate::public::matrices::RowMatrices;
 use crate::statement::LOG_T_MAX;
 use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
@@ -143,6 +145,10 @@ impl<F: JoltField> SpartanInner<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for SpartanInner<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = SpartanInnerSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -194,5 +200,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for SpartanInner<F> {
         challenges: &SpartanInnerChallenges<F>,
     ) -> Result<F, VerifierError> {
         self.output_terms(outputs, challenges)?.resolve(id)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for SpartanInner<F> {
+    fn symbolic_for(_log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        SpartanInnerSymbolic::new(())
     }
 }

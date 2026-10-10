@@ -9,8 +9,10 @@ use crate::ids::{
     CommittedPolynomial, DerivedId, OpeningId, RelationId, ValEvaluationDerived, VirtualPolynomial,
 };
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::{stages::relations::ConcreteSumcheck, VerifierError};
 
 fn term_error(error: PointsError) -> VerifierError {
@@ -74,6 +76,10 @@ impl<F: JoltField> RegistersValEvaluation<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RegistersValEvaluation<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RegistersValEvaluationSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -207,6 +213,10 @@ impl<F: JoltField> RamValEvaluation<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RamValEvaluation<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RamValEvaluationSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -277,5 +287,17 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamValEvaluation<F> {
                 OpeningId::committed(CommittedPolynomial::Inc, RelationId::RegistersValEvaluation),
             ),
         ]
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RegistersValEvaluation<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RegistersValEvaluationSymbolic::new(log_T)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RamValEvaluation<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RamValEvaluationSymbolic::new(log_T)
     }
 }

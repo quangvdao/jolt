@@ -7,8 +7,10 @@ pub use crate::claims::registers_read_checking::{
 };
 use crate::ids::{DerivedId, ReadCheckingDerived};
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use jolt_claims::SymbolicSumcheck;
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
@@ -57,6 +59,10 @@ impl<F: JoltField> RegistersReadChecking<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RegistersReadChecking<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RegistersReadCheckingSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -133,5 +139,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for RegistersReadChecking<F> {
             challenges,
             |id| self.derive_output_term(id, inputs, outputs, challenges),
         )
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RegistersReadChecking<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RegistersReadCheckingSymbolic::new(log_T)
     }
 }

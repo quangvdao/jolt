@@ -14,12 +14,15 @@ use crate::{
     error::ProofDecodeError,
     statement::LOG_T_MAX,
 };
+use jolt_claims::SymbolicSumcheck;
 use jolt_crypto::NoCommitment;
-use jolt_field::{CanonicalBytes, CanonicalEncoding, Zero, F128};
+use jolt_field::{CanonicalBytes, CanonicalEncoding, JoltField, Zero, F128};
 use jolt_poly::CompressedPoly;
 use jolt_rv64i_arith::Layout;
 use jolt_sumcheck::BatchPrelude;
 use jolt_sumcheck::{ClearProof, CompressedSumcheckProof, SumcheckProof};
+use jolt_verifier::stages::relations::ConcreteSumcheck;
+use jolt_verifier::VerifierError;
 
 #[derive(Clone, Debug)]
 /// Canonical compressed clear rounds and the ordered wire values of one reduction batch.
@@ -157,7 +160,20 @@ pub struct Rv64iProof<S: BitsCommitmentScheme> {
     pub opening: S::OpeningProof,
 }
 
-// The derive callback supplies every member and its order to both geometry forms.
+pub(crate) trait DimensionedRelation<F: JoltField>: ConcreteSumcheck<F> {
+    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic;
+
+    fn point_offset(rounds: usize, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        batch_num_vars
+            .checked_sub(rounds)
+            .ok_or_else(|| VerifierError::StageClaimSumcheckFailed {
+                stage: format!("{:?}", Self::Symbolic::id()),
+                reason: format!("batch has {batch_num_vars} variables, fewer than {rounds} rounds"),
+            })
+    }
+}
+
+// The derive callback supplies member order to the concrete and dimension-only schedules.
 macro_rules! batch_geometry {
     (batch = $batch:ident, label = $label:literal, aggregates = { $($aggregates:tt)* },
      shape = $shape:ident, members = [ $({name: $member:ident, relation: $relation:ident, presence: required},)+ ]) => {
@@ -183,40 +199,46 @@ macro_rules! batch_geometry {
                         stage: $label.to_owned(), reason: error.to_string(),
                     })
             }
+
+            /// Reads the symbolic members in generated order from dimensions alone.
+            /// Allocates only the member list; invalid placement windows return a typed verifier error.
+            pub fn geometry_for(log_T: usize, layout: &::jolt_rv64i_arith::Layout)
+                -> Result<::jolt_sumcheck::BatchPrelude<F>, ::jolt_verifier::VerifierError> {
+                use ::jolt_claims::SymbolicSumcheck as _;
+                use $crate::proof::DimensionedRelation as _;
+                if !(1..=usize::from($crate::statement::LOG_T_MAX)).contains(&log_T) {
+                    return Err(::jolt_verifier::VerifierError::StageClaimSumcheckFailed {
+                        stage: $label.to_owned(),
+                        reason: format!("trace width {log_T} is outside the admitted dimensions"),
+                    });
+                }
+                $(let $member = $relation::<F>::symbolic_for(log_T, layout);)+
+                let mut max_num_vars = 0usize;
+                let mut max_degree = 0usize;
+                $(
+                    max_num_vars = max_num_vars.max($member.rounds());
+                    max_degree = max_degree.max($member.degree());
+                )+
+                let members = vec![$(
+                    ::jolt_sumcheck::BatchMember {
+                        input_claim: F::zero(), coefficient: F::zero(),
+                        rounds: $member.rounds(),
+                        offset: $relation::<F>::point_offset($member.rounds(), max_num_vars)?,
+                    }
+                ),+];
+                // Zero input claims have a zero combined claim under either padding rule.
+                // The placement functions validate the windows without computing that field sum.
+                Ok(::jolt_sumcheck::BatchPrelude {
+                    members, claimed_sum: F::zero(), max_num_vars, max_degree,
+                })
+            }
         }
     };
 }
 pub(crate) use batch_geometry;
 
-macro_rules! unit_batch_geometry {
-    (batch = $batch:ident, label = $label:literal, aggregates = { $($aggregates:tt)* },
-     shape = $shape:ident, members = [{name: $member:ident, relation: $relation:ident, presence: required},]) => {
-        impl $batch<::jolt_field::F128> {
-            /// Returns this one-member batch's canonical symbolic schedule without constructing public tables.
-            /// The trace and layout arguments are unused because its symbolic shape is fixed.
-            pub fn geometry_for(_log_T: usize, _layout: &::jolt_rv64i_arith::Layout)
-                -> Result<::jolt_sumcheck::BatchPrelude<::jolt_field::F128>, ::jolt_verifier::VerifierError> {
-                use ::jolt_claims::SymbolicSumcheck as _;
-                use ::jolt_field::Zero as _;
-                type Symbolic = <$relation<::jolt_field::F128> as ::jolt_verifier::stages::relations::ConcreteSumcheck<::jolt_field::F128>>::Symbolic;
-                let symbolic = Symbolic::new(());
-                let rounds = symbolic.rounds();
-                let degree = symbolic.degree();
-                let members = vec![::jolt_sumcheck::BatchMember {
-                    input_claim: ::jolt_field::F128::zero(), coefficient: ::jolt_field::F128::zero(), rounds, offset: 0,
-                }];
-                ::jolt_sumcheck::BatchPrelude::try_new(members, rounds, degree)
-                    .map_err(|error| ::jolt_verifier::VerifierError::StageClaimSumcheckFailed {
-                        stage: $label.to_owned(), reason: error.to_string(),
-                    })
-            }
-        }
-    };
-}
-pub(crate) use unit_batch_geometry;
-
 /// Reads the eight schedules from their generated member lists after validating dimensions.
-/// Geometry construction uses bounded points and no statement or witness tables.
+/// Geometry construction uses symbolic dimensions and performs no field arithmetic or table construction.
 pub fn geometry(t: usize, b: usize, a: usize) -> Result<[BatchPrelude<F128>; 8], ProofDecodeError> {
     if !(1..=usize::from(LOG_T_MAX)).contains(&t)
         || !(1..=24).contains(&b)
@@ -226,32 +248,14 @@ pub fn geometry(t: usize, b: usize, a: usize) -> Result<[BatchPrelude<F128>; 8],
     }
     let layout = Layout::new(b, a, 0).map_err(|_| ProofDecodeError::Dimensions)?;
     Ok([
-        Stage1Sumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage1Sumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
         Stage2Sumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
         Stage3aSumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
-        Stage3bSumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        Stage4Sumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        Stage5Sumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        Stage6aSumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        Stage6bSumchecks::for_geometry(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?
-            .geometry()
-            .map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage3bSumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage4Sumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage5Sumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage6aSumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage6bSumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
     ])
 }
 impl<S: BitsCommitmentScheme> Rv64iProof<S> {
@@ -268,8 +272,14 @@ impl<S: BitsCommitmentScheme> Rv64iProof<S> {
         {
             return Err(ProofDecodeError::Dimensions);
         }
-        let [s1, s2, s3a, s3b, s4, s5, s6a, s6b] =
-            geometry(log_T, log_K_bytecode, usize::from(self.log_K_ram))?;
+        let schedule = geometry(log_T, log_K_bytecode, usize::from(self.log_K_ram))?;
+        self.validate_geometry(&schedule)
+    }
+
+    fn validate_geometry(
+        &self,
+        [s1, s2, s3a, s3b, s4, s5, s6a, s6b]: &[BatchPrelude<F128>; 8],
+    ) -> Result<(), ProofDecodeError> {
         self.stage1.validate((s1.max_num_vars, s1.max_degree))?;
         self.stage2.validate((s2.max_num_vars, s2.max_degree))?;
         self.stage3a.validate((s3a.max_num_vars, s3a.max_degree))?;
@@ -288,16 +298,16 @@ impl<S: BitsCommitmentScheme> Rv64iProof<S> {
     pub fn to_bytes(&self) -> Vec<u8> {
         let t = self.stage6b.round_count();
         let b = self.stage6a.round_count();
-        if self.validate_shape(t, b).is_err() {
+        let Ok(schedule) = geometry(t, b, usize::from(self.log_K_ram)) else {
+            return Vec::new();
+        };
+        if self.validate_geometry(&schedule).is_err() {
             return Vec::new();
         }
+        let [s1, s2, s3a, s3b, s4, s5, s6a, s6b] = schedule;
         let mut out = vec![0, self.log_K_ram];
         out.extend_from_slice(&self.final_pc.to_le_bytes());
         write_scheme(&self.bits_commitment, &mut out);
-        let Ok([s1, s2, s3a, s3b, s4, s5, s6a, s6b]) = geometry(t, b, usize::from(self.log_K_ram))
-        else {
-            return Vec::new();
-        };
         self.stage1.write(s1.max_degree, &mut out);
         self.stage2.write(s2.max_degree, &mut out);
         self.stage3a.write(s3a.max_degree, &mut out);

@@ -1,5 +1,6 @@
 //! Concrete cycle reductions with shared bit and position opening points.
 
+use crate::proof::DimensionedRelation;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -220,6 +221,10 @@ impl<F: JoltField> RouterCycleVariant<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleVariant<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(
         RouterCycleVariantInputClaims,
         RouterCycleVariantOutputClaims
@@ -310,6 +315,10 @@ impl<F: JoltField> RouterCycleShift<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleShift<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims);
     type Symbolic = RouterCycleShiftSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -403,6 +412,10 @@ impl<F: JoltField> RouterCycleMemory<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleMemory<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleMemoryInputClaims, RouterCycleMemoryOutputClaims);
     type Symbolic = RouterCycleMemorySymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -502,6 +515,10 @@ impl<F: JoltField> RouterCycleCompare<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleCompare<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(
         RouterCycleCompareInputClaims,
         RouterCycleCompareOutputClaims
@@ -630,6 +647,10 @@ impl<F: JoltField> RouterCycleBranch<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleBranch<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleBranchInputClaims, RouterCycleBranchOutputClaims);
     type Symbolic = RouterCycleBranchSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -689,5 +710,35 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleBranch<F> {
                 ),
             ),
         ]
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleVariant<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterCycleVariantSymbolic::new(log_T)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleShift<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterCycleShiftSymbolic::new(log_T)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleMemory<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterCycleMemorySymbolic::new(log_T)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleCompare<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterCycleCompareSymbolic::new(log_T)
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleBranch<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        RouterCycleBranchSymbolic::new(log_T)
     }
 }

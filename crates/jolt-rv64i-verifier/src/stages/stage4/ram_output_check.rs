@@ -6,10 +6,12 @@ pub use crate::claims::ram_output_check::{
 };
 use crate::ids::{DerivedId, OutputCheckDerived};
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use crate::public::io::{io_mask, val_io, validate_io};
 use jolt_claims::SymbolicSumcheck;
 use jolt_field::JoltField;
 use jolt_program::preprocess::PublicIoMemory;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
@@ -79,14 +81,9 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
     }
+
     fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
-        if batch_num_vars < self.rounds() {
-            return Err(term_error(PointsError::Dimension {
-                expected: self.rounds(),
-                actual: batch_num_vars,
-            }));
-        }
-        Ok(0)
+        Self::point_offset(self.rounds(), batch_num_vars)
     }
     fn derive_opening_points(
         &self,
@@ -146,5 +143,21 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
             challenges,
             |id| self.derive_output_term(id, inputs, outputs, challenges),
         )
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RamOutputCheck<F> {
+    fn symbolic_for(_log_T: usize, layout: &Layout) -> Self::Symbolic {
+        RamOutputCheckSymbolic::new(layout.log_K_ram())
+    }
+
+    fn point_offset(rounds: usize, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        if batch_num_vars < rounds {
+            return Err(term_error(PointsError::Dimension {
+                expected: rounds,
+                actual: batch_num_vars,
+            }));
+        }
+        Ok(0)
     }
 }

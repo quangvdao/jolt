@@ -5,6 +5,7 @@ pub use crate::claims::bytecode_read::{
 };
 use crate::ids::{BytecodeCycleDerived, CycleWeight, DerivedId, OpeningId};
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use jolt_claims::{NoChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
 use jolt_rv64i_arith::{Chunk, Layout};
@@ -129,6 +130,10 @@ impl<F: JoltField> BytecodeReadCycle<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for BytecodeReadCycle<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = BytecodeReadCycleSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -212,5 +217,11 @@ impl<F: JoltField> BytecodeReadCycle<F> {
             }
             CycleWeight::Next => points::next(&self.r_3, point),
         }
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for BytecodeReadCycle<F> {
+    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
+        BytecodeReadCycleSymbolic::new((log_T, layout.bytecode_ra().len()))
     }
 }

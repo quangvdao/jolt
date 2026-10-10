@@ -1,5 +1,6 @@
 //! Concrete reduction of the six committed functionals to one cycle point.
 
+use crate::proof::DimensionedRelation;
 use std::sync::Arc;
 
 use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
@@ -294,6 +295,10 @@ impl<F: JoltField> BitsReduction<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = BitsReductionSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -393,5 +398,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
             }
             _ => Err(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
         }
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for BitsReduction<F> {
+    fn symbolic_for(log_T: usize, _layout: &Layout) -> Self::Symbolic {
+        BitsReductionSymbolic::new(log_T)
     }
 }

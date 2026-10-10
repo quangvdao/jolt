@@ -5,6 +5,7 @@ pub use crate::claims::ram_ra_product::{
 };
 use crate::ids::{DerivedId, OpeningId, RamRaProductDerived};
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use jolt_claims::SymbolicSumcheck;
 use jolt_field::JoltField;
 use jolt_rv64i_arith::{Chunk, Layout};
@@ -115,6 +116,10 @@ impl<F: JoltField> RamRaProduct<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RamRaProduct<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RamRaProductSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -166,5 +171,11 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamRaProduct<F> {
             }
             _ => Err(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
         }
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RamRaProduct<F> {
+    fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
+        RamRaProductSymbolic::new((log_T, layout.ram_ra().len()))
     }
 }

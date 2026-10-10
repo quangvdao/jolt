@@ -6,9 +6,12 @@ pub use crate::claims::spartan_outer::{
 use crate::claims::spartan_outer::{SpartanOuterF128Symbolic, SpartanOuterF2Symbolic};
 use crate::ids::{DerivedId, OuterDerived, RowBlock};
 use crate::points::{eq, PointsError};
+use crate::proof::DimensionedRelation;
+use crate::public::matrices::RowMatrices;
 use crate::statement::LOG_T_MAX;
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 
@@ -72,9 +75,12 @@ macro_rules! outer {
                     });
                 }
                 Ok(Self {
-                    symbolic: $symbolic::new(instance.tau.len()),
+                    symbolic: Self::symbolic_with_width(log_T, row_variables),
                     instance,
                 })
+            }
+            fn symbolic_with_width(log_T: usize, row_variables: usize) -> $symbolic {
+                $symbolic::new(log_T + row_variables)
             }
             /// The batch-1 equality point in row-then-cycle order, low variable first in each part.
             pub fn tau(&self) -> &[F] {
@@ -89,8 +95,21 @@ macro_rules! outer {
                 RowBlock::$block
             }
         }
+        impl<F: JoltField> DimensionedRelation<F> for $name<F> {
+            fn symbolic_for(log_T: usize, layout: &Layout) -> Self::Symbolic {
+                let row_variables = if RowBlock::$block == RowBlock::F2 {
+                    8
+                } else {
+                    RowMatrices::f128_row_variables_for(layout)
+                };
+                Self::symbolic_with_width(log_T, row_variables)
+            }
+        }
         impl<F: JoltField> ConcreteSumcheck<F> for $name<F> {
             type Symbolic = $symbolic;
+            fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+                Self::point_offset(self.rounds(), batch_num_vars)
+            }
             fn symbolic(&self) -> &Self::Symbolic {
                 &self.symbolic
             }

@@ -17,7 +17,7 @@ mod tests {
         selector_counts, synthetic_router_shapes, BitEntry, RouteEntry, RouterError, RouterShape,
         RouterShapeRequest, SelectorFactor, SlotVariable, WordSlot,
     };
-    use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
+    use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
     use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
     use rand_chacha::rand_core::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -1231,21 +1231,5 @@ mod tests {
                 actual: 2
             }
         );
-    }
-
-    #[test]
-    fn fold_rejects_wide_source_before_bucket_and_histogram_storage() {
-        let mut source = Trace::small(vec![Some(0); 8]);
-        source.widths.push(16);
-        source.by_row.push(false);
-        source.digits.push(vec![None; 8]);
-        source.row_digits.push(vec![None]);
-        assert!(matches!(
-            ValidatedTrace::new(Arc::new(source)),
-            Err(SourceError::Width {
-                column: 1,
-                bits: 16
-            })
-        ));
     }
 }

@@ -10,6 +10,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod validation;
+use validation::{CycleValidation, GroupChunk, GroupColumns, RowColumn, MAX_COLUMNS, ROW_CHUNK};
+
 /// Two groups of packed A, B and C lanes and the two-row tail.
 /// Tail bits 0–1, 2–3 and 4–5 hold A, B and C respectively.
 /// Implementations return zero for an out-of-range cycle.
@@ -269,168 +272,6 @@ impl GroupData {
     }
 }
 
-struct GroupChunk<'a> {
-    bytes: &'a mut [u8],
-    columns: &'a [usize],
-    optional: bool,
-}
-
-const ROW_CHUNK: usize = 4096;
-const TILE_ENTRIES: usize = 4096;
-const MAX_COLUMNS: usize = 128;
-
-struct RowColumn {
-    column: usize,
-    bound: usize,
-}
-
-struct RowRun {
-    columns: Range<usize>,
-    cache: Range<usize>,
-}
-
-struct CycleValidation<'a> {
-    bounds: &'a [u16],
-    present: &'a [u16],
-    row_columns: &'a [RowColumn],
-    row_runs: &'a [RowRun],
-    row_cache: &'a [u16],
-}
-
-impl CycleValidation<'_> {
-    fn validate_chunk(
-        &self,
-        source: &impl CycleSource,
-        cycles: Range<usize>,
-        rows: usize,
-        output: &mut [Option<GroupChunk<'_>>],
-    ) -> Result<(), SourceError> {
-        let columns = self.bounds.len();
-        let tile_cycles = TILE_ENTRIES / columns.max(1);
-        let mut buffer = [0_u16; TILE_ENTRIES];
-        for start in (cycles.start..cycles.end).step_by(tile_cycles) {
-            let end = (start + tile_cycles).min(cycles.end);
-            let tile = &mut buffer[..(end - start) * columns];
-            source.digits(start..end, tile);
-            let mut maxima = [0_u16; MAX_COLUMNS];
-            let mut minima = [u16::MAX; MAX_COLUMNS];
-            let mut rejected = false;
-            if columns == 0 {
-                rejected = (start..end).any(|cycle| source.bytecode_index(cycle) >= rows);
-            } else {
-                for (offset, digits) in tile.chunks_exact(columns).enumerate() {
-                    let cycle = start + offset;
-                    let row = source.bytecode_index(cycle);
-                    if self.row_columns.is_empty() {
-                        rejected |= row >= rows;
-                    } else if let Some(cache) =
-                        self.row_cache.chunks_exact(self.row_columns.len()).nth(row)
-                    {
-                        for run in self.row_runs {
-                            for (&value, &expected) in digits[run.columns.clone()]
-                                .iter()
-                                .zip(&cache[run.cache.clone()])
-                            {
-                                rejected |= value != expected;
-                            }
-                        }
-                    } else {
-                        rejected = true;
-                    }
-                    for ((maximum, minimum), &value) in maxima[..columns]
-                        .iter_mut()
-                        .zip(&mut minima[..columns])
-                        .zip(digits)
-                    {
-                        *maximum = (*maximum).max(value);
-                        *minimum = (*minimum).min(value);
-                    }
-                    for group in output.iter_mut().flatten() {
-                        let stride = group.columns.len();
-                        let output = &mut group.bytes
-                            [(cycle - cycles.start) * stride..(cycle - cycles.start + 1) * stride];
-                        if group.optional {
-                            for (slot, &column) in output.iter_mut().zip(group.columns) {
-                                *slot = digits[column] as u8;
-                            }
-                        } else {
-                            for (slot, &column) in output.iter_mut().zip(group.columns) {
-                                *slot = digits[column].wrapping_sub(1) as u8;
-                            }
-                        }
-                    }
-                }
-            }
-            rejected |= maxima[..columns]
-                .iter()
-                .zip(self.bounds)
-                .any(|(&maximum, &bound)| maximum > bound);
-            rejected |= minima[..columns]
-                .iter()
-                .zip(self.present)
-                .any(|(&minimum, &present)| minimum < present);
-            if rejected {
-                self.scalar_ladder(source, start..end, rows, tile)?;
-            }
-        }
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn scalar_ladder(
-        &self,
-        source: &impl CycleSource,
-        cycles: Range<usize>,
-        rows: usize,
-        tile: &[u16],
-    ) -> Result<(), SourceError> {
-        for cycle in cycles.clone() {
-            let row = source.bytecode_index(cycle);
-            if row >= rows {
-                return Err(SourceError::BytecodeIndex { cycle, row, rows });
-            }
-            for (column, &bound) in self.bounds.iter().enumerate() {
-                let digit = source.digit(column, cycle);
-                let encoded = tile[(cycle - cycles.start) * self.bounds.len() + column];
-                if encoded != encode_digit(digit) {
-                    return Err(SourceError::DigitView {
-                        column,
-                        cycle,
-                        encoded,
-                        digit,
-                    });
-                }
-                if let Some(digit) = digit.filter(|&digit| digit >= usize::from(bound)) {
-                    return Err(SourceError::Digit {
-                        column,
-                        cycle,
-                        digit,
-                        bound: usize::from(bound),
-                    });
-                }
-                if source.by_row(column) {
-                    let position = self.row_columns.iter().position(|row| row.column == column);
-                    let cache_matches = position.is_none_or(|position| {
-                        self.row_cache[row * self.row_columns.len() + position] == encoded
-                    });
-                    if !cache_matches || digit != source.row_digit(column, row) {
-                        return Err(SourceError::RowDigit { column, cycle, row });
-                    }
-                }
-                if self.present[column] != 0 && digit.is_none() {
-                    return Err(SourceError::MissingDigit { column, cycle });
-                }
-            }
-        }
-        // Every fast predicate forces a ladder fault on an immutable source:
-        // bad index, encoded range/presence, or disagreement with the row cache.
-        // A source that changes between reads violates the trait contract; this
-        // total recheck does not introduce an impossible arm or an unsafe premise.
-        Ok(())
-    }
-}
-
 #[inline]
 fn encode_digit(digit: Option<usize>) -> u16 {
     digit.map_or(0, |digit| {
@@ -449,7 +290,8 @@ fn encode_digit(digit: Option<usize>) -> u16 {
 /// ladder in that order. Preparation returns the fault of the first offending chunk. A row-based
 /// column reads no cache entry at an invalid bytecode index. Parallel
 /// completion cannot change this order.
-/// The guarantee relies on the immutability contract of [`CycleSource`].
+/// The guarantee relies on immutable, agreeing digit views as required by
+/// [`CycleSource`].
 #[derive(Debug, Clone)]
 pub struct ValidatedTrace<S: CycleSource> {
     source: Arc<S>,
@@ -463,9 +305,13 @@ impl<S: CycleSource> ValidatedTrace<S> {
     /// Validates once and writes requested byte groups in that same parallel
     /// walk. Request columns and widths are rejected before any digit read.
     /// Group buffers have exactly `cycles * columns` bytes; row caches and
-    /// chunk descriptors are temporary, with no allocation per chunk.
+    /// chunk descriptors are temporary, with no allocation per chunk. Group
+    /// column plans are built before the cycle walk. Complete common request
+    /// and row layouts select a fixed loop per tile; other layouts use the
+    /// general loop, which selects each group encoding per cycle.
     /// At most 128 digit columns of at most 15 bits are accepted. Each active
-    /// worker uses an 8 KiB stack tile and two 256-byte column accumulators.
+    /// worker uses an 8 KiB stack tile and two 256-byte column accumulators;
+    /// this array payload excludes plans and saved registers.
     pub fn prepare(
         source: Arc<S>,
         request: PrepareRequest,
@@ -568,26 +414,11 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 return Err(error);
             }
         }
-        let mut row_runs: Vec<RowRun> = Vec::new();
-        for (position, row) in row_columns.iter().enumerate() {
-            if let Some(run) = row_runs
-                .last_mut()
-                .filter(|run| run.columns.end == row.column)
-            {
-                run.columns.end += 1;
-                run.cache.end += 1;
-            } else {
-                row_runs.push(RowRun {
-                    columns: row.column..row.column + 1,
-                    cache: position..position + 1,
-                });
-            }
-        }
         let validation = CycleValidation {
             bounds: &bounds,
             present: &present,
             row_columns: &row_columns,
-            row_runs: &row_runs,
+            row_pair: RowColumn::pair(&row_columns),
             row_cache: &row_cache,
         };
         let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)
@@ -619,30 +450,39 @@ impl<S: CycleSource> ValidatedTrace<S> {
             check_validation_size::<Option<GroupChunk<'_>>>(len, "group chunk metadata")?;
             let mut chunks: Vec<Option<GroupChunk<'_>>> =
                 std::iter::repeat_with(|| None).take(len).collect();
-            let mut group_index = 0;
-            for (group, optional) in groups
+            let views: Vec<_> = groups
                 .present
                 .iter_mut()
-                .map(|group| (&mut group.0, false))
-                .chain(groups.optional.iter_mut().map(|group| (&mut group.0, true)))
+                .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], false))
+                .chain(
+                    groups
+                        .optional
+                        .iter_mut()
+                        .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], true)),
+                )
+                .filter(|(columns, _, _)| !columns.is_empty())
+                .collect();
+            check_validation_size::<GroupColumns<'_>>(views.len(), "group plans")?;
+            let plans: Vec<_> = views
+                .iter()
+                .map(|(columns, _, _)| GroupColumns::new(columns))
+                .collect();
+            for (group_index, ((columns, bytes, optional), plan)) in
+                views.into_iter().zip(&plans).enumerate()
             {
-                let stride = group.columns.len();
-                if stride == 0 {
-                    continue;
-                }
+                let stride = columns.len();
                 for (slot, bytes) in chunks
                     .iter_mut()
                     .skip(group_index)
                     .step_by(group_count)
-                    .zip(group.bytes.chunks_mut(geometry.chunk_len() * stride))
+                    .zip(bytes.chunks_mut(geometry.chunk_len() * stride))
                 {
                     *slot = Some(GroupChunk {
                         bytes,
-                        columns: &group.columns,
-                        optional,
+                        columns: plan,
+                        bias: u16::from(!optional),
                     });
                 }
-                group_index += 1;
             }
             chunks
                 .par_chunks_mut(group_count)

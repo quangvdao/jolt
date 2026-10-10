@@ -1,6 +1,9 @@
 //! Packed bit commitments reject altered tables, columns and invalid opening geometry.
 #![expect(clippy::unwrap_used, reason = "tests fail on invalid fixtures")]
-#[expect(dead_code, reason = "shared machine helpers serve the complete protocol corpus")]
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 use jolt_field::{One, Ring, F128};
 use jolt_poly::Polynomial;

@@ -4,7 +4,10 @@
     reason = "invalid fixtures fail the enclosing test"
 )]
 
-#[expect(dead_code, reason = "shared machine helpers serve the complete protocol corpus")]
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 
 use common::{

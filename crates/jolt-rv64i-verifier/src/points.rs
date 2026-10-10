@@ -25,6 +25,7 @@ pub fn to_high_to_low<F: Copy>(point: &[F]) -> Vec<F> {
     point.iter().rev().copied().collect()
 }
 
+/// Equality in characteristic two, with one multiplication per coordinate.
 pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -32,7 +33,7 @@ pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    Ok(EqPolynomial::mle(x, y))
+    Ok(x.iter().zip(y).map(|(x, y)| F::one() + *x + *y).product())
 }
 
 pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsError> {
@@ -50,12 +51,12 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
     eq(point, &vertex)
 }
 
-/// Materializes at most 64 equality weights in low-variable-first index order.
+/// Materializes at most 1,024 equality weights in low-variable-first index order.
 /// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    if point.len() > 6 {
+    if point.len() > 10 {
         return Err(PointsError::Dimension {
-            expected: 6,
+            expected: 10,
             actual: point.len(),
         });
     }

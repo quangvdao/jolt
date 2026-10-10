@@ -4,12 +4,13 @@
 pub mod support;
 
 use std::hint::black_box;
+use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use jolt_field::{Accumulator, F128Accumulator, Field, F128};
 use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
-use jolt_poly::UnivariatePoly;
+use jolt_poly::{Polynomial, UnivariatePoly};
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
@@ -24,7 +25,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use thiserror::Error;
 
-use support::allocator::AllocationMeasurement;
+use support::allocator::{AllocationAllowance, AllocationMeasurement, RAYON_WORKER_ALLOWANCE};
 use support::{run_core, RunnerError};
 
 #[derive(Debug, Error)]
@@ -43,9 +44,10 @@ enum BenchError {
     Sumcheck(#[from] SumcheckError<F128>),
     #[error("benchmark timing lock was poisoned")]
     TimingLock,
-    #[error("core allocated {actual} times at log_t={log_t}, above limit {limit}")]
+    #[error("core {quantity} was {actual} at log_t={log_t}, above limit {limit}")]
     Allocation {
         log_t: usize,
+        quantity: &'static str,
         actual: usize,
         limit: usize,
     },
@@ -743,6 +745,26 @@ fn compare_options(records: &[Record]) -> Result<(), RunnerError> {
     Ok(())
 }
 
+fn allocation_bound(log_t: usize, terms: usize) -> AllocationAllowance {
+    let columns = 5;
+    let column_bits = 4;
+    let cycles = 1 << log_t;
+    // Capacity bounds cover the shared dense bind's current/next buffers,
+    // overlapping eight/sixteen-branch generations, and live round vectors.
+    let column_bytes = 3 * columns * cycles / 2;
+    let branch_bytes = 24 * columns * (1 << column_bits) * size_of::<F128>();
+    let round_values = 8 * terms + (2 * terms + 2) * (columns + 2);
+    let metadata_bytes = 4 * columns * (size_of::<Vec<F128>>() + size_of::<Polynomial<F128>>());
+    AllocationAllowance {
+        allocs: if terms > 7 {
+            2 * (terms + 1) * log_t + 64
+        } else {
+            16 * log_t + 64
+        },
+        bytes: column_bytes + branch_bytes + round_values * size_of::<F128>() + metadata_bytes,
+    }
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "allocation acceptance reports its measured counts"
@@ -761,11 +783,13 @@ fn check_allocations() -> Result<(), RunnerError> {
             ("eq_terms_2", Some(2)),
             ("eq_terms_9", Some(9)),
         ] {
-            let limit = match term_count {
-                Some(terms) if terms > 7 => 2 * (terms + 1) * log_t + 64,
-                _ => 16 * log_t + 64,
+            let kernel = allocation_bound(log_t, term_count.unwrap_or_default());
+            let workers = pool.current_num_threads();
+            let limit = AllocationAllowance {
+                allocs: kernel.allocs + RAYON_WORKER_ALLOWANCE.allocs * workers,
+                bytes: kernel.bytes + RAYON_WORKER_ALLOWANCE.bytes * workers,
             };
-            let count = pool
+            let stats = pool
                 .install(|| -> Result<_, BenchError> {
                     let source = Arc::new(SyntheticTrace::new(
                         SynthProfile::UniformDigits,
@@ -793,20 +817,27 @@ fn check_allocations() -> Result<(), RunnerError> {
                         bind = Some(challenge);
                     }
                     core.finish_rounds(challenges[log_t - 1])?;
-                    let count = measurement.finish().allocs;
-                    if count > limit {
-                        return Err(BenchError::Allocation {
-                            log_t,
-                            actual: count,
-                            limit,
-                        });
+                    let stats = measurement.finish();
+                    for (quantity, actual, limit) in [
+                        ("allocation count", stats.allocs, limit.allocs),
+                        ("peak bytes", stats.peak_bytes, limit.bytes),
+                        ("live-after bytes", stats.final_bytes, limit.bytes),
+                    ] {
+                        if actual > limit {
+                            return Err(BenchError::Allocation {
+                                log_t,
+                                quantity,
+                                actual,
+                                limit,
+                            });
+                        }
                     }
-                    Ok(count)
+                    Ok(stats)
                 })
                 .map_err(|error| RunnerError::Core {
                     message: error.to_string(),
                 })?;
-            println!("chunk_product_allocation/{name}/{log_t}/1 allocs={count} limit={limit} PASS");
+            println!("chunk_product_allocation/{name}/{log_t}/{workers} allocs={} limit={} peak_bytes={} final_bytes={} byte_limit={} kernel_alloc_limit={} kernel_byte_limit={} runtime_alloc_allowance={} runtime_byte_allowance={} PASS", stats.allocs, limit.allocs, stats.peak_bytes, stats.final_bytes, limit.bytes, kernel.allocs, kernel.bytes, RAYON_WORKER_ALLOWANCE.allocs * workers, RAYON_WORKER_ALLOWANCE.bytes * workers);
         }
     }
     Ok(())

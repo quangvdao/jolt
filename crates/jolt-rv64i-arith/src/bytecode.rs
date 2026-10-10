@@ -290,6 +290,7 @@ pub enum BytecodeError {
 #[derive(Debug, Clone)]
 pub struct Bytecode {
     rows: Vec<BytecodeRow>,
+    decoded: usize,
     log_K: usize,
     lowest_address: u64,
     pc_indices: HashMap<u64, usize>,
@@ -341,9 +342,11 @@ impl Bytecode {
             }
             rows.push(row);
         }
+        let decoded = rows.len();
         rows.resize(capacity, BytecodeRow::default());
         Ok(Self {
             rows,
+            decoded,
             log_K,
             lowest_address: layout.lowest_address(),
             pc_indices,
@@ -356,12 +359,17 @@ impl Bytecode {
         &self.rows
     }
 
-    /// Valid rows with their original table indices, excluding invalid inputs
-    /// and padding. Iteration order is unspecified.
+    /// Valid rows in decoded program order, with their original table indices.
+    /// Traversal is proportional to the decoded program, excluding padding.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "preprocess records decoded before padding; the row table and count remain private and immutable"
+    )]
     pub fn valid_rows(&self) -> impl Iterator<Item = (usize, &BytecodeRow)> + '_ {
-        self.pc_indices
-            .values()
-            .filter_map(|&index| self.rows.get(index).map(|row| (index, row)))
+        self.rows[..self.decoded]
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.variant.is_some())
     }
 
     /// Exponent from the supplied layout.

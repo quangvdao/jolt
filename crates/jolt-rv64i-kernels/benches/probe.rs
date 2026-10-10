@@ -104,8 +104,9 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use thiserror::Error;
 
-use support::merge::tree_merge;
-use support::scatter::{PartitionedScatter, ScatterError};
+use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
+use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
+use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
 use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
@@ -121,6 +122,10 @@ const ALL_ROWS: &[SynthProfile] = &[SynthProfile::AllRows];
 enum ProbeError {
     #[error(transparent)]
     Scatter(#[from] ScatterError),
+    #[error(transparent)]
+    Pool(#[from] PoolError),
+    #[error(transparent)]
+    Source(#[from] SourceError),
     #[error("unknown probe case {unit}/{variant}")]
     Case { unit: String, variant: String },
     #[error("probe worker count {threads} must be positive")]
@@ -784,7 +789,7 @@ enum ScatterMethod {
 
 enum ScatterStorage {
     Direct(Vec<[AtomicU64; 2]>),
-    Worker(Vec<Mutex<Vec<F128>>>),
+    Worker(ScratchPool),
     Gather {
         order: Vec<u32>,
         weights: Vec<F128>,
@@ -798,6 +803,10 @@ struct Scatter {
     storage: ScatterStorage,
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "sequential chunk bodies respect the constructed scratch bound; no merge overlaps loans"
+)]
 impl Scatter {
     fn new(
         source: Arc<SyntheticTrace>,
@@ -816,11 +825,14 @@ impl Scatter {
                     .map(|_| [AtomicU64::new(0), AtomicU64::new(0)])
                     .collect(),
             ),
-            ScatterMethod::Worker => ScatterStorage::Worker(
-                (0..threads)
-                    .map(|_| Mutex::new(vec![F128::from_raw(0); ROWS]))
-                    .collect(),
-            ),
+            ScatterMethod::Worker => {
+                let pool = ScratchPool::new(ROWS)?;
+                let guards: Vec<_> = (0..threads)
+                    .map(|_| pool.take())
+                    .collect::<Result<_, _>>()?;
+                drop(guards);
+                ScatterStorage::Worker(pool)
+            }
             ScatterMethod::Gather => {
                 let mut offsets = vec![0; ROW_RANGES + 1];
                 for cycle in 0..CycleSource::cycles(source.as_ref()) {
@@ -870,29 +882,19 @@ impl Scatter {
                         | (u128::from(output[0][1].load(Ordering::Relaxed)) << 64),
                 )
             }
-            ScatterStorage::Worker(tables) => {
-                let _ = black_box(&*tables);
+            ScatterStorage::Worker(pool) => {
                 (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
                     .into_par_iter()
                     .for_each(|chunk| {
-                        let worker = rayon::current_thread_index().unwrap_or(0);
-                        let mut table = tables[worker]
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
+                        let mut table = pool.take().unwrap();
                         let start = chunk * CHUNK;
                         let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
                         for cycle in start..end {
                             table[source.bytecode_index(cycle)] += trace_value(source, cycle);
                         }
                     });
-                tree_merge(tables, CHUNK, |table| {
-                    table
-                        .get_mut()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_mut_slice()
-                });
-                let table = tables[0].get_mut().unwrap_or_else(PoisonError::into_inner);
-                let _ = black_box(&*table);
+                let table = pool.merge().unwrap();
+                let _ = black_box(&table);
                 table[0]
             }
             ScatterStorage::Gather {
@@ -1173,44 +1175,101 @@ enum MergeMode {
 }
 
 struct Merge {
-    arrays: Vec<Vec<F128>>,
+    pool: ScratchPool,
     mode: MergeMode,
+    threads: usize,
+    len: usize,
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "benchmark phases own the pool exclusively and all loans end during construction"
+)]
 impl Merge {
-    fn new(threads: usize, mode: MergeMode) -> Self {
-        Self {
-            arrays: (0..threads)
-                .map(|_| vec![F128::from_raw(1); 10 * 1024 * 1024 / size_of::<F128>()])
-                .collect(),
-            mode,
+    fn new(threads: usize, mode: MergeMode) -> Result<Self, PoolError> {
+        let len = 10 * 1024 * 1024 / size_of::<F128>();
+        let pool = ScratchPool::new(len)?;
+        let mut guards: Vec<_> = (0..threads)
+            .map(|_| pool.take())
+            .collect::<Result<_, _>>()?;
+        for guard in &mut guards {
+            guard.fill(F128::from_raw(1));
         }
+        drop(guards);
+        Ok(Self {
+            pool,
+            mode,
+            threads,
+            len,
+        })
     }
 
     fn operations(&self) -> usize {
         let arrays = match self.mode {
-            MergeMode::Zero => self.arrays.len(),
-            MergeMode::ZeroTree => 2 * self.arrays.len() - 1,
-            MergeMode::Tree => self.arrays.len() - 1,
+            MergeMode::Zero => self.threads,
+            MergeMode::ZeroTree => 2 * self.threads - 1,
+            MergeMode::Tree => self.threads - 1,
         };
-        arrays * self.arrays[0].len()
+        arrays * self.len
     }
 
     fn run(&mut self) -> F128 {
-        let arrays = black_box(&mut self.arrays);
+        let pool = black_box(&self.pool);
         if self.mode != MergeMode::Tree {
-            arrays.par_iter_mut().for_each(|array| {
-                array
-                    .par_chunks_mut(CHUNK)
-                    .for_each(|chunk| chunk.fill(F128::from_raw(0)));
-            });
+            pool.zero().unwrap();
         }
-        let _ = black_box(&mut *arrays);
         if self.mode != MergeMode::Zero {
-            tree_merge(arrays, CHUNK, Vec::as_mut_slice);
+            let result = pool.merge().unwrap();
+            let _ = black_box(&result);
+            result[0]
+        } else {
+            black_box(F128::from_raw(0))
         }
-        let _ = black_box(&*arrays);
-        arrays[0][0]
+    }
+}
+
+struct PartitionedScatter {
+    source: Arc<SyntheticTrace>,
+    plan: ScatterPlan<SyntheticTrace>,
+    rows: Vec<u32>,
+    weights: Vec<F128>,
+    output: Vec<F128>,
+    cursors: Vec<u32>,
+}
+
+impl PartitionedScatter {
+    fn new(source: Arc<SyntheticTrace>) -> Result<Self, ProbeError> {
+        let validated = Arc::new(ValidatedTrace::new(Arc::clone(&source))?);
+        let plan = ScatterPlan::new(validated)?;
+        Ok(Self {
+            cursors: vec![0; plan.cursor_len()],
+            rows: vec![0; plan.cycles()],
+            weights: vec![F128::from_raw(0); plan.cycles()],
+            output: vec![F128::from_raw(0); plan.bytecode_rows()],
+            source,
+            plan,
+        })
+    }
+    fn cycles(&self) -> usize {
+        self.plan.cycles()
+    }
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the constructor sizes every buffer for this immutable plan"
+    )]
+    fn run(&mut self) -> F128 {
+        let source = black_box(&self.source);
+        self.plan
+            .scatter_into(
+                |cycle| trace_value(source, cycle),
+                &mut self.rows,
+                &mut self.weights,
+                &mut self.output,
+                &mut self.cursors,
+            )
+            .unwrap();
+        let _ = black_box(&self.output);
+        self.output[0]
     }
 }
 
@@ -1346,7 +1405,7 @@ impl Unit {
                     "tree_only_10mib" => MergeMode::Tree,
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Merge(Merge::new(threads, mode)))
+                Ok(Self::Merge(Merge::new(threads, mode)?))
             }
             _ => Err(invalid()),
         }

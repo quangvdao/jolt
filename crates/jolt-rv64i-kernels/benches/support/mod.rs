@@ -11,8 +11,6 @@ mod allocator;
 pub mod example;
 pub mod fit;
 pub use self::fit::ChainFit;
-pub mod merge;
-pub mod scatter;
 
 use std::error::Error as StdError;
 use std::hint::black_box;
@@ -515,4 +513,113 @@ where
         }
     }
     Ok(records)
+}
+
+/// A packed-machinery pass with a checked operation count and execution result.
+pub trait MachineryKernel: Send {
+    type Error: StdError;
+    fn operations(&self) -> usize;
+    fn run(&mut self) -> Result<F128, Self::Error>;
+    fn plan_construction_ns(&self) -> Option<f64> {
+        None
+    }
+}
+
+/// Times packed passes under the same warmed pools, samples and allocator as
+/// the core runner. Source preparation precedes measurement. Construction is
+/// reported separately; the requirement applies only to the measured pass.
+#[expect(
+    clippy::print_stdout,
+    reason = "machinery records are benchmark output"
+)]
+pub fn run_machinery<C, E, S>(
+    cases: &[(&str, Option<f64>)],
+    prepare: impl Fn(usize) -> Result<Arc<S>, E> + Sync,
+    construct: impl Fn(&str, Arc<S>, usize) -> Result<C, E> + Sync,
+) -> Result<(), RunnerError>
+where
+    C: MachineryKernel<Error = E>,
+    E: StdError + Send,
+    S: Send + Sync,
+{
+    let options = Options::parse(true)?;
+    let pools = warmed_pools(&options.threads)?;
+    for (threads, pool) in &pools {
+        for &log_t in &options.log_t {
+            let source = pool
+                .install(|| prepare(log_t))
+                .map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            for &(name, requirement) in cases {
+                if !options.units.is_empty() && !options.units.iter().any(|unit| unit == name) {
+                    continue;
+                }
+                let mut samples = Vec::with_capacity(options.samples);
+                let mut operations = 0;
+                let mut plans = Vec::with_capacity(options.samples);
+                for _ in 0..options.samples {
+                    let (sample, count, plan) =
+                        pool.install(|| {
+                            let measurement = AllocationMeasurement::begin();
+                            let start = Instant::now();
+                            let mut kernel = construct(name, Arc::clone(&source), *threads)
+                                .map_err(|error| RunnerError::Core {
+                                    message: error.to_string(),
+                                })?;
+                            let construct_ns = start.elapsed().as_nanos() as f64;
+                            let count = kernel.operations();
+                            let plan = kernel.plan_construction_ns();
+                            if count == 0 {
+                                return Err(RunnerError::WorkCount {
+                                    variant: name.to_owned(),
+                                });
+                            }
+                            let start = Instant::now();
+                            let _ = black_box(kernel.run().map_err(|error| RunnerError::Core {
+                                message: error.to_string(),
+                            })?);
+                            let run_ns = start.elapsed().as_nanos() as f64;
+                            Ok((
+                                Sample {
+                                    times: [construct_ns, run_ns, 0.0, 0.0],
+                                    allocation: measurement.finish(),
+                                },
+                                count,
+                                plan,
+                            ))
+                        })?;
+                    samples.push(sample);
+                    operations = count;
+                    if let Some(plan) = plan {
+                        plans.push(plan / count as f64);
+                    }
+                }
+                let pass = Sample::phase(&samples, 1, operations as f64);
+                let construction = Sample::phase(&samples, 0, (1_usize << log_t) as f64);
+                let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
+                if let Some(requirement) = requirement {
+                    println!(
+                        "machinery/{name}/{threads}  {:.6}  requirement {requirement}  {}",
+                        pass.median,
+                        if pass.median <= requirement {
+                            "PASS"
+                        } else {
+                            "OVER"
+                        }
+                    );
+                } else {
+                    println!("machinery/{name}/{threads}  {:.6}", pass.median);
+                }
+                if !plans.is_empty() {
+                    println!(
+                        "machinery/{name}_plan/{threads} construct_ns={:.6}",
+                        Summary::new(plans).median
+                    );
+                }
+                println!("machinery/{name}_construction/{threads} construct_ns={:.6} pass_min_ns={:.6} pass_max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs}", construction.median, pass.min, pass.max, options.samples);
+            }
+        }
+    }
+    Ok(())
 }

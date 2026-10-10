@@ -21,6 +21,7 @@ use jolt_rv64i_verifier::stages::stage3b::{
 };
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Display;
 
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
     let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
@@ -239,7 +240,7 @@ impl PrepareKernel<F128, RouterShort<F128>, Rv64iPlane> for RouterShortPrepare {
     }
 }
 
-fn geometry_error(error: impl std::fmt::Display) -> KernelError<F128> {
+fn geometry_error(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
         reason: error.to_string(),
     }

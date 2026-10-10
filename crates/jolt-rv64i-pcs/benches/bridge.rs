@@ -1,6 +1,7 @@
 //! `RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-pcs
 //! --bench bridge -- --log-t 22 --threads 1,12 --samples 5`.
-//! Cases alternate five/six products on identical seeded rows and warmed pools.
+//! Cases alternate five/six-product passes with the shared five-product fold
+//! on identical seeded rows and warmed pools.
 //! Timings include allocation and zero initialization; requested-byte counters
 //! are shared with the kernel runner. All records are loaded-host evidence.
 
@@ -244,7 +245,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok::<_, WhirError>(start.elapsed())
             })?);
         }
-        for (variant, values) in ["five", "six"].into_iter().zip(&measured) {
+        for (variant, values) in ["five", "six_pass_five_fold"].into_iter().zip(&measured) {
             for (phase, select) in [
                 ("setup", (|s: &Sample| s.setup) as fn(&Sample) -> Duration),
                 ("pass", |s: &Sample| s.pass),

@@ -74,6 +74,7 @@ pub struct DigitFields {
     ram: [DigitField; 16],
     ram_len: usize,
     pos: [DigitField; 2],
+    position: DigitField,
     keys_differ: DigitField,
     should_branch: DigitField,
     jalr_low_bit: DigitField,
@@ -104,6 +105,7 @@ impl DigitFields {
             bytecode_len: layout.bytecode_ra().len(),
             ram_len: layout.ram_ra().len(),
             pos: [DigitField::new(shift, 3), DigitField::new(shift + 3, 3)],
+            position: DigitField::new(shift, 6),
             keys_differ: DigitField::new(shift + 6, 1),
             should_branch: DigitField::new(shift + 7, 1),
             jalr_low_bit: DigitField::new(shift + 8, 1),
@@ -148,25 +150,15 @@ impl DigitFields {
     }
 
     #[inline]
-    fn pack(
-        &self,
-        layout: &Layout,
-        committed: &BitsRow,
-        index: u64,
-        ram: u64,
-        variant: Variant,
-    ) -> DecodedCycle {
-        let flag = |column: usize| u64::from(committed[column / 64] >> (column % 64) & 1 != 0);
-        let pos = u64::from(layout.pos(committed));
+    fn pack(&self, index: u64, variant: Variant, parts: &SourceParts) -> DecodedCycle {
         DecodedCycle {
-            inc: layout.inc(committed),
+            inc: parts.inc,
             digits: self.bytecode_index.pack(index)
-                | self.ram_index.pack(ram)
-                | self.pos[0].pack(pos)
-                | self.pos[1].pack(pos >> self.pos[0].bits)
-                | self.keys_differ.pack(flag(layout.keys_differ()))
-                | self.should_branch.pack(flag(layout.should_branch()))
-                | self.jalr_low_bit.pack(flag(layout.jalr_low_bit()))
+                | self.ram_index.pack(parts.ram_index)
+                | self.position.pack(u64::from(parts.pos))
+                | self.keys_differ.pack(u64::from(parts.keys_differ))
+                | self.should_branch.pack(u64::from(parts.should_branch))
+                | self.jalr_low_bit.pack(u64::from(parts.jalr_low_bit))
                 | self.variant.pack(variant.index() as u64),
         }
     }
@@ -271,11 +263,10 @@ impl<'w> WitnessCycles<'w> {
                 cycle,
                 rows: witness.words.len(),
             })?;
-        let [low, high] = self.fields.pos_fields();
         let sources = SourceParts {
             inc: decoded.inc,
             ram_index: self.fields.ram_index().read(decoded),
-            pos: (low.read(decoded) | (high.read(decoded) << low.bits())) as u8,
+            pos: self.fields.position.read(decoded) as u8,
             keys_differ: self.fields.keys_differ().read(decoded) != 0,
             should_branch: self.fields.should_branch().read(decoded) != 0,
             jalr_low_bit: self.fields.jalr_low_bit().read(decoded) != 0,
@@ -448,11 +439,23 @@ impl Rv64iWitness {
         let words = Arc::get_mut(&mut self.words).ok_or(Rv64iProverError::SharedBuffer)?;
         let mut registers = [0_u64; 32];
         for cycle in 0..words.len() {
-            let (index, fact) = match &rows {
-                ReplayRows::Bits(bits) => (self.layout.bytecode_index(&bits[cycle]), None),
-                ReplayRows::Facts { facts, .. } => {
-                    (u64::from(facts[cycle].bytecode_index), Some(&facts[cycle]))
+            let input = match &mut rows {
+                ReplayRows::Bits(bits) => {
+                    let (index, parts) = SourceParts::from_checked_bits(&self.layout, &bits[cycle])
+                        .map_err(|error| Rv64iProverError::MultipleIndicators {
+                            cycle,
+                            start: error.start,
+                        })?;
+                    ReplayCycle::Bits { index, parts }
                 }
+                ReplayRows::Facts { bits, facts } => ReplayCycle::Facts {
+                    fact: &facts[cycle],
+                    committed: &mut bits[cycle],
+                },
+            };
+            let (index, fact) = match &input {
+                ReplayCycle::Bits { index, .. } => (*index, None),
+                ReplayCycle::Facts { fact, .. } => (u64::from(fact.bytecode_index), Some(*fact)),
             };
             let row = usize::try_from(index)
                 .ok()
@@ -463,15 +466,15 @@ impl Rv64iWitness {
                 .variant
                 .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
             let access = variant.access().is_some();
-            let ram_index = match &rows {
-                ReplayRows::Facts { facts, .. } => {
+            let ram_index = match &input {
+                ReplayCycle::Facts { fact, .. } => {
                     if access {
-                        facts[cycle].ram_word_index
+                        fact.ram_word_index
                     } else {
                         0
                     }
                 }
-                ReplayRows::Bits(bits) => self.layout.ram_index(&bits[cycle]),
+                ReplayCycle::Bits { parts, .. } => parts.ram_index,
             };
             let read = |register: u8| {
                 registers
@@ -520,34 +523,20 @@ impl Rv64iWitness {
                     });
                 }
             }
-            let committed = match &mut rows {
-                ReplayRows::Bits(bits) => bits[cycle],
-                ReplayRows::Facts { bits, facts } => {
-                    let committed = &mut bits[cycle];
-                    builder
-                        .fill(
-                            std::slice::from_ref(&facts[cycle]),
-                            std::slice::from_mut(committed),
-                        )
-                        .map_err(|error| CycleError {
-                            cycle,
-                            error: error.error,
-                        })?;
-                    *committed
+            let parts = match input {
+                ReplayCycle::Bits { parts, .. } => parts,
+                ReplayCycle::Facts { fact, committed } => {
+                    let (bits, parts) = builder
+                        .bits_row_with_parts(fact)
+                        .map_err(|error| CycleError { cycle, error })?;
+                    *committed = bits;
+                    parts
                 }
             };
-            for chunk in self.layout.chunks() {
-                if chunk.stored(&committed).count_ones() > 1 {
-                    return Err(Rv64iProverError::MultipleIndicators {
-                        cycle,
-                        start: chunk.start(),
-                    });
-                }
-            }
             if let Some(previous) = cycle.checked_sub(1).and_then(|i| words.get_mut(i)) {
                 previous.next_pc = row.pc;
             }
-            decoded[cycle] = fields.pack(&self.layout, &committed, index, ram_index, variant);
+            decoded[cycle] = fields.pack(index, variant, &parts);
             self.variant_cycles[variant.index()] += 1;
             let inc = decoded[cycle].inc;
             if row.variant.is_some_and(|v| v.is_store()) {
@@ -766,6 +755,17 @@ impl Rv64iWitness {
         Ok(witness)
     }
 }
+enum ReplayCycle<'a> {
+    Bits {
+        index: u64,
+        parts: SourceParts,
+    },
+    Facts {
+        fact: &'a CycleFacts,
+        committed: &'a mut BitsRow,
+    },
+}
+
 enum ReplayRows<'a> {
     Bits(&'a [BitsRow]),
     Facts {

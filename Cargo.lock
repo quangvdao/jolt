@@ -3780,6 +3780,7 @@ dependencies = [
  "jolt-poly",
  "jolt-sumcheck",
  "jolt-transcript",
+ "jolt-utils",
  "rand_chacha 0.3.1",
  "rayon",
  "thiserror 2.0.20",

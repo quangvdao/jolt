@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use jolt_field::F128;
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 use thiserror::Error;
@@ -222,8 +223,8 @@ impl<S: CycleSource> ScatterPlan<S> {
         &self,
         weight: impl Fn(usize) -> F128 + Sync,
     ) -> Result<Vec<F128>, ScatterError> {
-        let mut weights = vec![F128::from_raw(0); self.cycles];
-        let mut output = vec![F128::from_raw(0); self.rows];
+        let mut weights = unsafe_allocate_zero_vec(self.cycles);
+        let mut output = unsafe_allocate_zero_vec(self.rows);
         self.scatter_into(weight, &mut weights, &mut output)?;
         Ok(output)
     }

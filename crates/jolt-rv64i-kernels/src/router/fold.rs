@@ -8,6 +8,7 @@ use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::{CycleSource, ValidatedTrace};
 use jolt_field::F128;
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -489,7 +490,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
     let pool = ScratchPool::new(scratch_len).map_err(|_| RouterError::Dimension {
         variables: usize::BITS as usize,
     })?;
-    let mut weights = vec![ZERO; source.cycles()];
+    let mut weights = unsafe_allocate_zero_vec(source.cycles());
     if let Some(clock) = start {
         times[3] += clock.elapsed();
         start = Some(Instant::now());
@@ -578,7 +579,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
     drop(high);
     drop(fallbacks);
     drop(direct_histograms);
-    let mut ra_fold = vec![ZERO; source.bytecode_rows()];
+    let mut ra_fold = unsafe_allocate_zero_vec(source.bytecode_rows());
     plan.apply_buffer(&weights, &mut ra_fold)
         .expect("freshly sized scatter buffers");
     drop(weights);

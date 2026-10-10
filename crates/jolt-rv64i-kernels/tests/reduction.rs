@@ -20,7 +20,7 @@ use jolt_sumcheck::{
     SumcheckVerifier, SUMCHECK_ROUND_TRANSCRIPT_LABEL,
 };
 use jolt_transcript::{Blake2bTranscript, Transcript};
-use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
@@ -110,20 +110,20 @@ fn digit_tables_equal_summation_on_indicator_rows() {
         );
         let weights = weights(&mut rng);
         let validated = ValidatedTrace::new(trace.clone()).unwrap();
-        assert_eq!(
-            g_pass_digits(&validated, &map(), &weights[1..]).unwrap(),
-            defining_tables(trace.rows(), &weights[1..])
-        );
-        let four_weights: Vec<_> = [1, 2, 3, 1]
+        let supported_weights: Vec<_> = [1, 2, 3, 1]
             .into_iter()
             .map(|index| weights[index].clone())
             .collect();
-        assert_eq!(
-            g_pass_digits(&validated, &map(), &four_weights).unwrap(),
-            defining_tables(trace.rows(), &four_weights)
-        );
+        for count in 1..=4 {
+            let weights = &supported_weights[..count];
+            assert_eq!(
+                g_pass_digits(&validated, &map(), weights).unwrap(),
+                defining_tables(trace.rows(), weights),
+                "{count} weights at log_t={log_t}"
+            );
+        }
         if log_t == 8 {
-            let full_support_weights: Vec<Vec<_>> = (0..4)
+            let covered_support_weights: Vec<Vec<_>> = (0..4)
                 .map(|_| {
                     (0..256)
                         .map(|column| {
@@ -137,10 +137,89 @@ fn digit_tables_equal_summation_on_indicator_rows() {
                 })
                 .collect();
             assert_eq!(
-                g_pass_digits(&validated, &map(), &full_support_weights).unwrap(),
-                defining_tables(trace.rows(), &full_support_weights)
+                g_pass_digits(&validated, &map(), &covered_support_weights).unwrap(),
+                defining_tables(trace.rows(), &covered_support_weights)
             );
         }
+    }
+}
+
+#[test]
+fn digit_tables_equal_summation_for_all_columns_and_each_weight_count() {
+    let mut rng = ChaCha20Rng::seed_from_u64(3718);
+    let map: Vec<_> = (0..4)
+        .map(|trace_word| ColumnMap::Word {
+            start: 64 * trace_word,
+            trace_word,
+        })
+        .collect();
+    let weights: Vec<Vec<_>> = (0..4)
+        .map(|_| {
+            (0..256)
+                .map(|_| F128::from_raw(1 + u128::from(rng.next_u64())))
+                .collect()
+        })
+        .collect();
+    for log_t in [3, 8] {
+        let source = Arc::new(PackedRows(
+            (0..1 << log_t)
+                .map(|_| std::array::from_fn(|_| rng.next_u64()))
+                .collect(),
+        ));
+        let validated = ValidatedTrace::new(source.clone()).unwrap();
+        for count in 1..=4 {
+            let weights = &weights[..count];
+            assert_eq!(
+                g_pass_digits(&validated, &map, weights).unwrap(),
+                defining_tables(&source.0, weights),
+                "{count} full-support weights at log_t={log_t}"
+            );
+        }
+    }
+}
+
+struct PackedRows(Vec<[u64; 4]>);
+
+impl CycleSource for PackedRows {
+    fn cycles(&self) -> usize {
+        self.0.len()
+    }
+    fn trace_words(&self) -> usize {
+        4
+    }
+    fn trace_word(&self, word: usize, cycle: usize) -> u64 {
+        self.0
+            .get(cycle)
+            .and_then(|row| row.get(word))
+            .copied()
+            .unwrap_or(0)
+    }
+    fn bytecode_rows(&self) -> usize {
+        1
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, _: usize) -> usize {
+        0
+    }
+    fn digit_columns(&self) -> usize {
+        0
+    }
+    fn bits(&self, _: usize) -> usize {
+        0
+    }
+    fn by_row(&self, _: usize) -> bool {
+        false
+    }
+    fn digit(&self, _: usize, _: usize) -> Option<usize> {
+        None
+    }
+    fn row_digit(&self, _: usize, _: usize) -> Option<usize> {
+        None
     }
 }
 
@@ -311,7 +390,7 @@ fn prove_and_verify(fixture: &Fixture, honest: bool) {
 
 #[test]
 fn reduction_three_legs_and_four_shared_legs_match_oracle_and_verify() {
-    for rounds in 3..=8 {
+    for rounds in 1..=8 {
         for shared in [false, true] {
             prove_and_verify(&Fixture::new(rounds, shared), true);
         }
@@ -530,20 +609,23 @@ fn flag_groups_validate_width_count_ranges_overlap_and_columns() {
 }
 
 #[test]
-fn reduction_round_allocations_are_bounded_at_both_sizes() {
+fn reduction_round_allocations_are_bounded_and_do_not_grow_with_chunks() {
+    // Keep workers alive across measurements so teardown cannot lower live bytes.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     pool.install(|| {
-        for rounds in [8, 14] {
+        let mut counts = [0; 2];
+        for rounds in [8, 13, 14, 17] {
             let fixture = Fixture::new(rounds, true);
-            let mut core =
-                ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
             let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
             let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * pool.current_num_threads();
-            let resident = CountingAllocator::live_bytes();
             let mut claim = fixture.claim();
             let challenges: Vec<_> = (0..rounds)
                 .map(|i| F128::from_raw(79 + i as u128))
                 .collect();
+            // Exclude only fixture-owned storage; the core releases its dense inputs.
+            let resident = CountingAllocator::live_bytes();
+            let mut core =
+                ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
             let measurement = AllocationMeasurement::begin();
             for round in 0..rounds {
                 let message = core
@@ -566,11 +648,25 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
                 "{} allocations for {rounds} rounds",
                 stats.allocs
             );
+            if rounds == 13 {
+                counts[0] = stats.allocs;
+            }
+            if rounds == 17 {
+                counts[1] = stats.allocs;
+            }
             assert!(stats.peak_bytes >= stats.final_bytes);
             assert!(stats.peak_bytes <= 64 * 1024 + runtime_bytes);
-            assert!(stats.final_bytes <= runtime_bytes);
-            assert!(CountingAllocator::live_bytes() < resident + runtime_bytes);
+            let final_values_bytes = std::mem::size_of_val(core.final_values().unwrap());
+            assert!((resident + final_values_bytes
+                ..=resident + final_values_bytes + runtime_bytes)
+                .contains(&CountingAllocator::live_bytes()));
+            drop(core);
+            assert!(
+                (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
+            );
         }
+        // Four extra rounds add fixed metadata; round-chunks grow from 14 to 74.
+        assert!(counts[1] <= counts[0] + 16 * (17 - 13) + RAYON_WORKER_ALLOWANCE.allocs);
     });
 }
 
@@ -616,24 +712,26 @@ impl CycleSource for OneBitDigit {
 
 #[test]
 fn eight_reduction_legs_match_the_definition() {
-    let mut fixture = Fixture::new(8, true);
-    for leg in 0..4 {
-        let point: Vec<_> = (0..8)
-            .map(|i| F128::from_raw(211 + 8 * leg as u128 + i as u128))
-            .collect();
-        let claim = fixture.tables[1]
-            .iter()
-            .enumerate()
-            .map(|(j, &g)| eq(&point, j) * g)
-            .sum();
-        fixture.legs.push(ReductionLeg {
-            table: 1,
-            point,
-            coefficient: F128::from_raw(73 + leg as u128),
-            claim,
-        });
+    for log_t in 1..=8 {
+        let mut fixture = Fixture::new(log_t, true);
+        for leg in 0..4 {
+            let point: Vec<_> = (0..log_t)
+                .map(|i| F128::from_raw(211 + 8 * leg as u128 + i as u128))
+                .collect();
+            let claim = fixture.tables[1]
+                .iter()
+                .enumerate()
+                .map(|(j, &g)| eq(&point, j) * g)
+                .sum();
+            fixture.legs.push(ReductionLeg {
+                table: 1,
+                point,
+                coefficient: F128::from_raw(73 + leg as u128),
+                claim,
+            });
+        }
+        prove_and_verify(&fixture, true);
     }
-    prove_and_verify(&fixture, true);
 }
 
 #[test]
@@ -713,10 +811,12 @@ fn two_chunk_tables_round_messages_and_final_values_match_the_definition_on_each
 }
 
 #[test]
-fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
+fn digit_builder_allocations_are_bounded_per_pass_and_only_outputs_remain() {
+    // Keep workers alive across measurements so teardown cannot lower live bytes.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     pool.install(|| {
-        for log_t in [8, 14] {
+        let mut counts = [0; 2];
+        for log_t in [8, 14, 16] {
             let source = Arc::new(
                 SyntheticTrace::new(
                     SynthProfile::Local,
@@ -744,6 +844,12 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
                 "{} allocations at log_t={log_t}",
                 stats.allocs
             );
+            if log_t == 14 {
+                counts[0] = stats.allocs;
+            }
+            if log_t == 16 {
+                counts[1] = stats.allocs;
+            }
             let output_bytes = tables.capacity() * std::mem::size_of::<Vec<F128>>()
                 + tables
                     .iter()
@@ -757,13 +863,15 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
                 (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
             );
         }
+        // Lookup/view counts are fixed while tiles grow from 64 to 256.
+        assert!(counts[1] <= counts[0] + RAYON_WORKER_ALLOWANCE.allocs);
     });
 }
 
 #[test]
-fn complete_small_cores_zero_coefficients_and_same_point_shared_legs_match_oracle() {
-    for log_t in [1, 2] {
-        for variant in 0..3 {
+fn reduction_zero_coefficients_and_same_point_shared_legs_match_oracle() {
+    for log_t in 1..=8 {
+        for variant in 1..3 {
             let mut fixture = Fixture::new(log_t, false);
             match variant {
                 1 => fixture.legs[1].coefficient = F128::from_raw(0),

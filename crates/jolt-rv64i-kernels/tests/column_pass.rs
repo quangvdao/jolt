@@ -14,7 +14,7 @@ use jolt_rv64i_kernels::oracle::mle_at;
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 #[test]
 fn all_columns_equal_the_defining_sum_at_seeded_and_boolean_points() {
@@ -90,54 +90,50 @@ fn malformed_cycle_point_length_is_rejected() {
     );
 }
 
+fn measured_column_allocations(pool: &ThreadPool, log_t: usize) -> usize {
+    let threads = pool.current_num_threads();
+    let trace = pool
+        .install(|| SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0xc011))
+        .unwrap();
+    let point = vec![F128::from_raw(0x713); log_t];
+    let _ = pool.install(|| column_pass(trace.rows(), &point).unwrap());
+    let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * threads;
+    let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * threads;
+    let baseline = CountingAllocator::live_bytes();
+    let measurement = AllocationMeasurement::begin();
+    let columns = pool.install(|| column_pass(trace.rows(), &point).unwrap());
+    let stats = measurement.finish();
+    assert_eq!(columns.len(), 256);
+    assert!(
+        stats.allocs <= 256 + runtime_allocs,
+        "{} allocations",
+        stats.allocs
+    );
+    let allowance = 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16;
+    assert!(
+        stats.peak_bytes <= allowance + runtime_bytes,
+        "{} peak bytes",
+        stats.peak_bytes
+    );
+    assert!(stats.final_bytes <= runtime_bytes);
+    assert!((baseline..=baseline + runtime_bytes).contains(&CountingAllocator::live_bytes()));
+    stats.allocs
+}
+
 #[test]
-fn scratch_is_bounded_and_released_on_return() {
-    for (threads, log_t) in [(1, 8), (1, 14), (12, 14)] {
-        ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_scoped(
-                |thread| thread.run(),
-                |pool| {
-                    // Warm each worker's work-stealing bookkeeping, including
-                    // workers that the four-chunk fixture may otherwise leave idle.
-                    let _ = pool.broadcast(|_| {
-                        rayon::join(
-                            || {
-                                let _ = rayon::yield_now();
-                            },
-                            || (),
-                        )
-                    });
-                    let trace = pool
-                        .install(|| SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0xc011))
-                        .unwrap();
-                    let point = vec![F128::from_raw(0x713); log_t];
-                    let _ = pool.install(|| column_pass(trace.rows(), &point).unwrap());
-                    // The worker invocation must return before checking release;
-                    // Rayon frees completed scheduling jobs after their bodies return.
-                    let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * threads;
-                    let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * threads;
-                    let baseline = CountingAllocator::live_bytes();
-                    let measurement = AllocationMeasurement::begin();
-                    let columns = pool.install(|| column_pass(trace.rows(), &point).unwrap());
-                    let stats = measurement.finish();
-                    assert_eq!(columns.len(), 256);
-                    assert!(
-                        stats.allocs <= 256 + runtime_allocs,
-                        "{} allocations",
-                        stats.allocs
-                    );
-                    let allowance = 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16;
-                    assert!(
-                        stats.peak_bytes <= allowance + runtime_bytes,
-                        "{} peak bytes",
-                        stats.peak_bytes
-                    );
-                    assert!(stats.final_bytes <= runtime_bytes);
-                    assert!((baseline..=baseline + runtime_bytes)
-                        .contains(&CountingAllocator::live_bytes()));
-                },
-            )
-            .unwrap();
-    }
+fn scratch_is_bounded_released_and_allocations_do_not_grow_with_chunks() {
+    // Keep workers alive across measurements so teardown cannot lower live bytes.
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let _ = measured_column_allocations(&pool, 8);
+    let small = measured_column_allocations(&pool, 14);
+    let large = measured_column_allocations(&pool, 16);
+    // Chunk counts grow fourfold, from four to sixteen; scratch allocations stay fixed.
+    assert!(large <= small + RAYON_WORKER_ALLOWANCE.allocs);
+}
+
+#[test]
+fn scratch_is_bounded_and_released_on_twelve_threads() {
+    // This pool lives through the measurement and no later case can see its teardown.
+    let pool = ThreadPoolBuilder::new().num_threads(12).build().unwrap();
+    let _ = measured_column_allocations(&pool, 14);
 }

@@ -7,13 +7,14 @@ use crate::round::{
     coefficients_from_nodes, linear_at_nodes, quadratic, quadratic_at_nodes, RoundError,
 };
 use crate::source::{CycleSource, DigitColumns};
-use jolt_field::{Accumulator, F128Accumulator, F128};
+use jolt_field::{Accumulator, F128Accumulator, Zero, F128};
 use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
 use jolt_poly::{GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::alloc::Layout;
+use std::ops::Add;
 use thiserror::Error;
 
 const ZERO: F128 = F128::from_raw(0);
@@ -140,7 +141,10 @@ pub fn combined_weight(
         }
     }
     let geometry = CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
-    let mut output = vec![ZERO; geometry.len()];
+    let mut output = unsafe_allocate_zero_vec(checked_len::<F128>(
+        Some(geometry.len()),
+        "combined weight",
+    )?);
     output
         .par_chunks_mut(geometry.chunk_len())
         .enumerate()
@@ -165,6 +169,31 @@ pub fn combined_weight(
     Ok(output)
 }
 
+// F128Accumulator consists of zero-valid field limbs; all-zero bytes are its
+// additive identity, as required by the zero-page allocator's contract.
+#[derive(Clone, Copy, Default)]
+#[repr(transparent)]
+struct ZeroAccumulator(F128Accumulator);
+
+impl Add for ZeroAccumulator {
+    type Output = Self;
+
+    fn add(mut self, rhs: Self) -> Self {
+        self.0.merge(rhs.0);
+        self
+    }
+}
+
+impl Zero for ZeroAccumulator {
+    fn zero() -> Self {
+        Self::default()
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0.reduce() == ZERO
+    }
+}
+
 struct EqTermState {
     eq: GruenSplitEqPolynomial<F128>,
     claim: F128,
@@ -178,7 +207,7 @@ enum WeightState {
     },
     Terms {
         terms: Vec<EqTermState>,
-        scratch: Vec<F128Accumulator>,
+        scratch: Vec<ZeroAccumulator>,
     },
 }
 
@@ -322,7 +351,10 @@ impl ChunkProductCore {
                 }
                 WeightState::Dense {
                     table,
-                    scratch: vec![ZERO; cycles / 2],
+                    scratch: unsafe_allocate_zero_vec(checked_len::<F128>(
+                        Some(cycles / 2),
+                        "dense weight scratch",
+                    )?),
                 }
             }
             ChunkWeight::EqTerms(input) => {
@@ -354,17 +386,14 @@ impl ChunkProductCore {
                 let scratch = if matches!(terms.len(), 0 | 1 | 2 | 5) {
                     Vec::new()
                 } else {
-                    vec![
-                        F128Accumulator::default();
-                        checked_len::<F128Accumulator>(
-                            geometry
-                                .len()
-                                .div_ceil(geometry.chunk_len())
-                                .checked_mul(terms.len())
-                                .and_then(|len| len.checked_mul(8)),
-                            "equality term scratch",
-                        )?
-                    ]
+                    unsafe_allocate_zero_vec(checked_len::<ZeroAccumulator>(
+                        geometry
+                            .len()
+                            .div_ceil(geometry.chunk_len())
+                            .checked_mul(terms.len())
+                            .and_then(|len| len.checked_mul(8)),
+                        "equality term scratch",
+                    )?)
                 };
                 WeightState::Terms { terms, scratch }
             }
@@ -507,7 +536,6 @@ impl ChunkProductCore {
                     .enumerate()
                     .for_each(|(chunk, output)| {
                         let mut q_values = [[ZERO; 8]; 128];
-                        output.fill(F128Accumulator::default());
                         let start = chunk * chunk_pairs;
                         let block_len = terms[0].eq.e_in_current_len();
                         // Equality's outer factor is constant on the block, so
@@ -549,7 +577,11 @@ impl ChunkProductCore {
                                         total[i].fmadd(inner[i].reduce(), outer);
                                     }
                                     for (partial, total) in partial.iter_mut().zip(total) {
-                                        partial.merge(total);
+                                        if block_start == start && tile_start == 0 {
+                                            *partial = ZeroAccumulator(total);
+                                        } else {
+                                            partial.0.merge(total);
+                                        }
                                     }
                                 }
                             }
@@ -562,7 +594,7 @@ impl ChunkProductCore {
                             for (sum, &partial) in
                                 sums.iter_mut().zip(&chunk[index * 8..index * 8 + 8])
                             {
-                                sum.merge(partial);
+                                sum.merge(partial.0);
                             }
                         }
                         sums.map(Accumulator::reduce)

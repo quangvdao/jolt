@@ -4,7 +4,11 @@
 //! wire rounds pad that canonical form to the batch degree. Decoding validates
 //! dimensions and available bytes before allocating any round or value vector.
 
-use crate::stages::{stage1, stage2, stage3a, stage3b, stage4, stage5, stage6a, stage6b};
+use crate::stages::{
+    stage1::Stage1Sumchecks, stage2::Stage2Sumchecks, stage3a::Stage3aSumchecks,
+    stage3b::Stage3bSumchecks, stage4::Stage4Sumchecks, stage5::Stage5Sumchecks,
+    stage6a::Stage6aSumchecks, stage6b::Stage6bSumchecks,
+};
 use crate::{
     commitment::{BitsCommitmentScheme, BitsGeometry, BitsWire},
     error::ProofDecodeError,
@@ -222,31 +226,29 @@ pub fn geometry(t: usize, b: usize, a: usize) -> Result<[BatchPrelude<F128>; 8],
     }
     let layout = Layout::new(b, a, 0).map_err(|_| ProofDecodeError::Dimensions)?;
     Ok([
-        stage1::Stage1Sumchecks::for_geometry(t, &layout)
+        Stage1Sumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage2::Stage2Sumchecks::geometry_for(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage3a::Stage3aSumchecks::geometry_for(t, &layout)
-            .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage3b::Stage3bSumchecks::for_geometry(t, &layout)
+        Stage2Sumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage3aSumchecks::geometry_for(t, &layout).map_err(|_| ProofDecodeError::Dimensions)?,
+        Stage3bSumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage4::Stage4Sumchecks::for_geometry(t, &layout)
+        Stage4Sumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage5::Stage5Sumchecks::for_geometry(t, &layout)
+        Stage5Sumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage6a::Stage6aSumchecks::for_geometry(t, &layout)
+        Stage6aSumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,
-        stage6b::Stage6bSumchecks::for_geometry(t, &layout)
+        Stage6bSumchecks::for_geometry(t, &layout)
             .map_err(|_| ProofDecodeError::Dimensions)?
             .geometry()
             .map_err(|_| ProofDecodeError::Dimensions)?,

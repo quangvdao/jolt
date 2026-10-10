@@ -17,7 +17,8 @@ use jolt_rv64i_verifier::error::Rv64iVerifierError;
 use jolt_rv64i_verifier::proof::{BatchProof, RouterCycleValues};
 use jolt_rv64i_verifier::stages::stage1::Output as Stage1Output;
 use jolt_rv64i_verifier::stages::stage3a::Output as Stage3aOutput;
-use jolt_rv64i_verifier::stages::stage3b::{self, Output};
+use jolt_rv64i_verifier::stages::stage3b;
+use jolt_rv64i_verifier::stages::stage3b::{verify::Inputs, Output};
 use jolt_rv64i_verifier::stages::stage3b::{
     RouterCycleBranch, RouterCycleCompare, RouterCycleMemory, RouterCycleShift, RouterCycleVariant,
     Stage3bChallenges, Stage3bInputClaims, Stage3bInputPoints, Stage3bOutputClaims,
@@ -70,7 +71,7 @@ pub fn prove<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     stage1: &Stage1Output,
     stage3a: &Stage3aOutput,
 ) -> Result<(BatchProof<RouterCycleValues>, Output), Rv64iProverError> {
-    let stage3b::verify::Inputs {
+    let Inputs {
         batch,
         claims: inputs,
         points,

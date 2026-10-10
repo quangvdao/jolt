@@ -11,6 +11,7 @@ use common::{
 use jolt_rv64i_arith::{CycleFacts, Layout};
 use jolt_rv64i_prover::{commitment::transparent::TransparentBits, plane::Rv64iWitness};
 use jolt_rv64i_verifier::{preprocessing::VerifierPreprocessing, statement::Statement};
+use self::replay::State;
 use std::sync::Arc;
 
 #[expect(
@@ -98,7 +99,7 @@ fn counting_loop_fixture() -> (
         .collect();
     let preprocessing = VerifierPreprocessing::new(bytecode.clone(), image.clone(), ()).unwrap();
     let initial_ram: Vec<_> = std::iter::once((0, 0x3412)).chain(image).collect();
-    let mut initial = replay::State::new(RAM_START_ADDRESS);
+    let mut initial = State::new(RAM_START_ADDRESS);
     for &(index, value) in &initial_ram {
         initial.set_ram_word(index, value);
     }

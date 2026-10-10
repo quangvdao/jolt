@@ -13,7 +13,8 @@ use jolt_rv64i_verifier::error::Rv64iVerifierError;
 use jolt_rv64i_verifier::proof::{BatchProof, InnerValues};
 use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::Output as Stage1Output;
-use jolt_rv64i_verifier::stages::stage2::{self, Output};
+use jolt_rv64i_verifier::stages::stage2;
+use jolt_rv64i_verifier::stages::stage2::{verify::Inputs, Output};
 use jolt_rv64i_verifier::stages::stage2::{
     SpartanInner, Stage2Challenges, Stage2InputClaims, Stage2InputPoints, Stage2OutputClaims,
     Stage2OutputPoints, Stage2Sumchecks as VerifierStage2Sumchecks,
@@ -55,7 +56,7 @@ pub fn prove<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     transcript: &mut T,
     stage1: &Stage1Output,
 ) -> Result<(BatchProof<InnerValues>, Output), Rv64iProverError> {
-    let stage2::verify::Inputs {
+    let Inputs {
         batch,
         claims: inputs,
         points,

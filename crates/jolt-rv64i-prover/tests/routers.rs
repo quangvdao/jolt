@@ -1,6 +1,10 @@
 //! Independent machine and cube oracles for the two binary-field RV64I router batches.
 #![expect(clippy::unwrap_used, reason = "invalid test fixtures fail the test")]
 
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 
 use blake2::{digest::consts::U32, Blake2b, Digest};
@@ -29,6 +33,8 @@ use jolt_rv64i_verifier::ids::Router;
 use jolt_rv64i_verifier::points::{eq_index, to_high_to_low};
 use jolt_rv64i_verifier::proof::BatchProof;
 use jolt_rv64i_verifier::public::routes::{RouteTensors, ROUTERS};
+use jolt_rv64i_verifier::stages::stage3a::verify::Inputs as ShortInputs;
+use jolt_rv64i_verifier::stages::stage3b::verify::Inputs as CycleInputs;
 use jolt_rv64i_verifier::stages::stage3b::verify::{
     expand as expand_cycle, values as cycle_values,
 };
@@ -549,7 +555,7 @@ fn prove_router_batches(
         let output = stage3a::verify::verify_converted(
             &wire,
             &mut stage_transcript,
-            stage3a::verify::Inputs {
+            ShortInputs {
                 batch: VerifierStage3a::new(w.clone(), r1.clone(), Arc::clone(&routes)).unwrap(),
                 claims: inputs.clone(),
                 points: input_points.clone(),
@@ -679,7 +685,7 @@ fn prove_router_batches(
         let output = stage3b::verify::verify_converted(
             &wire,
             &mut stage_transcript,
-            stage3b::verify::Inputs {
+            CycleInputs {
                 batch: VerifierStage3b::new(&witness.layout, r1.clone(), x.clone()).unwrap(),
                 claims: inputs.clone(),
                 points: input_points.clone(),

@@ -4,6 +4,7 @@
     reason = "invalid fixtures fail the enclosing test"
 )]
 
+#[expect(dead_code, reason = "shared machine helpers serve the complete protocol corpus")]
 mod support;
 
 use common::{
@@ -20,6 +21,7 @@ use jolt_rv64i_prover::{
 };
 use jolt_rv64i_verifier::{preprocessing::VerifierPreprocessing, statement::CheckedInputs};
 use std::sync::Arc;
+use support::replay::State;
 
 #[test]
 fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
@@ -32,10 +34,10 @@ fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
         witness.initial_ram.clone(),
     )
     .unwrap();
-    let initial = support::replay::State {
+    let initial = State {
         pc: RAM_START_ADDRESS,
         ram: witness.initial_ram.iter().copied().collect(),
-        ..support::replay::State::default()
+        ..State::default()
     };
     let replay = support::replay::replay(
         &rebuilt.layout,
@@ -184,7 +186,7 @@ fn load_facts_reject_ram_pre_values_and_register_reads_before_row_generation() {
         (RAM_START_ADDRESS + 12, support::asm::jal(0, 0)),
     ];
     let bytecode = Arc::new(support::harness::bytecode(&program, &layout));
-    let mut initial = support::replay::State::new(RAM_START_ADDRESS);
+    let mut initial = State::new(RAM_START_ADDRESS);
     initial.set_ram_word(0, 0x3412);
     let mut machine = support::harness::machine(&program, &layout, &initial);
     let facts: Vec<_> = (0..4)

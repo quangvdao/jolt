@@ -2,6 +2,7 @@
 //! low-bit-first rows and a power-of-two cycle domain. Lane bits stay packed
 //! until all six position variables have been bound.
 
+mod geometry;
 mod monomial;
 mod window;
 
@@ -11,6 +12,7 @@ use crate::par::{CycleChunks, ParError};
 use crate::round::eq::{eq_table, split_eq};
 use crate::round::{coefficients_from_nodes, RoundError};
 use crate::source::LaneSource;
+use geometry::{MonomialGeometry, WindowGeometry};
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_poly::{gruen_mul_linear, gruen_recover_endpoint, GruenSplitEqPolynomial, UnivariatePoly};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
@@ -191,34 +193,30 @@ impl<S: LaneSource> OuterF2Core<S> {
     fn position<const AT_ONE: bool>(&mut self, k: usize) -> Result<Sums, OuterError> {
         let rho = eq_table(&self.tau[k + 1..6], None);
         let sums = if k < self.options.monomial_rounds {
-            let form = Monomial::new(
-                &self.point,
-                &rho,
-                &self.omega,
-                k >= 2 || k == 1 && self.options.nibble_round_2,
-            )?;
+            let form = Monomial::new(&self.point, &rho, &self.omega, self.options.nibble_round_2)?;
             let pool = (k == 0 && !AT_ONE)
                 .then(|| ScratchPool::new(64))
                 .transpose()?;
             macro_rules! pass {
-                ($k:literal, $n:literal, $tables:literal, $count:literal, $squared:literal) => {
-                    form.pass::<$k, AT_ONE, $n, $tables, $count, $squared, S>(
+                ($k:literal, $nibble:literal) => {{
+                    const GEOMETRY: MonomialGeometry = MonomialGeometry::new($k, $nibble);
+                    form.pass::<$k, $nibble, AT_ONE, { GEOMETRY.n }, { GEOMETRY.tables }, { GEOMETRY.count }, { GEOMETRY.squared }, S>(
                         &*self.source,
                         self.chunks,
                         &self.lo,
                         &self.hi,
                         pool.as_ref(),
                     )?
-                };
+                }};
             }
             let sums = match k {
-                0 => pass!(0, 256, 4, 1, 0),
-                1 if self.options.nibble_round_2 => pass!(1, 16, 4, 3, 1),
-                1 => pass!(1, 256, 2, 3, 1),
-                2 => pass!(2, 16, 2, 9, 5),
-                3 => pass!(3, 16, 1, 27, 19),
-                4 => pass!(4, 4, 1, 81, 65),
-                _ => pass!(5, 2, 1, 243, 211),
+                0 => pass!(0, false),
+                1 if self.options.nibble_round_2 => pass!(1, true),
+                1 => pass!(1, false),
+                2 => pass!(2, false),
+                3 => pass!(3, false),
+                4 => pass!(4, false),
+                _ => pass!(5, false),
             };
             if let Some(pool) = pool {
                 self.histogram.copy_from_slice(&pool.merge()?);
@@ -226,21 +224,22 @@ impl<S: LaneSource> OuterF2Core<S> {
             sums
         } else {
             macro_rules! window {
-                ($n:literal, $a:literal, $c:literal, $units:literal) => {
-                    Window::<$n, $a, $c>::new(
+                ($k:literal) => {{
+                    const GEOMETRY: WindowGeometry = WindowGeometry::new($k);
+                    Window::<$k, { GEOMETRY.n }, { GEOMETRY.a }, { GEOMETRY.c }, { GEOMETRY.units }>::new(
                         &self.point,
                         &rho,
                         &self.omega,
                         self.options.folded_group_weights,
                     )?
-                    .pass::<$units, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi)
-                };
+                    .pass::<AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi)
+                }};
             }
             match k {
-                2 => window!(16, 16, 8, 1),
-                3 => window!(256, 8, 4, 1),
-                4 => window!(256, 8, 4, 2),
-                _ => window!(256, 8, 4, 4),
+                2 => window!(2),
+                3 => window!(3),
+                4 => window!(4),
+                _ => window!(5),
             }
         };
         let tail = self.tail_position(k, AT_ONE);

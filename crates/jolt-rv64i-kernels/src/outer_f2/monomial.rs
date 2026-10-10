@@ -1,3 +1,4 @@
+use super::geometry::MonomialGeometry;
 use super::{merge, OuterError, Sums, ONE, ZERO};
 use crate::packed::bits::{gather, moebius};
 use crate::packed::lift::{CompactLift, CompactView, LiftError};
@@ -127,12 +128,19 @@ impl Monomial {
         nibble: bool,
     ) -> Result<Self, OuterError> {
         let k = point.len();
-        let count = 3_usize.pow(k as u32);
-        let bits = if nibble { 4 } else { 8 }.min(rho.len());
-        let table_size = (1 << bits) * rho.len().div_ceil(bits);
-        let mut tables = Vec::with_capacity(2 * (2 * count - (1 << k)) * table_size);
+        if k > 5 {
+            return Err(LiftError::Layout.into());
+        }
+        let geometry = MonomialGeometry::new(k, nibble);
+        if rho.len() != geometry.weights || omega.len() < 2 {
+            return Err(LiftError::Layout.into());
+        }
+        let count = geometry.count;
+        let bits = geometry.bits;
+        let table_size = geometry.n * geometry.tables;
+        let mut tables = Vec::with_capacity(2 * (count + geometry.squared) * table_size);
         let mut x = Vec::with_capacity(count);
-        let mut squared = Vec::with_capacity(count - (1 << k));
+        let mut squared = Vec::with_capacity(geometry.squared);
         for exponent in 0..count {
             let description = Exponent::new(k, exponent);
             let mut scalar = ONE;
@@ -260,6 +268,7 @@ impl Monomial {
 
     pub(super) fn pass<
         const K: usize,
+        const NIBBLE_ROUND_2: bool,
         const AT_ONE: bool,
         const N: usize,
         const TABLES: usize,
@@ -274,6 +283,13 @@ impl Monomial {
         hi: &[F128],
         histogram: Option<&ScratchPool>,
     ) -> Result<Sums, OuterError> {
+        const {
+            let geometry = MonomialGeometry::new(K, NIBBLE_ROUND_2);
+            assert!(N == geometry.n);
+            assert!(TABLES == geometry.tables);
+            assert!(COUNT == geometry.count);
+            assert!(SQUARED == geometry.squared);
+        };
         let convert = |lifts: &[[CompactLift; 2]]| {
             lifts
                 .iter()

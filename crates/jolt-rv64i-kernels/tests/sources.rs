@@ -467,9 +467,9 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     source.columns = usize::MAX;
     assert!(matches!(
         ValidatedTrace::new(Arc::new(source)),
-        Err(SourceError::ValidationScratchSize {
-            len: usize::MAX,
-            ..
+        Err(SourceError::ColumnCapacity {
+            columns: usize::MAX,
+            max_columns: 128,
         })
     ));
 
@@ -477,8 +477,8 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     let mut source = SourceFixture::new();
     source.columns = columns;
     assert!(matches!(ValidatedTrace::new(Arc::new(source)),
-        Err(SourceError::ValidationScratchSize { len, element_size, .. })
-        if len == columns && element_size > size_of::<usize>()));
+        Err(SourceError::ColumnCapacity { columns: actual, max_columns: 128 })
+        if actual == columns));
 
     let rows = 1_usize << (usize::BITS - 1);
     let mut source = SourceFixture::new();

@@ -479,16 +479,16 @@ impl<S: CycleSource> ValidatedTrace<S> {
             return Err(SourceError::BytecodeRows { rows });
         }
         let columns = source.digit_columns();
-        check_validation_size::<usize>(columns, "digit widths")?;
-        check_validation_size::<RowColumn>(columns, "row digit cache columns")?;
-        let mut widths = Vec::with_capacity(columns);
-        let mut row_columns = Vec::new();
         if columns > MAX_COLUMNS {
             return Err(SourceError::ColumnCapacity {
                 columns,
                 max_columns: MAX_COLUMNS,
             });
         }
+        check_validation_size::<usize>(columns, "digit widths")?;
+        check_validation_size::<RowColumn>(columns, "row digit cache columns")?;
+        let mut widths = Vec::with_capacity(columns);
+        let mut row_columns = Vec::new();
         let mut bounds = Vec::with_capacity(columns);
         for column in 0..columns {
             let bits = source.bits(column);

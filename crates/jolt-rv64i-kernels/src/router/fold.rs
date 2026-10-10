@@ -934,3 +934,22 @@ fn word_total(buckets: &[F128], base: usize, bytes: bool) -> F128 {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{storage_add, RouterError};
+
+    #[test]
+    fn bucket_and_histogram_storage_reject_unrepresentable_bytes() {
+        let error = RouterError::Dimension {
+            variables: usize::BITS as usize,
+        };
+        let mut elements = usize::MAX;
+        assert_eq!(storage_add(&mut elements, 1), Err(error.clone()));
+        let mut elements = 0;
+        assert_eq!(
+            storage_add(&mut elements, 1 << (usize::BITS - 4)),
+            Err(error)
+        );
+    }
+}

@@ -1,4 +1,4 @@
-mod support;
+pub mod support;
 
 use jolt_field::F128;
 use jolt_rv64i_kernels::source::CycleSource;

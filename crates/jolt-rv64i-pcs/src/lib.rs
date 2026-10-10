@@ -10,4 +10,6 @@
 )]
 mod arch;
 #[forbid(unsafe_code)]
+pub mod bridge;
+#[forbid(unsafe_code)]
 pub mod merkle;

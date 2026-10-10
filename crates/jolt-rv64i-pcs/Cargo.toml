@@ -23,5 +23,9 @@ rayon.workspace = true
 jolt-rv64i-verifier = { workspace = true, features = ["test-utils"] }
 
 [[bench]]
+name = "bridge"
+harness = false
+
+[[bench]]
 name = "merkle"
 harness = false

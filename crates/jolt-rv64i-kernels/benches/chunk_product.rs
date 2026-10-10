@@ -11,7 +11,7 @@ use jolt_field::{Accumulator, F128Accumulator, Field, F128};
 use jolt_kernels::optimized::lazy_ra::{LazyFoldedRa, LazyRaError};
 use jolt_poly::UnivariatePoly;
 use jolt_rv64i_kernels::chunk_product::{
-    combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight,
+    combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
 use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use jolt_rv64i_kernels::round::eq::eq_table;
@@ -127,7 +127,7 @@ fn digit_points() -> Vec<Vec<F128>> {
         .collect()
 }
 
-fn terms(log_t: usize, variant: Variant) -> Vec<ChunkWeight> {
+fn terms(log_t: usize, variant: Variant) -> Vec<ChunkWeightTerm> {
     let count = match variant {
         Variant::Dense => 5,
         Variant::EqTerms => 2,
@@ -145,9 +145,9 @@ fn terms(log_t: usize, variant: Variant) -> Vec<ChunkWeight> {
                 })
                 .collect();
             if term == 3 {
-                ChunkWeight::Next { coefficient, point }
+                ChunkWeightTerm::Next { coefficient, point }
             } else {
-                ChunkWeight::Eq { coefficient, point }
+                ChunkWeightTerm::Eq { coefficient, point }
             }
         })
         .collect()
@@ -246,12 +246,16 @@ impl TimedCore {
             let mut eq_terms = Vec::with_capacity(2);
             let mut halves = Vec::with_capacity(2);
             for term in terms {
-                if let ChunkWeight::Eq { coefficient, point } = term {
+                if let ChunkWeightTerm::Eq { coefficient, point } = term {
                     if source_setup {
                         let (low, high) = geometry.split_point(&point)?;
                         halves.push((eq_table(low, None), eq_table(high, Some(coefficient))));
                     }
-                    eq_terms.push((coefficient, point, F128::from_raw(0)));
+                    eq_terms.push(EqTerm {
+                        coefficient,
+                        point,
+                        claim: F128::from_raw(0),
+                    });
                 }
             }
             let sums = if let Some(claims) = &cached_claims {
@@ -297,7 +301,7 @@ impl TimedCore {
                     .map(Accumulator::reduce)
             };
             for (term, sum) in eq_terms.iter_mut().zip(sums) {
-                term.2 = sum;
+                term.claim = sum;
             }
             let claim = sums[0] + sums[1];
             (ChunkWeight::EqTerms(eq_terms), claim, sums.to_vec())
@@ -345,7 +349,11 @@ fn nine_term_allocation_core(
             .collect();
         let (low, high) = geometry.split_point(&point)?;
         halves.push((eq_table(low, None), eq_table(high, Some(coefficient))));
-        terms.push((coefficient, point, F128::from_raw(0)));
+        terms.push(EqTerm {
+            coefficient,
+            point,
+            claim: F128::from_raw(0),
+        });
     }
     let sums = halves[0]
         .1
@@ -380,7 +388,7 @@ fn nine_term_allocation_core(
         )
         .map(Accumulator::reduce);
     for (term, claim) in terms.iter_mut().zip(sums) {
-        term.2 = claim;
+        term.claim = claim;
     }
     let claim = sums
         .iter()

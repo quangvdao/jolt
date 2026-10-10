@@ -19,23 +19,38 @@ use thiserror::Error;
 const ZERO: F128 = F128::from_raw(0);
 const ONE: F128 = F128::from_raw(1);
 
-/// A dense cycle table or table-free equality terms, and the terms accepted by
-/// [`combined_weight`]. `EqTerms` claims include their coefficients: each is
-/// `sum_j coefficient * eq(point,j) * product_c Ra_c[j]`.
-/// Their correctness is required of the caller, not checked, and detected by
-/// the verifier at its final evaluation check. An empty list denotes zero.
+/// An equality term or a non-wrapping successor term for [`combined_weight`].
+/// Points list the low cycle variable first and have exactly `log_t` entries.
+#[derive(Clone, Debug)]
+pub enum ChunkWeightTerm {
+    /// `coefficient * eq(point, j)`.
+    Eq { coefficient: F128, point: Vec<F128> },
+    /// `coefficient * eq(point, j - 1)` for `j > 0`, zero at cycle zero.
+    Next { coefficient: F128, point: Vec<F128> },
+}
+
+/// A table-free equality term with its coefficient-inclusive input claim.
+/// `claim` is `sum_j coefficient * eq(point,j) * product_c Ra_c[j]`.
+/// Honest claims are required of the caller, not checked, and detected by
+/// the verifier at its final evaluation check. `point` is low-variable-first.
+#[derive(Clone, Debug)]
+pub struct EqTerm {
+    /// The coefficient multiplying the cycle equality.
+    pub coefficient: F128,
+    /// The cycle point, with exactly `log_t` low-first coordinates.
+    pub point: Vec<F128>,
+    /// The sum under this term's weight, including `coefficient`.
+    pub claim: F128,
+}
+
+/// A dense cycle table or table-free equality terms for a chunk-product core.
 #[derive(Clone, Debug)]
 pub enum ChunkWeight {
     /// Exactly one field element per cycle.
     Dense(Vec<F128>),
-    /// `(coefficient, low-variable-first cycle point, weighted claim)`.
-    /// Honest weighted claims are required of the caller, not checked, and
-    /// detected by the verifier at its final evaluation check.
-    EqTerms(Vec<(F128, Vec<F128>, F128)>),
-    /// An equality term for `combined_weight`, not a core weight.
-    Eq { coefficient: F128, point: Vec<F128> },
-    /// Equality at `j-1` for `j>0`, zero at cycle zero; for `combined_weight`.
-    Next { coefficient: F128, point: Vec<F128> },
+    /// An empty list denotes zero. Honest term claims are required of the
+    /// caller, not checked, and detected by the verifier at its final check.
+    EqTerms(Vec<EqTerm>),
 }
 
 /// Malformed chunk geometry, weight terms or incomplete final evaluation.
@@ -65,8 +80,6 @@ pub enum ChunkProductError {
     },
     #[error("column {column} has no digit at cycle {cycle}")]
     MissingDigit { column: usize, cycle: usize },
-    #[error("term {term} has an unsupported weight kind")]
-    TermKind { term: usize },
     #[error("cycle exponent {log_t} cannot size a field table")]
     LogSize { log_t: usize },
     #[error(transparent)]
@@ -84,13 +97,13 @@ struct HalfTerm {
 }
 
 /// Builds `W[j] = sum_i coefficient_i * E_i(j)` with `Eq` and `Next` terms.
-/// Rejects other variants and points of a length different from `log_t`.
+/// Rejects points of a length different from `log_t`.
 /// Boolean points contribute at one index; other terms use two half tables,
 /// unreduced products, and one reduction per cycle. Source-independent and
 /// valid for an empty term list or a zero-dimensional cycle domain.
 pub fn combined_weight(
     log_t: usize,
-    terms: &[ChunkWeight],
+    terms: &[ChunkWeightTerm],
 ) -> Result<Vec<F128>, ChunkProductError> {
     if log_t >= usize::BITS as usize - 5 {
         return Err(ChunkProductError::LogSize { log_t });
@@ -101,11 +114,8 @@ pub fn combined_weight(
     let mut singletons = Vec::new();
     for (term, weight) in terms.iter().enumerate() {
         let (coefficient, point, next) = match weight {
-            ChunkWeight::Eq { coefficient, point } => (*coefficient, point, false),
-            ChunkWeight::Next { coefficient, point } => (*coefficient, point, true),
-            ChunkWeight::Dense(_) | ChunkWeight::EqTerms(_) => {
-                return Err(ChunkProductError::TermKind { term })
-            }
+            ChunkWeightTerm::Eq { coefficient, point } => (*coefficient, point, false),
+            ChunkWeightTerm::Next { coefficient, point } => (*coefficient, point, true),
         };
         if point.len() != log_t {
             return Err(ChunkProductError::TermPoint {
@@ -155,7 +165,7 @@ pub fn combined_weight(
     Ok(output)
 }
 
-struct EqTerm {
+struct EqTermState {
     eq: GruenSplitEqPolynomial<F128>,
     claim: F128,
     message: Option<UnivariatePoly<F128>>,
@@ -167,7 +177,7 @@ enum WeightState {
         scratch: Vec<F128>,
     },
     Terms {
-        terms: Vec<EqTerm>,
+        terms: Vec<EqTermState>,
         scratch: Vec<F128Accumulator>,
     },
 }
@@ -265,8 +275,8 @@ pub struct ChunkProductCore {
 
 impl ChunkProductCore {
     /// Validates column/point counts, point dimensions, weight lengths and term
-    /// dimensions before constructing the lazy family. `Eq` and `Next` are
-    /// construction terms and are rejected here; first call `combined_weight`.
+    /// dimensions before constructing the lazy family. Use `combined_weight`
+    /// to build a dense weight from equality and successor terms.
     pub fn new<S: CycleSource>(
         columns: DigitColumns<S>,
         points: Vec<Vec<F128>>,
@@ -317,7 +327,15 @@ impl ChunkProductCore {
             }
             ChunkWeight::EqTerms(input) => {
                 let mut terms = Vec::with_capacity(input.len());
-                for (term, (coefficient, point, claim)) in input.into_iter().enumerate() {
+                for (
+                    term,
+                    EqTerm {
+                        coefficient,
+                        point,
+                        claim,
+                    },
+                ) in input.into_iter().enumerate()
+                {
                     if point.len() != log_t {
                         return Err(ChunkProductError::TermPoint {
                             term,
@@ -325,7 +343,7 @@ impl ChunkProductCore {
                             actual: point.len(),
                         });
                     }
-                    terms.push(EqTerm {
+                    terms.push(EqTermState {
                         eq: split_eq(&point, Some(coefficient))?,
                         claim,
                         message: None,
@@ -349,9 +367,6 @@ impl ChunkProductCore {
                     ]
                 };
                 WeightState::Terms { terms, scratch }
-            }
-            ChunkWeight::Eq { .. } | ChunkWeight::Next { .. } => {
-                return Err(ChunkProductError::TermKind { term: 0 })
             }
         };
         let geometry =
@@ -612,7 +627,7 @@ impl ChunkProductCore {
 
 fn stack_term_sums<const D: usize, const N: usize, const M: usize>(
     columns: &LazyFoldedRa<F128, PresentDigits>,
-    terms: &[EqTerm],
+    terms: &[EqTermState],
     geometry: CycleChunks,
 ) -> Vec<[F128; 8]> {
     let block_len = terms[0].eq.e_in_current_len();

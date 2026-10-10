@@ -8,7 +8,7 @@
 use jolt_field::{Field, F128};
 use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::chunk_product::{
-    combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight,
+    combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::round::RoundError;
@@ -113,7 +113,7 @@ fn random_point(length: usize, rng: &mut ChaCha20Rng) -> Vec<F128> {
     (0..length).map(|_| F128::random(rng)).collect()
 }
 
-fn terms(log_t: usize, count: usize, next: bool, rng: &mut ChaCha20Rng) -> Vec<ChunkWeight> {
+fn terms(log_t: usize, count: usize, next: bool, rng: &mut ChaCha20Rng) -> Vec<ChunkWeightTerm> {
     (0..count)
         .map(|term| {
             let coefficient = F128::random(rng);
@@ -125,25 +125,26 @@ fn terms(log_t: usize, count: usize, next: bool, rng: &mut ChaCha20Rng) -> Vec<C
                 random_point(log_t, rng)
             };
             if next && term + 1 == count {
-                ChunkWeight::Next { coefficient, point }
+                ChunkWeightTerm::Next { coefficient, point }
             } else {
-                ChunkWeight::Eq { coefficient, point }
+                ChunkWeightTerm::Eq { coefficient, point }
             }
         })
         .collect()
 }
 
-fn defining_weight(log_t: usize, terms: &[ChunkWeight]) -> Vec<F128> {
+fn defining_weight(log_t: usize, terms: &[ChunkWeightTerm]) -> Vec<F128> {
     (0..1 << log_t)
         .map(|cycle| {
             terms
                 .iter()
                 .map(|term| match term {
-                    ChunkWeight::Eq { coefficient, point } => *coefficient * equality(point, cycle),
-                    ChunkWeight::Next { coefficient, point } => cycle
+                    ChunkWeightTerm::Eq { coefficient, point } => {
+                        *coefficient * equality(point, cycle)
+                    }
+                    ChunkWeightTerm::Next { coefficient, point } => cycle
                         .checked_sub(1)
                         .map_or(ZERO, |previous| *coefficient * equality(point, previous)),
-                    ChunkWeight::Dense(_) | ChunkWeight::EqTerms(_) => unreachable!(),
                 })
                 .sum()
         })
@@ -190,7 +191,7 @@ impl Fixture {
     fn prove(
         columns: DigitColumns<UniformColumns>,
         points: Vec<Vec<F128>>,
-        terms: &[ChunkWeight],
+        terms: &[ChunkWeightTerm],
         eq_terms: bool,
         change_claim: bool,
     ) -> Result<Self, SumcheckError<F128>> {
@@ -212,7 +213,7 @@ impl Fixture {
             let mut weighted_terms = terms
                 .iter()
                 .map(|term| {
-                    let ChunkWeight::Eq { coefficient, point } = term else {
+                    let ChunkWeightTerm::Eq { coefficient, point } = term else {
                         unreachable!()
                     };
                     let claim = (0..columns.cycles())
@@ -222,11 +223,15 @@ impl Fixture {
                                 * leaves[1..].iter().map(|leaf| leaf[cycle]).product::<F128>()
                         })
                         .sum();
-                    (*coefficient, point.clone(), claim)
+                    EqTerm {
+                        coefficient: *coefficient,
+                        point: point.clone(),
+                        claim,
+                    }
                 })
                 .collect::<Vec<_>>();
             if change_claim {
-                weighted_terms[0].2 += ONE;
+                weighted_terms[0].claim += ONE;
                 input_claim += ONE;
             }
             ChunkWeight::EqTerms(weighted_terms)
@@ -375,7 +380,7 @@ fn combined_weight_equals_defining_sum_and_next_starts_at_zero() {
                 );
             }
         }
-        let term = ChunkWeight::Next {
+        let term = ChunkWeightTerm::Next {
             coefficient: F128::random(&mut rng),
             point: random_point(log_t, &mut rng),
         };
@@ -457,7 +462,7 @@ fn changed_eq_term_claim_is_rejected_for_every_column_count() {
             let source = columns(8, d, 4, false);
             let points = (0..d).map(|_| random_point(4, &mut rng)).collect();
             let terms = (0..count)
-                .map(|_| ChunkWeight::Eq {
+                .map(|_| ChunkWeightTerm::Eq {
                     coefficient: F128::random(&mut rng),
                     point: random_point(8, &mut rng),
                 })
@@ -532,7 +537,7 @@ fn term_point_rejects_extra_coordinate_in_builder_and_core() {
     assert!(matches!(
         combined_weight(
             3,
-            &[ChunkWeight::Eq {
+            &[ChunkWeightTerm::Eq {
                 coefficient: ONE,
                 point: vec![ONE; 4]
             }]
@@ -547,7 +552,11 @@ fn term_point_rejects_extra_coordinate_in_builder_and_core() {
         ChunkProductCore::new(
             columns(3, 1, 4, false),
             vec![vec![ONE; 4]],
-            ChunkWeight::EqTerms(vec![(ONE, vec![ONE; 4], ZERO)])
+            ChunkWeight::EqTerms(vec![EqTerm {
+                coefficient: ONE,
+                point: vec![ONE; 4],
+                claim: ZERO
+            }])
         ),
         Err(ChunkProductError::TermPoint {
             term: 0,
@@ -569,25 +578,6 @@ fn missing_digit_is_rejected_with_column_and_cycle() {
             column: 0,
             cycle: 3
         })
-    ));
-}
-
-#[test]
-fn term_kind_rejects_a_table_in_builder_and_a_term_in_core() {
-    assert!(matches!(
-        combined_weight(3, &[ChunkWeight::Dense(vec![ONE; 8])]),
-        Err(ChunkProductError::TermKind { term: 0 })
-    ));
-    assert!(matches!(
-        ChunkProductCore::new(
-            columns(3, 1, 4, false),
-            vec![vec![ONE; 4]],
-            ChunkWeight::Eq {
-                coefficient: ONE,
-                point: vec![ONE; 3]
-            }
-        ),
-        Err(ChunkProductError::TermKind { term: 0 })
     ));
 }
 
@@ -640,7 +630,11 @@ fn round_wrapper_reports_empty_eq_point() {
         ChunkProductCore::new(
             selected,
             vec![vec![ONE; 4]],
-            ChunkWeight::EqTerms(vec![(ONE, vec![], ZERO)])
+            ChunkWeight::EqTerms(vec![EqTerm {
+                coefficient: ONE,
+                point: vec![],
+                claim: ZERO
+            }])
         ),
         Err(ChunkProductError::Round(RoundError::EmptyPoint))
     ));

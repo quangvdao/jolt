@@ -10,6 +10,7 @@
 pub mod allocator;
 pub mod arithmetic;
 pub mod example;
+pub mod gather;
 pub mod word;
 
 use std::error::Error as StdError;

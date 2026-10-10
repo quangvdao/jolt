@@ -1,17 +1,17 @@
 //! Complete source-selector folds; routing support is deliberately absent from this pass.
 
 use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
-mod compiled;
+mod readout;
 use crate::packed::buckets::{ByteBuckets, DigitHistogram, NibbleBuckets};
 use crate::packed::pool::ScratchPool;
 use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::{CycleSource, ValidatedTrace};
-use compiled::{BankStorage, CompiledShape, ReadBit};
 use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
+use readout::{BankStorage, ReadBit, ReadoutShape};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "test-utils")]
@@ -45,7 +45,7 @@ pub struct FoldLayout {
     shapes: Vec<ShapeLayout>,
     entries: usize,
     row_entries: usize,
-    compiled: Vec<CompiledShape>,
+    readout_shapes: Vec<ReadoutShape>,
 }
 
 const fn word_entries(bytes: bool) -> usize {
@@ -217,13 +217,13 @@ impl FoldLayout {
                 variables: usize::BITS as usize,
             });
         }
-        let compiled = shapes
+        let readout_shapes = shapes
             .iter()
             .zip(&layouts)
-            .map(|(shape, layout)| CompiledShape::new(shape, layout, source.as_ref()))
+            .map(|(shape, layout)| ReadoutShape::new(shape, layout, source.as_ref()))
             .collect();
         Ok(Self {
-            compiled,
+            readout_shapes,
             shapes: layouts,
             entries: entries.max(row_entries),
             row_entries,
@@ -272,10 +272,10 @@ impl FoldLayout {
             shape.check_source(source.as_ref())?;
         }
         if self
-            .compiled
+            .readout_shapes
             .iter()
             .zip(shapes)
-            .all(|(compiled, shape)| compiled.matches(shape, source.as_ref()))
+            .all(|(geometry, shape)| geometry.matches(shape, source.as_ref()))
         {
             return Ok(());
         }
@@ -390,7 +390,7 @@ enum HistogramPlan {
 /// `ra_fold` and the requested digit histograms. The cycle pass emits each
 /// equality weight through the caller's scatter plan, without recomputing it.
 /// `layout` must be made by `FoldLayout::new` for these shapes and this source;
-/// this is checked against its compiled identity. The plan must refer to the
+/// this is checked against its read-out identity. The plan must refer to the
 /// same immutable source: required of the caller, not checked, detected by the
 /// verifier through the resulting claims. `route` is never read.
 pub fn fold_pass<S: CycleSource>(
@@ -817,14 +817,14 @@ enum FoldStorage<'a> {
 
 #[expect(
     clippy::expect_used,
-    reason = "compiled metadata has checked power-of-two domains and valid bit indices"
+    reason = "checked metadata has checked power-of-two domains and valid bit indices"
 )]
 fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>]) {
     let (buckets, rows) = match storage {
         FoldStorage::Cycles(buckets) => (buckets, false),
         FoldStorage::Rows(buckets) => (buckets, true),
     };
-    for ((sl, compiled), fold) in layout.shapes.iter().zip(&layout.compiled).zip(folds) {
+    for ((sl, geometry), fold) in layout.shapes.iter().zip(&layout.readout_shapes).zip(folds) {
         if rows && sl.row_words.is_empty() {
             continue;
         }
@@ -841,8 +841,8 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                 ZERO
             };
             let metadata = sl.metadata + h * sl.meta_len;
-            for (word, bank) in compiled.bank_storage.iter().enumerate() {
-                let destination = compiled.destinations[h * compiled.bank_storage.len() + word];
+            for (word, bank) in geometry.bank_storage.iter().enumerate() {
+                let destination = geometry.destinations[h * geometry.bank_storage.len() + word];
                 match bank {
                     BankStorage::Cycle(index) if !rows => read_word(
                         buckets,
@@ -875,7 +875,7 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                                     bound.ilog2() as usize,
                                     bit,
                                 )
-                                .expect("compiled bit domain"),
+                                .expect("checked bit domain"),
                                 ReadBit::Zero => ZERO,
                             };
                         }

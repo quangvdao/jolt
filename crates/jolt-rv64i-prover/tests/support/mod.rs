@@ -236,6 +236,55 @@ impl Program {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ProvingFailure {
+    WrongOutput,
+    MissingTermination,
+    WrongEntry,
+}
+pub const PROVING_FAILURES: [ProvingFailure; 3] = [
+    ProvingFailure::WrongOutput,
+    ProvingFailure::MissingTermination,
+    ProvingFailure::WrongEntry,
+];
+pub struct ProvingFailureFixture {
+    pub statement: Statement,
+    pub changed: Statement,
+    pub verifier: VerifierPreprocessing<TransparentBits>,
+    pub witness: Rv64iWitness,
+    pub expected_batch: &'static str,
+}
+pub fn proving_failure_fixture(case: ProvingFailure) -> ProvingFailureFixture {
+    let program = match case {
+        ProvingFailure::WrongOutput => Program::ByteCopy,
+        ProvingFailure::MissingTermination => Program::CountingLoopWithoutTermination,
+        ProvingFailure::WrongEntry => Program::CountingLoop,
+    };
+    let (statement, verifier, witness) = program_fixture(program, 6);
+    let mut changed = statement.clone();
+    let expected_batch = match case {
+        ProvingFailure::WrongOutput => {
+            changed.device.outputs[0] ^= 1;
+            "4"
+        }
+        ProvingFailure::MissingTermination => {
+            changed.device.panic = false;
+            "4"
+        }
+        ProvingFailure::WrongEntry => {
+            changed.entry_pc += 4;
+            "6a"
+        }
+    };
+    ProvingFailureFixture {
+        statement,
+        changed,
+        verifier,
+        witness,
+        expected_batch,
+    }
+}
+
 pub fn counting_loop() -> (
     Statement,
     VerifierPreprocessing<TransparentBits>,

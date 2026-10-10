@@ -65,7 +65,7 @@ impl Zero for Partial {
 }
 
 struct CompactColumns {
-    digits: Arc<Vec<CompactDigit>>,
+    digits: Vec<CompactDigit>,
     widths: Vec<usize>,
     cycles: usize,
 }
@@ -151,7 +151,6 @@ struct Shared {
     partials: Vec<Partial>,
     finished: Option<F128>,
     failed: bool,
-    support: Option<Arc<Vec<CompactDigit>>>,
     final_sources: Vec<F128>,
     #[cfg(feature = "test-utils")]
     times: [Duration; 2],
@@ -310,8 +309,6 @@ impl RoutersCycleCore {
                 )
             })
             .collect();
-        let digits = Arc::new(digits);
-        let support = Some(Arc::clone(&digits));
         let compact = CompactColumns {
             digits,
             widths: factors.iter().map(|factor| factor.slots.len()).collect(),
@@ -349,7 +346,6 @@ impl RoutersCycleCore {
             partials: unsafe_allocate_zero_vec(partial_len),
             finished: None,
             failed: false,
-            support,
             final_sources: Vec::with_capacity(shapes.len()),
             #[cfg(feature = "test-utils")]
             times: [Duration::ZERO; 2],
@@ -449,9 +445,6 @@ impl Shared {
             #[cfg(feature = "test-utils")]
             let start = Instant::now();
             self.columns.bind(challenge);
-            if round == 4 {
-                self.support = None;
-            }
             #[cfg(feature = "test-utils")]
             {
                 self.times[1] += start.elapsed();
@@ -484,16 +477,33 @@ impl Shared {
         bind: Option<F128>,
         round: usize,
     ) -> Result<(), SumcheckError<F128>> {
-        // With a zero Gruen endpoint, division cannot recover q(1). Its
-        // exceptional node reuses the same pair products in this pass.
-        if self.eq.current_linear_evals().1 == ZERO {
-            self.accumulate_endpoint::<BIND, CACHE, true>(bind, round)
+        if matches!(self.columns, LazyFoldedRa::Lazy(_)) {
+            self.accumulate_support::<BIND, CACHE, true>(bind, round)
         } else {
-            self.accumulate_endpoint::<BIND, CACHE, false>(bind, round)
+            self.accumulate_support::<BIND, CACHE, false>(bind, round)
         }
     }
 
-    fn accumulate_endpoint<const BIND: bool, const CACHE: bool, const SINGULAR: bool>(
+    fn accumulate_support<const BIND: bool, const CACHE: bool, const SKIP: bool>(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+    ) -> Result<(), SumcheckError<F128>> {
+        // With a zero Gruen endpoint, division cannot recover q(1). Its
+        // exceptional node reuses the same pair products in this pass.
+        if self.eq.current_linear_evals().1 == ZERO {
+            self.accumulate_endpoint::<BIND, CACHE, true, SKIP>(bind, round)
+        } else {
+            self.accumulate_endpoint::<BIND, CACHE, false, SKIP>(bind, round)
+        }
+    }
+
+    fn accumulate_endpoint<
+        const BIND: bool,
+        const CACHE: bool,
+        const SINGULAR: bool,
+        const SKIP: bool,
+    >(
         &mut self,
         bind: Option<F128>,
         round: usize,
@@ -533,9 +543,7 @@ impl Shared {
         let partials = &mut self.partials[..partial_len];
         let columns = &self.columns;
         let recipe = &self.recipe;
-        let support = self.support.as_deref();
         let column_count = columns.num_polys();
-        let support_width = 2 << round;
         let inner_weights = self.eq.e_in_current();
         let outer_weights = self.eq.e_out_current();
         let challenge = bind.unwrap_or(ZERO);
@@ -562,39 +570,17 @@ impl Shared {
                             let pair = chunk * chunk_pairs + local_pair;
                             let mut cached = [(ZERO, ZERO); 8];
                             if CACHE {
-                                columns.lo_hi_all(pair, &mut cached[..columns.num_polys()]);
+                                columns.lo_hi_all(pair, &mut cached[..column_count]);
                             }
-                            let support_at = |column: usize| {
-                                support.is_none_or(|digits| {
-                                    digits[pair * support_width * column_count
-                                        ..(pair + 1) * support_width * column_count]
-                                        .chunks_exact(column_count)
-                                        .any(|row| row[column].0.is_some())
-                                })
-                            };
-                            let mut cached_support = [true; 8];
-                            if CACHE {
-                                for (column, value) in
-                                    cached_support[..column_count].iter_mut().enumerate()
-                                {
-                                    *value = support_at(column);
-                                }
-                            }
-                            let supported = |column: usize| {
+                            let sides = |column| {
                                 if CACHE {
-                                    cached_support[column]
-                                } else {
-                                    support_at(column)
-                                }
-                            };
-                            let factor = |column| {
-                                let (lo, hi) = if CACHE {
                                     cached[column]
                                 } else {
                                     columns.lo_hi(column, pair)
-                                };
-                                [lo, lo + hi]
+                                }
                             };
+                            let supported = |value| !SKIP || value != (ZERO, ZERO);
+                            let factor = |(lo, hi)| [lo, lo + hi];
                             let mut cached_sources = [[ZERO; 2]; SHAPES_PER_BATCH];
                             if BIND {
                                 for (shape, job) in jobs.iter_mut().enumerate() {
@@ -613,11 +599,12 @@ impl Shared {
                             }
                             let source = |shape: usize| cached_sources[shape];
                             for member in &recipe.singles {
-                                if !supported(member.column) {
+                                let right = sides(member.column);
+                                if !supported(right) {
                                     continue;
                                 }
                                 let left = source(member.shape);
-                                let right = factor(member.column);
+                                let right = factor(right);
                                 let sums = &mut stack_inner[member.shape];
                                 sums[0].0.fmadd(left[0] * right[0], weight);
                                 sums[1].0.fmadd(left[1] * right[1], weight);
@@ -628,12 +615,13 @@ impl Shared {
                                 }
                             }
                             for member in &recipe.doubles {
-                                if !supported(member.columns[0]) || !supported(member.columns[1]) {
+                                let first = sides(member.columns[0]);
+                                let last = sides(member.columns[1]);
+                                if !supported(first) || !supported(last) {
                                     continue;
                                 }
-                                let left =
-                                    quadratic(source(member.shape), factor(member.columns[1]));
-                                let right = factor(member.columns[0]);
+                                let left = quadratic(source(member.shape), factor(last));
+                                let right = factor(first);
                                 let node = quadratic_at_nodes(left)[0] * linear_at_nodes(right)[0];
                                 let values = [left[0] * right[0], left[2] * right[1], node];
                                 let sums = &mut stack_inner[member.shape];
@@ -648,18 +636,19 @@ impl Shared {
                                 }
                             }
                             for group in &recipe.triples {
-                                if !supported(group.columns[0]) || !supported(group.columns[1]) {
+                                let first = sides(group.columns[0]);
+                                let second = sides(group.columns[1]);
+                                if !supported(first) || !supported(second) {
                                     continue;
                                 }
-                                let left =
-                                    quadratic(factor(group.columns[0]), factor(group.columns[1]));
+                                let left = quadratic(factor(first), factor(second));
                                 let left_nodes = quadratic_at_nodes(left);
                                 for member in &group.members {
-                                    if !supported(member.column) {
+                                    let last = sides(member.column);
+                                    if !supported(last) {
                                         continue;
                                     }
-                                    let right =
-                                        quadratic(source(member.shape), factor(member.column));
+                                    let right = quadratic(source(member.shape), factor(last));
                                     let right_nodes = quadratic_at_nodes(right);
                                     let values = [
                                         left[0] * right[0],
@@ -758,7 +747,6 @@ impl Shared {
             self.final_sources.push(value);
         }
         self.sources.clear();
-        self.support = None;
         drop(std::mem::take(&mut self.partials));
         self.finished = Some(challenge);
         #[cfg(feature = "test-utils")]

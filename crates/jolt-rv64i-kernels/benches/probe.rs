@@ -1,38 +1,43 @@
-//! Unit-cost calibration on opaque seeded packed traces.
+//! Unit-cost candidates and contextual kernel streams on seeded inputs.
 //!
-//! Construction, source generation, domain/count planning, allocation and initial
-//! zeroing are outside kernel timing. Each record prints its sample median and
-//! min/max in wall-clock nanoseconds divided by its operation count. Twelve-thread
-//! figures are a scaling column, never single-thread unit prices or CPU time.
-//! The final unit-table uses the largest requested stream with one thread and
-//! the representative ids below; excluded cases/runs omitting one thread say not_measured.
-//! Constants in this bench retain both specification estimates for comparison.
+//! Construction, preparation, allocation and initial zeroing precede timing.
+//! Records report median/min/max wall time divided by operation count; multiple
+//! threads report scaling, not unit prices. The summary selects single-thread
+//! records, or says not_measured when they were omitted. A specification row is
+//! replaced only from a quiet-machine run, with every model and threshold
+//! recomputed in the same change. No record here changes an estimate.
 //!
-//! | Unit | Representative record (before size/thread suffix) | Timed work |
+//! | Unit | Candidate or context | Timed region |
 //! |---|---|---|
-//! | M | arithmetic/products/local | independent reduced trace-word products and chunk XOR |
-//! | A | fmadd/fit/local, slope_ns | least-squares slope of fused stack chains |
-//! | R | fmadd/fit/local, reduction_ns | fit intercept minus zero-length preparation/XOR baseline |
-//! | L | lookup/g_digits_69kib/local | the canonical digit builder's 37 reads/XORs |
-//! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, selectors prepared first |
-//! | sct | sct/partitioned_emit_rows_20/all_rows | cycle-order pair emission and range-local application |
-//! | mrg | readout/column_128kib/independent | per-bit bucket read-out, normalized by reads/XORs |
-//! | X | arithmetic/mul_x_raw_shift_substitute/local | raw shift and conditional modulus XOR |
-//! | w | arithmetic/word_monomial_mix/local | representative outer monomial word operations |
+//! | M | arithmetic/product_hot | hot prepared independent reduced products, checksum |
+//! | A | arithmetic/chain_hot/256 and /1024 | identical runtime term loop; incremental ns/term |
+//! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
+//! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
+//! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
+//! | sct | sct/partitioned_emit_rows_20/all_rows | cycle-order pair emission and buffered range application |
+//! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
+//! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
+//! | w | arithmetic/word_monomial_hot | two live transforms, two coefficient shifts, AND, gather; 30 logical word operations |
 //!
-//! Hot product and runtime-length chain records use a prepared 32 KiB operand
-//! block. Chain times are per chain and per term; only the incremental long-chain
-//! cost is an A candidate after inspecting both loops. Reduction uses a prepared
-//! accumulator bank and an opaque no-reduction control; their checksum widths
-//! differ, so their signed difference remains context. Fused trace chains retain
-//! their preparation and short-chain totals; no affine law is fitted.
+//! Hot arithmetic runs once per thread setting without a trace. The pair block
+//! is 32 KiB; X uses 2 KiB, words 3 KiB and unreduced accumulators 6 KiB on native
+//! aarch64. Inputs are opaque once per repeated block and only a block checksum
+//! escapes. One runtime-length chain body serves 1,2,4,8,20,256,1024; short chains
+//! report chain/term totals, with no affine fit. The two longest chains alone
+//! give the incremental A candidate after assembly inspection confirms the same
+//! term body. Boundary calls, loads and checksums remain disclosed overhead.
+//! Reduction's safe control merges all opaque accumulator lanes, with no reduce:
+//! three lanes are XORed versus the reduced checksum's one. Their difference
+//! remains context because these checksum instruction mixes are unmatched.
+//! Fused trace chains retain their operand preparation and per-cycle opacity;
+//! their ids are contextual totals and are not arithmetic unit candidates.
 //!
-//! mul_x is absent from this branch's field API. Its substitute implements the
-//! specified polynomial-basis shift/reduction using modulus mask 0x87. The word
-//! hot word block computes two three-stage Moebius transforms, two live subset
-//! alignment shifts, an AND and stride-eight gather: 31 live logical operations.
-//! Native shifted-operand instructions may fuse logical operators; no transform
-//! is dead. This coefficient product does not claim whole-core coverage.
+//! mul_x is absent from the field API; the named raw-shift substitute implements
+//! the polynomial-basis operation with modulus mask 0x87. The word block computes
+//! two three-stage Möbius transforms (18 logical operations), live subset
+//! alignment (2), AND/mask (2), and stride-eight gather (8). Its consumed output
+//! depends on every stage; native shifted operands may fuse logical operations.
+//! This is one outer monomial coefficient product, not the whole outer core.
 //!
 //! Canonical lookup patterns and the specification passages they mirror:
 //! | Pattern | Passage/suboperation | L covered |
@@ -72,20 +77,22 @@
 //! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
 //!
 //! sct counts destinations outside timing. The timed stream writes rows and
-//! weights in cycle order through per-chunk cursors into one range-contiguous
-//! buffer, then applies buffered pairs without source reads or a worker-table
+//! weights in cycle order through sparse per-chunk cursors into chunk-contiguous
+//! pair segments grouped by range, then applies buffered pairs without source reads or a worker-table
 //! merge. The scatter group's direct atomic halves, worker tables with merge,
 //! and destination-ordered gather are comparisons; none prices sct. Coverage at
 //! log_t=22 is 2^16 local and 2^20 all_rows destinations in a 2^20-row output;
 //! shorter streams visit at most their cycle count. Rows/weights cost 20 bytes
-//! per cycle. Stack slice views split safely using the cached per-chunk counts.
+//! per cycle. Counts and offsets are u32; only active cursors are initialized.
 //!
 //! Fixed-size readout/merge cases generate no trace and run once per thread count,
 //! under independent/fixed. Zero-fill is W*N operations on 10 MiB arrays;
-//! zero-fill plus tree is (2W-1)*N; merge alone is (W-1)*N and is skipped at W=1.
-//! Both tree callers use one allocation-free stride-doubling helper. Timing
-//! includes scheduling and final checksums, excludes allocation/first touch.
-//! All trace-driven chunks contain 4096 cycles, independent of the thread count.
+//! zero-fill plus tree is (2W-1)*N using ScratchPool. Merge-only always uses two
+//! prepared 10 MiB arrays, executing N load/load/XOR/store operations even at
+//! one thread. Read-out has its own footprint and selected-read count. No single
+//! record is the common mrg estimate. Timing includes scheduling and checksums,
+//! excludes allocation/first touch. Trace streams use 4096-cycle chunks, except
+//! ScatterPlan, which owns its deterministic geometry.
 //! --units accepts lookup,bucket,scatter,sct,fmadd,arithmetic,readout,merge, or all.
 
 pub mod support;
@@ -107,7 +114,7 @@ use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
 use support::arithmetic::HotArithmetic;
-use support::{run_probe, ProbeCase, ProbeKernel, RunnerError};
+use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
 
@@ -1632,6 +1639,154 @@ fn field_values(entries: usize) -> Vec<F128> {
     (0..entries).map(|_| F128::random(&mut rng)).collect()
 }
 
+// Point-one and provisional point-two estimates; measurement never updates them.
+const ESTIMATES: [[f64; 2]; 9] = [
+    [1.83, 0.9],
+    [1.1, 0.7],
+    [0.7, 0.2],
+    [0.4, 0.4],
+    [0.6, 0.6],
+    [1.4, 1.4],
+    [0.3, 0.3],
+    [0.2, 0.2],
+    [0.05, 0.05],
+];
+
+struct UnitCandidates;
+
+impl UnitCandidates {
+    fn find<'a>(records: &'a [ProbeRecord], prefix: &str) -> Option<&'a ProbeRecord> {
+        records
+            .iter()
+            .filter(|r| r.id.starts_with(prefix) && r.id.ends_with("/1"))
+            .max_by_key(|r| {
+                r.id.rsplit('/')
+                    .nth(1)
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0)
+            })
+    }
+
+    #[expect(
+        clippy::print_stdout,
+        reason = "candidate records are the probe summary"
+    )]
+    fn record(
+        records: &[ProbeRecord],
+        unit: &str,
+        prefix: &str,
+        disposition: &str,
+        estimates: [f64; 2],
+    ) {
+        if let Some(r) = Self::find(records, prefix) {
+            print!(
+                "unit-candidates {unit} {disposition} record={} median_ns={:.6} spec {},{}",
+                r.id, r.median, estimates[0], estimates[1]
+            );
+            if let Some((bytes, arrays)) = r.layout {
+                print!(" bytes_per_array={bytes} arrays={arrays}");
+            }
+            println!();
+        } else {
+            println!("unit-candidates {unit} {disposition} record={prefix} median_ns=not_measured spec {},{}",estimates[0],estimates[1]);
+        }
+    }
+
+    #[expect(
+        clippy::print_stdout,
+        reason = "candidate records are the probe summary"
+    )]
+    fn print(records: &[ProbeRecord]) {
+        println!("unit-candidates");
+        Self::record(
+            records,
+            "M",
+            "probe/arithmetic/product_hot/",
+            "candidate",
+            ESTIMATES[0],
+        );
+        let short = Self::find(records, "probe/arithmetic/chain_hot/256/");
+        let long = Self::find(records, "probe/arithmetic/chain_hot/1024/");
+        if let Some((a, b)) = short.zip(long) {
+            println!(
+                "unit-candidates A candidate records={},{} incremental_ns={:.6} spec {},{}",
+                a.id,
+                b.id,
+                (b.median - a.median) / 768.0,
+                ESTIMATES[1][0],
+                ESTIMATES[1][1]
+            );
+        } else {
+            println!("unit-candidates A candidate records=chain_hot/256,chain_hot/1024 incremental_ns=not_measured spec {},{}",ESTIMATES[1][0],ESTIMATES[1][1]);
+        }
+        Self::record(
+            records,
+            "R",
+            "probe/arithmetic/reduce_hot/",
+            "context",
+            ESTIMATES[2],
+        );
+        Self::record(
+            records,
+            "R",
+            "probe/arithmetic/reduce_hot_control/",
+            "context",
+            ESTIMATES[2],
+        );
+        if let Some((a, b)) = Self::find(records, "probe/arithmetic/reduce_hot/")
+            .zip(Self::find(records, "probe/arithmetic/reduce_hot_control/"))
+        {
+            println!("unit-candidates R context records={},{} difference_ns={:.6} spec {},{} reason=checksum_lane_mixes_differ",a.id,b.id,a.median-b.median,ESTIMATES[2][0],ESTIMATES[2][1]);
+        }
+        for prefix in [
+            "probe/lookup/g_digits_69kib/local/",
+            "probe/lookup/word_lift_bytes_32kib/local/",
+            "probe/lookup/outer_materialise_32kib/local/",
+            "probe/lookup/g_bytes_196kib/local/",
+        ] {
+            Self::record(records, "L", prefix, "candidate", ESTIMATES[3]);
+        }
+        Self::record(
+            records,
+            "Bk",
+            "probe/bucket/fold_none_share_0/all_rows/",
+            "candidate",
+            ESTIMATES[4],
+        );
+        Self::record(
+            records,
+            "sct",
+            "probe/sct/partitioned_emit_rows_20/all_rows/",
+            "candidate",
+            ESTIMATES[5],
+        );
+        for prefix in [
+            "probe/merge/zero_fill_10mib/",
+            "probe/merge/tree_only_10mib/",
+            "probe/readout/column_128kib/",
+            "probe/readout/fold_none/",
+            "probe/readout/fold_hot8/",
+            "probe/readout/fold_all/",
+        ] {
+            Self::record(records, "mrg", prefix, "context", ESTIMATES[6]);
+        }
+        Self::record(
+            records,
+            "X",
+            "probe/arithmetic/mul_x_hot_raw_shift_substitute/",
+            "candidate",
+            ESTIMATES[7],
+        );
+        Self::record(
+            records,
+            "w",
+            "probe/arithmetic/word_monomial_hot/",
+            "candidate",
+            ESTIMATES[8],
+        );
+    }
+}
+
 fn main() -> Result<(), RunnerError> {
     let mut cases = Vec::new();
     for kib in [5, 32, 64, 69, 96, 196] {
@@ -1739,5 +1894,7 @@ fn main() -> Result<(), RunnerError> {
             minimum_threads: 1,
         });
     }
-    run_probe(&cases, Unit::new).map(|_| ())
+    let records = run_probe(&cases, Unit::new)?;
+    UnitCandidates::print(&records);
+    Ok(())
 }

@@ -23,12 +23,7 @@ pub fn word_monomial(input: WordInput) -> u64 {
         b ^= (b << shift) & mask;
     }
     let mut value = ((a >> input.left) & (b >> input.right)) & 0x0101_0101_0101_0101;
-    for (shift, mask) in [
-        (7, 0x0003_0003_0003_0003),
-        (14, 0x0000_000f_0000_000f),
-        (28, 0xff),
-    ] {
-        value = (value | (value >> shift)) & mask;
-    }
-    value
+    value = (value | (value >> 7)) & 0x0003_0003_0003_0003;
+    value |= value >> 14;
+    (value | (value >> 28)) & 0xff
 }

@@ -17,8 +17,8 @@ const PAIRS: usize = 1024;
 const BANK: usize = 128;
 const BLOCKS: usize = 4096;
 use super::word::{word_monomial, WordInput};
-// Two transforms (18), alignment (2), AND/mask (2), gather (9).
-const WORD_OPERATIONS: usize = 31;
+// Two transforms (18), alignment (2), AND/mask (2), gather (8).
+const WORD_OPERATIONS: usize = 30;
 
 pub enum HotArithmetic {
     Product(Box<[(F128, F128); PAIRS]>),
@@ -34,11 +34,11 @@ pub enum HotArithmetic {
 
 impl HotArithmetic {
     pub fn mul_x() -> Self {
-        let mut rng = ChaCha20Rng::seed_from_u64(0x6d756c78);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x6d75_6c78);
         Self::MulX(Box::new(std::array::from_fn(|_| F128::random(&mut rng))))
     }
     pub fn word() -> Self {
-        let mut rng = ChaCha20Rng::seed_from_u64(0x776f7264);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x776f_7264);
         Self::Word(Box::new(std::array::from_fn(|_| WordInput {
             a: rng.next_u64(),
             b: rng.next_u64(),
@@ -56,11 +56,14 @@ impl HotArithmetic {
         }
     }
     pub fn reduction(control: bool) -> Self {
-        let mut rng = ChaCha20Rng::seed_from_u64(0x726564756365);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x7265_6475_6365);
         let bank = Box::new(std::array::from_fn(|_| {
             let mut acc = F128Accumulator::default();
             for _ in 0..5 {
                 acc.fmadd(F128::random(&mut rng), F128::random(&mut rng));
+            }
+            if acc.reduce() == F128::from_raw(0) {
+                acc.add(F128::from_raw(1));
             }
             acc
         }));
@@ -71,7 +74,7 @@ impl HotArithmetic {
         }
     }
     fn pairs() -> Box<[(F128, F128); PAIRS]> {
-        let mut rng = ChaCha20Rng::seed_from_u64(0x686f7470616972);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x0068_6f74_7061_6972);
         Box::new(std::array::from_fn(|_| {
             (F128::random(&mut rng), F128::random(&mut rng))
         }))

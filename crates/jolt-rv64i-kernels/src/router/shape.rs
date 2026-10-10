@@ -11,6 +11,8 @@ use std::ops::Range;
 use std::sync::Mutex;
 use thiserror::Error;
 
+pub(crate) const BIT_VARIABLES: usize = 6;
+
 /// One source bit; absent digits contribute zero to both digit entry kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BitEntry {
@@ -223,7 +225,7 @@ impl RouterShape {
         let _ = table_len(slots)?;
         let _ = table_len(log_outputs)?;
         let mut slot_map = Vec::new();
-        for bit in 0..6 {
+        for bit in 0..BIT_VARIABLES {
             slot_map.push((bit, SlotVariable::Bit(bit)));
         }
         slot_map.extend(
@@ -251,7 +253,7 @@ impl RouterShape {
             }
         }
         let selectors = table_len(factors.iter().map(|f| f.slots.len()).sum())?;
-        let sources = table_len(6 + expected)?;
+        let sources = table_len(BIT_VARIABLES + expected)?;
         for &entry in &route {
             for (axis, value, bound) in [
                 ("output", entry.output, 1 << log_outputs),
@@ -330,6 +332,22 @@ impl RouterShape {
     /// Complete Fold table length in increasing slot order.
     pub fn fold_len(&self) -> usize {
         1 << self.slot_map.len()
+    }
+
+    pub(crate) fn fold_index(&self, source: usize, selector: usize) -> usize {
+        self.slot_map
+            .iter()
+            .enumerate()
+            .fold(0, |index, (position, &(_, variable))| {
+                let value = match variable {
+                    SlotVariable::Bit(bit) => (source >> bit) & 1,
+                    SlotVariable::Word(bit) => (source >> (BIT_VARIABLES + bit)) & 1,
+                    SlotVariable::Selector { factor, bit } => {
+                        (selector >> (self.factor_indices[factor].1 + bit)) & 1
+                    }
+                };
+                index | (value << position)
+            })
     }
 
     pub(crate) fn check_source<S: CycleSource>(&self, source: &S) -> Result<(), RouterError> {

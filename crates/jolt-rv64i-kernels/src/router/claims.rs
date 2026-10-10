@@ -208,7 +208,8 @@ impl Pass<'_> {
 /// the plan's cycle and row dimensions. Each cycle equality is formed once and
 /// feeds the trace accumulators and scatter in the same parallel pass.
 /// Agreement of the plan, retained lifts and immutable source is required of
-/// the caller, not checked, and incorrect word claims are detected by the verifier.
+/// the caller, not checked. Detection rests on the verifier's final evaluation
+/// check against the committed source, with the sum-check's soundness error.
 pub fn claims_pass<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     lifts: &RetainedWordLifts,

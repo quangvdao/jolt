@@ -158,7 +158,8 @@ struct Shared {
 
 /// Shared degree `2 + factors` cycle kernels for checked router shapes.
 /// Source tables must be `Source_ρ(x|src, ·)`: this is required of the caller,
-/// not checked, and detected by the verifier's final evaluation check.
+/// not checked. Detection rests on the verifier's final evaluation check against
+/// the committed source, with the sum-check's soundness error.
 /// Points and table indices have their low variable first.
 pub struct RoutersCycleCore {
     shared: Arc<Mutex<Shared>>,
@@ -169,7 +170,8 @@ pub struct RoutersCycleCore {
 impl RoutersCycleCore {
     /// Takes one `T`-element source table per shape and compiles all factor
     /// references into one byte per cycle and distinct `(column, slots)`.
-    /// Checks point lengths, source references, table lengths and compact widths.
+    /// Checks point lengths, source references, table lengths, and the seven-bit
+    /// bound on each factor column needed for its one-byte digit plus absence.
     pub fn new<S: CycleSource>(
         source: &ValidatedTrace<S>,
         shapes: &[RouterShape],
@@ -386,7 +388,8 @@ impl RoutersCycleCore {
 
 /// One equality-weighted shape member of a shared router cycle sumcheck.
 /// Honest input claims are required of the caller, not checked by division
-/// recovery, and detected by the verifier's final evaluation check.
+/// recovery. Detection rests on the verifier's final evaluation check against
+/// the committed source, with the sum-check's soundness error.
 pub struct RouterCycleMember {
     shared: Arc<Mutex<Shared>>,
     shape: usize,

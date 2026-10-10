@@ -43,33 +43,8 @@ const ZERO: F128 = F128::from_raw(0);
 const ONE: F128 = F128::from_raw(1);
 const LABEL: &[u8] = b"rv64i-routers-definition";
 
-struct ShapeRequest {
-    slots: usize,
-    bank: Vec<WordSlot>,
-    factors: Vec<SelectorFactor>,
-    word_slots: Vec<usize>,
-    log_outputs: usize,
-    route: Vec<(usize, usize, usize)>,
-}
-
-fn shape(request: ShapeRequest) -> RouterShape {
-    RouterShape::new(RouterShapeRequest {
-        slots: request.slots,
-        bank: request.bank,
-        factors: request.factors,
-        word_slots: request.word_slots,
-        log_outputs: request.log_outputs,
-        route: request
-            .route
-            .into_iter()
-            .map(|(output, source, selector)| RouteEntry {
-                output,
-                source,
-                selector,
-            })
-            .collect(),
-    })
-    .unwrap()
+fn shape(request: RouterShapeRequest) -> RouterShape {
+    RouterShape::new(request).unwrap()
 }
 
 fn routed_shapes(rng: &mut ChaCha20Rng) -> Vec<RouterShape> {
@@ -80,14 +55,14 @@ fn routed_shapes(rng: &mut ChaCha20Rng) -> Vec<RouterShape> {
             let route = (0..48)
                 .map(|_| {
                     let value = F128::random(rng).to_raw();
-                    (
-                        value as usize & ((1 << base.log_outputs()) - 1),
-                        (value >> 32) as usize & (64 * base.bank().len() - 1),
-                        (value >> 64) as usize & (base.selectors() - 1),
-                    )
+                    RouteEntry {
+                        output: value as usize & ((1 << base.log_outputs()) - 1),
+                        source: (value >> 32) as usize & (64 * base.bank().len() - 1),
+                        selector: (value >> 64) as usize & (base.selectors() - 1),
+                    }
                 })
                 .collect();
-            shape(ShapeRequest {
+            shape(RouterShapeRequest {
                 slots: base.slots(),
                 bank: base.bank().to_vec(),
                 factors: base.factors().to_vec(),
@@ -720,8 +695,8 @@ impl CycleSource for TinyTrace {
     }
 }
 
-fn tiny_shape(bank: WordSlot, slots: usize, route: Vec<(usize, usize, usize)>) -> RouterShape {
-    shape(ShapeRequest {
+fn tiny_shape(bank: WordSlot, slots: usize, route: Vec<RouteEntry>) -> RouterShape {
+    shape(RouterShapeRequest {
         slots,
         bank: vec![bank],
         factors: vec![SelectorFactor {
@@ -741,7 +716,15 @@ fn complete_fold_smallest_case_keeps_unrouted_bit_and_literal_quadratic() {
         digits: vec![Some(0); 8],
     });
     let trace = Arc::new(ValidatedTrace::new(source.clone()).unwrap());
-    let shapes = vec![tiny_shape(WordSlot::Trace(0), 6, vec![(0, 0, 0)])];
+    let shapes = vec![tiny_shape(
+        WordSlot::Trace(0),
+        6,
+        vec![RouteEntry {
+            output: 0,
+            source: 0,
+            selector: 0,
+        }],
+    )];
     let plan = ScatterPlan::new(trace.clone()).unwrap();
     let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
     let fold = fold_pass(&trace, &shapes, &[ZERO; 3], &plan, &layout, &[]).unwrap();
@@ -805,7 +788,11 @@ fn complete_fold_constant_bank_covers_absence_and_boolean_cycle_points() {
         let shapes = vec![tiny_shape(
             WordSlot::Bits(vec![BitEntry::One]),
             6,
-            vec![(0, 0, 0)],
+            vec![RouteEntry {
+                output: 0,
+                source: 0,
+                selector: 0,
+            }],
         )];
         let plan = ScatterPlan::new(trace.clone()).unwrap();
         let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
@@ -843,7 +830,15 @@ fn cycle_scalar_becoming_zero_and_short_idle_zero_match_definitions() {
         digits: vec![Some(0); 8],
     });
     let trace = ValidatedTrace::new(source.clone()).unwrap();
-    let shapes = vec![tiny_shape(WordSlot::Trace(0), 7, vec![(0, 0, 0)])];
+    let shapes = vec![tiny_shape(
+        WordSlot::Trace(0),
+        7,
+        vec![RouteEntry {
+            output: 0,
+            source: 0,
+            selector: 0,
+        }],
+    )];
     let r_cycle = vec![F128::from_raw(83), ZERO, ONE];
     let mut x = point(7, &mut rng);
     x[6] = ONE;
@@ -1065,7 +1060,7 @@ fn malformed_router_sources_and_points_return_named_errors() {
         ),
     ];
     for (bank, factor, expected) in invalid_shapes {
-        let invalid = vec![shape(ShapeRequest {
+        let invalid = vec![shape(RouterShapeRequest {
             slots: 17,
             bank: vec![bank],
             factors: vec![factor],
@@ -1524,7 +1519,7 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
         matches!(source_lift(&trace, &shapes, &[ZERO; 6]), Err(RouterError::Dimension { variables }) if variables == width)
     );
     let trace = ValidatedTrace::new(Arc::new(WideColumns { width: 8 })).unwrap();
-    let shapes = vec![shape(ShapeRequest {
+    let shapes = vec![shape(RouterShapeRequest {
         slots: 14,
         bank: vec![WordSlot::Zero],
         factors: vec![SelectorFactor {
@@ -1678,7 +1673,7 @@ fn digit_bit_and_explicit_zero_bank_entries_match_definitions() {
     let mut rng = ChaCha20Rng::seed_from_u64(1410);
     let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1410).unwrap());
     let trace = ValidatedTrace::new(source.clone()).unwrap();
-    let shapes = vec![shape(ShapeRequest {
+    let shapes = vec![shape(RouterShapeRequest {
         slots: 12,
         bank: vec![
             WordSlot::Trace(0),
@@ -1713,7 +1708,7 @@ fn nine_distinct_factor_columns_match_definitions_on_uncached_gathers() {
     let trace = ValidatedTrace::new(source.clone()).unwrap();
     let shapes: Vec<_> = (0..9)
         .map(|column| {
-            shape(ShapeRequest {
+            shape(RouterShapeRequest {
                 slots: 10,
                 bank: vec![WordSlot::Trace(column % 4)],
                 factors: vec![SelectorFactor {
@@ -1741,7 +1736,7 @@ fn nine_bytecode_shapes_match_definitions_across_row_tile_batches() {
     let trace = ValidatedTrace::new(source.clone()).unwrap();
     let shapes: Vec<_> = (0..9)
         .map(|index| {
-            shape(ShapeRequest {
+            shape(RouterShapeRequest {
                 slots: 14,
                 bank: vec![
                     WordSlot::Bytecode(index % 4),

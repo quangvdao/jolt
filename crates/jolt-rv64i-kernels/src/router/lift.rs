@@ -7,7 +7,7 @@ use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 
-use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
+use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot, BIT_VARIABLES};
 use crate::packed::lift::WordLift;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
@@ -21,7 +21,8 @@ const SHAPES_PER_TILE: usize = 8;
 /// Each distinct trace word used by a bank, lifted once at the common bit point.
 /// Tables are in `word_indices()` order and retain their full cycle domain.
 /// Agreement with the source subsequently passed to `claims_pass` is required
-/// of the caller, not checked, and incorrect claims are detected by the verifier.
+/// of the caller, not checked. Detection rests on the verifier's final evaluation
+/// check against the committed source, with the sum-check's soundness error.
 pub struct RetainedWordLifts {
     pub(crate) lift: WordLift,
     pub(crate) words: Vec<usize>,
@@ -70,7 +71,7 @@ struct Flags<const N: usize, const SIZE: usize> {
 }
 impl<const N: usize, const SIZE: usize> Flags<N, SIZE> {
     fn new(entries: &[FlagEntry; N]) -> Self {
-        assert_eq!(SIZE, 1 << N);
+        const { assert!(SIZE == 1 << N) };
         Self {
             columns: std::array::from_fn(|index| entries[index].column),
             table: std::array::from_fn(|index| {
@@ -569,7 +570,8 @@ fn chunk_views(tables: &mut [Vec<F128>], chunk: usize) -> Vec<&mut [F128]> {
 /// Each shape combines its trace lifts by one unreduced sum, its digit lookup
 /// tables, and a temporary bytecode-row table that also contains its constant.
 /// Source immutability and the source's agreement with committed bits are
-/// required of the caller, not checked, and false claims are detected by the verifier.
+/// required of the caller, not checked. Detection rests on the verifier's final
+/// evaluation check against the committed source, with the sum-check's soundness error.
 pub fn source_lift<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
@@ -605,8 +607,8 @@ fn source_lift_impl<S: CycleSource>(
     mut phase: impl FnMut(usize),
 ) -> Result<SourceLiftOutput, RouterError> {
     let source = trace.source().as_ref();
-    let bit_point = x.get(..6).ok_or(RouterError::PointLength {
-        expected: shapes.first().map_or(6, RouterShape::slots),
+    let bit_point = x.get(..BIT_VARIABLES).ok_or(RouterError::PointLength {
+        expected: shapes.first().map_or(BIT_VARIABLES, RouterShape::slots),
         actual: x.len(),
     })?;
     let bit_weights = eq_table(bit_point, None);

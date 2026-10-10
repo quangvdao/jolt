@@ -43,7 +43,9 @@ use jolt_rv64i_verifier::stages::stage3b::{
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::fmt::Display;
+use std::iter::Zip;
 use std::marker::PhantomData;
+use std::slice::Iter;
 use std::sync::{Arc, Mutex};
 
 fn geometry(error: impl Display) -> KernelError<F128> {
@@ -312,7 +314,7 @@ enum Extraction {
         plan: Arc<ScatterPlan<WitnessSource>>,
     },
     Complete {
-        trace_words: Vec<F128>,
+        trace_words: Vec<(usize, F128)>,
         bytecode_words: Vec<F128>,
     },
 }
@@ -329,14 +331,21 @@ struct CycleGroup {
     variant_terms: VariantTerms,
 }
 
-#[derive(Clone, Copy)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct VariantWordTerm {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    word: BankWord,
+    slot: usize,
+    coefficient: F128,
+}
+
 #[cfg_attr(feature = "allocative", derive(Allocative))]
 struct VariantTerms {
-    words: [F128; 8],
+    words: Vec<VariantWordTerm>,
     one: F128,
 }
 impl VariantTerms {
-    fn new(shape: &RouterShape, x: &[F128]) -> Result<Self, RouterError> {
+    fn new(shape: &RouterShape, layout: &Layout, x: &[F128]) -> Result<Self, RouterError> {
         if x.len() != shape.slots() {
             return Err(RouterError::PointLength {
                 expected: shape.slots(),
@@ -346,10 +355,18 @@ impl VariantTerms {
         let word_point: Vec<_> = shape.word_slots().iter().map(|&slot| x[slot]).collect();
         let word_weights = eq_table(&word_point, None);
         let bit_weights = eq_table(&x[..6], None);
-        let mut words = [F128::from_raw(0); 8];
-        for (target, weight) in words.iter_mut().zip(&word_weights) {
-            *target = *weight;
-        }
+        let words = bank(Router::Variant, layout)
+            .words
+            .iter()
+            .zip(&word_weights)
+            .enumerate()
+            .filter(|(_, (word, _))| **word != BankWord::Inc)
+            .map(|(slot, (&word, &coefficient))| VariantWordTerm {
+                word,
+                slot,
+                coefficient,
+            })
+            .collect();
         let mut one = F128::from_raw(0);
         for (slot, word) in shape.bank().iter().enumerate() {
             if let WordSlot::Bits(entries) = word {
@@ -368,7 +385,7 @@ struct TakenMember {
     member: RouterCycleMember,
     group: Arc<Mutex<CycleGroup>>,
 }
-type FactorValues = Vec<(Factor, F128)>;
+type FactorValues<'a> = Zip<Iter<'static, Factor>, Iter<'a, F128>>;
 
 impl CycleGroup {
     fn new(
@@ -388,7 +405,8 @@ impl CycleGroup {
             .find(|(router, _)| **router == Router::Variant)
             .map(|(_, shape)| shape)
             .ok_or_else(|| geometry("Variant shape is absent"))?;
-        let variant_terms = VariantTerms::new(variant_shape, x).map_err(geometry)?;
+        let variant_terms =
+            VariantTerms::new(variant_shape, &witness.layout, x).map_err(geometry)?;
         let lifted = source_lift(&trace, &shapes, x).map_err(geometry)?;
         let core = RoutersCycleCore::new(
             shared.take_selector_group()?,
@@ -463,7 +481,7 @@ impl CycleGroup {
                 claims_pass(&self.trace, lifts, &words, plan, r_3).map_err(output_error)?;
             // Assignment drops the retained lifts and this group's plan Arc at extraction.
             self.extraction = Extraction::Complete {
-                trace_words: output.trace_words,
+                trace_words: words.into_iter().zip(output.trace_words).collect(),
                 bytecode_words: output.bytecode_words,
             };
         }
@@ -479,7 +497,10 @@ impl CycleGroup {
             return Err(output_error("claims are absent"));
         };
         let value = match word_slot(word) {
-            WordSlot::Trace(index) => trace_words.get(index),
+            WordSlot::Trace(index) => trace_words
+                .iter()
+                .find(|(word, _)| *word == index)
+                .map(|(_, value)| value),
             WordSlot::Bytecode(index) => bytecode_words.get(index),
             WordSlot::Bits(_) | WordSlot::Zero => None,
         };
@@ -525,22 +546,22 @@ impl<R> ProveRounds<F128> for CycleKernel<R> {
 }
 
 impl<R> CycleKernel<R> {
-    fn factors(&self) -> Result<(F128, FactorValues), SumcheckKernelError<F128>> {
+    fn factors(&self) -> Result<(F128, Vec<F128>), SumcheckKernelError<F128>> {
         let (source, values) = self.member.final_values().map_err(output_error)?;
         if values.len() != self.factors.len() {
             return Err(output_error("factor claims are absent"));
         }
-        Ok((source, self.factors.iter().copied().zip(values).collect()))
+        Ok((source, values))
     }
 }
 
 fn factor_value(
-    values: &[(Factor, F128)],
+    values: &FactorValues<'_>,
     factor: Factor,
 ) -> Result<F128, SumcheckKernelError<F128>> {
     values
-        .iter()
-        .find(|(name, _)| *name == factor)
+        .clone()
+        .find(|(name, _)| **name == factor)
         .map(|(_, value)| *value)
         .ok_or_else(|| output_error("factor claim is absent"))
 }
@@ -560,16 +581,18 @@ macro_rules! cycle_adapter {
         impl SumcheckKernel<F128> for CycleKernel<$relation<F128>> {
             type Relation = $relation<F128>;
             fn output_claims(&mut self, _: &$inputs<F128>) -> Result<$outputs<F128>, SumcheckKernelError<F128>> {
-                let ($source, $factors) = self.factors()?;
+                let ($source, values) = self.factors()?;
+                let $factors = self.factors.iter().zip(&values);
                 let mut $state = self.group.lock().map_err(output_error)?;
                 $state.claims(&self.r_3)?;
-                let $terms = $state.variant_terms;
+                let $terms = &$state.variant_terms;
                 $output
             }
             fn validate_derived_tables(&self, relation: &Self::Relation, input_points: &$inputs<Vec<F128>>, output_points: &$outputs<Vec<F128>>, challenges: &NoChallenges<F128>) -> Result<(), SumcheckKernelError<F128>> {
                 if Router::$router == Router::Variant {
-                    let terms = self.group.lock().map_err(output_error)?.variant_terms;
-                    for (term, got) in terms.words.iter().copied().enumerate().map(|(index, value)| (RouterCycleDerived::WordSlot(index), value)).chain(std::iter::once((RouterCycleDerived::OneSlot, terms.one))) {
+                    let state = self.group.lock().map_err(output_error)?;
+                    let terms = &state.variant_terms;
+                    for (term, got) in terms.words.iter().map(|term| (RouterCycleDerived::WordSlot(term.slot), term.coefficient)).chain(std::iter::once((RouterCycleDerived::OneSlot, terms.one))) {
                         let id = DerivedId::RouterCycle(Router::Variant, term);
                         let expected = relation.derive_output_term(&id, input_points, output_points, challenges)?;
                         if got != expected { return Err(SumcheckKernelError::DerivedTableDrift { id: id.into(), expected, got }); }
@@ -606,23 +629,12 @@ cycle_adapter!(
         let pc_plus_imm = state.word(BankWord::PCPlusImm)?;
         let pc = state.word(BankWord::PC)?;
         let next_pc = state.word(BankWord::NextPC)?;
-        let words = [
-            rs1_value,
-            rs2_value,
-            rd_pre_value,
-            imm,
-            fall_through_pc,
-            pc_plus_imm,
-            pc,
-            next_pc,
-        ];
-        let variant_bits = source
-            + words
-                .into_iter()
-                .zip(terms.words)
-                .map(|(word, coefficient)| word * coefficient)
-                .sum::<F128>()
-            + terms.one;
+        let variant_bits = terms
+            .words
+            .iter()
+            .try_fold(source + terms.one, |sum, term| {
+                Ok::<_, SumcheckKernelError<F128>>(sum + state.word(term.word)? * term.coefficient)
+            })?;
         Ok(RouterCycleVariantOutputClaims {
             rs1_value,
             rs2_value,

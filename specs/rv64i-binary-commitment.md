@@ -55,7 +55,7 @@ Section numbers refer to Architecture.
 **Parameters.**
 
 - [ ] For every `1 ≤ t ≤ 32` the schedule function returns the `k_i`, `c_i`, `d_i`, `R` and `res` of §5; the rows for `t = 1`, `6`, `10` and `22` are literals in the test: `(0; 2; 3)`, `(5; 2; 3)`, `(5, 4; 6, 2; 7, 6)` and the table of §5.
-- [ ] The exact-arithmetic test of item 1 confirms every query count and asserts every ledger row at most `2^-128` for every `t`.
+- [ ] The exact-arithmetic test of the parameters item confirms every query count and certifies every algebraic and query row of the ledger (commit sample, bridge, batching, fold, sample, positions, closing) at most `2^-128` for every `t`. It reports, and does not compare with `2^-128`, the collision bound `q_h·(q_h − 1)/2^257` and the compilation bound of §8, which depend on query budgets.
 
 **Field.**
 
@@ -82,18 +82,19 @@ Section numbers refer to Architecture.
 
 **Wire.**
 
-- [ ] `read(write(x)) = x` for commitments and openings of every `t ≤ 14` used in the tests; every proper prefix and every extension by one byte of an accepted string is rejected; `n_i = 0`, `n_i > Q_i` and `g_i > n_i·d_i` are rejected before allocation, shown by a test that feeds lengths of `2^32 − 1`.
+- [ ] `read(write(x)) = x` for commitments and openings of every `t ≤ 14` used in the tests; every proper prefix and every extension by one byte of an accepted string is rejected; `n_i = 0`, `n_i > Q_i` and `g_i > n_i·d_i`, and at a level that opens every position `n_i ≠ 2^(d_i)` and `g_i ≠ 0`, are rejected before allocation, shown by a test that feeds lengths of `2^32 − 1`.
 - [ ] `read` and the two verifier functions return without panicking on 10,000 random strings and on every single-byte mutation of an accepted proof at `t = 6`.
 
 **Transcript.**
 
-- [ ] A recording transcript sees exactly the calls of §6, in order, for `t = 6` and `t = 11`; the six labels are disjoint from the nine of the front end; prover and verifier states are equal after `commit` and after `open`.
+- [ ] A recording transcript sees exactly the calls of §6, in order, for `t = 6` (one level, every position opened: no `λ` and no position bytes), `t = 10` (every position at level 0, drawn positions at level 1) and `t = 11`; the six labels are disjoint from the nine of the front end; the recorded calls and the final transcript states of prover and verifier are equal after `commit` and after `open`. The retained states of the two sides are different types and are not compared.
 - [ ] For a fixed transcript state, the positions of a level with `d = 7`, `Q = 5` equal a literal computed in the test from the squeezed bytes by the rule of §6.
 
 **Completeness.**
 
 - [ ] For `t ∈ {1, 2, 5, 6, 9, 10, 11, 14}` and random tables, with `C` and the points produced as the front end produces them, `verify_commit` and `verify_opening` accept the output of `commit` and `open`, and `BitsOpening::value()` equals the evaluation of the table computed bit by bit.
-- [ ] The existing contract tests of the two traits pass with `WhirBits` in place of `TransparentBits`.
+- [ ] The contract tests of the two traits are generic over the scheme and pass for `WhirBits` and for `TransparentBits`: the lifecycle of commit, verify, open and verify from identically initialised transcripts, and `value()` against the evaluation of the table computed bit by bit. They are extracted from the tests of `TransparentBits`, whose checks of its own opening type, its error type and its limit on `log_T` stay with it as tests of that implementation.
+- [ ] `verify_commit` returns a typed error for `t = 0`, `t = 33` and a commitment with a wrong number of lane values; `verify_opening` returns a typed error for a request whose geometry differs from the retained one and for column points, cycle points and column vectors of wrong length, without panicking.
 
 **Rejections.** Each of the following makes `verify_opening` or `read` return an error, at `t = 6` and `t = 11`:
 
@@ -127,7 +128,7 @@ Benchmarks follow the kernels spec: an Apple M4 Max, `-C target-cpu=native`, one
 
 Every figure below is marked *counted* (derived from the algorithm), *estimated* (a count times a unit price that has not been measured for this code) or *measured*.
 
-**Measured: the existing implementation at this geometry.** A separate harness ran the public leanVM implementation unchanged at `2^24` symbols of `F64`, rate 1/2, initial fold 6, later folds 4, no grinding, query counts 260, 65, 37, 26, 20, BLAKE2s-256, on the benchmark machine while it was loaded with other builds, five runs per configuration. Medians, in milliseconds:
+**Measured: the source at this level-0 oracle.** A separate harness ran the public leanVM implementation at `2^24` words of `F64`, rate 1/2, 64 words to a leaf (its initial fold of 6), later folds of 4, no grinding, query counts 260, 65, 37, 26, 20, BLAKE2s-256, on the benchmark machine while it was loaded with other builds, five runs per configuration, each in a fresh process. The harness runs the source's protocol and kernel operations through a copy of its commitment crate that is instrumented with timers, and it builds against its own dependency lock, resolved offline, which is not the lock of the source's workspace. Medians, in milliseconds:
 
 | Phase | 12 threads | 1 thread |
 |---|---:|---:|
@@ -143,53 +144,56 @@ Every figure below is marked *counted* (derived from the algorithm), *estimated*
 | Queries and proof assembly | 0.76 | 0.78 |
 | **Commit** | 67.77 | 311.27 |
 | **Open** | 142.61 | 729.88 |
+| Commit and open, paired | 207.91 | 1,042.89 |
 | Verify | 1.79 | 1.78 |
 | Proof bytes (its own serialisation, pruned paths) | 332,112 | 332,112 |
 | Peak resident memory, rows and packed copy included | 1,325 MiB | 1,319 MiB |
 
-What these figures do not measure: the bridge of §3, since the harness opens a claim whose point is in `F192` through the source's own 64 by 192 ring switch and computes the 64 slice values that this scheme reads from `C`; the commit sample, since the source commits a root alone; the lane order and wire of this spec; and an idle host. The twelve threads were eight performance and four efficiency cores. They are evidence for the ported phases and an upper reference for the rest.
+What these figures do not measure: the bridge of §3, since the harness opens a claim whose point is in `F192` through the source's own 64 by 192 ring switch and computes the 64 slice values, where this scheme reads 128 from `C`; the packing of 128 bits and its products; the commit sample, since the source commits a root alone; the lane order and wire of this spec; and an idle host. The twelve threads were eight performance and four efficiency cores. Medians of phases do not sum to medians of totals: the paired median of commit and open on twelve threads is 207.91 ms, and the two separate medians sum to 210.38. The figures are a loaded-host reference for the source. They are not upper bounds on the port and not measurements of this scheme's bridge.
 
 **Unit prices.** In nanoseconds, added to the table of the kernels spec.
 
 | Symbol | Operation | Point 1 | Point 2 | Source |
 |---|---|---:|---:|---|
-| `c` | one carry-less multiplication of 64-bit words with its share of the reduction | 0.305 | 0.15 | estimated: M/6 of the kernels spec's unit table, to be measured by item 2 |
-| `Lw` | lookup of a 24-byte entry and its XOR, tables of 96 KiB | 0.6 | 0.6 | estimated: 1.5 L, to be measured by item 5 |
-| `nb0` | one level-0 butterfly, with allocation and copy | 0.535 | 0.535 | measured, loaded host: 161.58 ms over 301,989,888 |
-| `nb1` | one later-level butterfly, with allocation and domain set-up | 1.50 | 1.50 | measured, loaded host: 65.37 ms over 43,515,904 |
-| `hb0`, `hb1` | one BLAKE2s compression in a tree of 512-byte, 384-byte leaves | 29.0, 25.7 | the same | measured, loaded host: 136.82 ms over 4,718,591; 88.57 ms over 3,440,636 |
+| `c` | one carry-less multiplication of 64-bit words with its share of the reduction | 0.305 | 0.15 | estimated: M/6 of the kernels spec's unit table, to be measured by item 3 |
+| `Lw` | lookup of one element of a 48-byte entry and its XOR, tables of 192 KiB | 0.6 | 0.6 | estimated: 1.5 L, taken from tables of 96 KiB; to be measured by item 6 on the tables of §9 |
+| `nb0` | one level-0 butterfly, with allocation and copy | 0.535 | 0.535 | measured on the source, loaded host: 161.58 ms over 301,989,888 |
+| `nb1` | one later-level butterfly, with allocation and domain set-up | 1.50 | 1.50 | measured on the source, loaded host: 65.37 ms over 43,515,904 |
+| `hb0`, `hb1` | one BLAKE2s compression in a tree of 512-byte, 384-byte leaves | 29.0, 25.7 | the same | measured on the source, loaded host: 136.82 ms over 4,718,591; 88.57 ms over 3,440,636 |
+
+The measured rows are prices of the source's kernels and not of the port's. The source documents its later butterfly as three carry-less multiplications; `mul_base` of `jolt_field` with its reductions is nine, which is 2.75 ns at point 1 and 1.35 at point 2 against the 1.50 measured, and a level-0 butterfly counted as `3c` is 0.92 and 0.45 against the 0.535 measured. The model takes the measured rows, and item 4 replaces them with the port's.
 
 **Model, at `t = 22`, one thread.**
 
 | Phase | Operations (counted) | Point 1, ms | Status |
 |---|---|---:|---|
-| Level-0 encode | 301,989,888 `nb0` | 161.6 | measured unit; includes a transposition that §2 removes |
-| Level-0 tree | 4,718,591 `hb0` | 136.8 | measured unit |
+| Level-0 encode | 301,989,888 `nb0` | 161.6 | source unit; includes a transposition that §2 removes |
+| Level-0 tree | 4,718,591 `hb0` | 136.8 | source unit |
 | Commit sample | `(3·2^24 + 12·2^18) c` = 53,477,376 `c` | 16.3 | estimated |
 | **Commit** | | **314.7** | |
-| Bridge weight and round 1 | 327,155,712 `c` + 268,435,456 `Lw` | 99.8 + 161.1 = 260.8 | estimated |
-| Rounds 2 to 24 | 301,989,852 `c` | 92.1 | estimated |
-| Induced weights | 7,405,568 butterflies | 7.0 | measured phase |
-| Later encodes | 43,515,904 `nb1` | 65.4 | measured unit |
-| Later trees | 3,440,636 `hb1` | 88.6 | measured unit |
-| Samples of later levels | | 1.5 | measured phase |
-| Queries and assembly | 408 positions | 0.8 | measured phase |
-| **Open** | | **516.1** | |
+| Tables, weights and round 1 | 176,160,768 `c` + 134,217,728 `Lw` | 53.7 + 80.5 = 134.3 | estimated |
+| Rounds 2 to 23 | 150,994,908 `c` | 46.1 | estimated |
+| Induced weights | at most 7,405,568 butterflies | 7.0 | source phase |
+| Equality tables and later samples | `6,501,120 + 1,677,696` = 8,178,816 `c` | 2.5 | estimated |
+| Later encodes | 43,515,904 `nb1` | 65.4 | source unit |
+| Later trees | 3,440,636 `hb1` | 88.6 | source unit |
+| Queries and assembly | 407 positions | 0.8 | source phase |
+| **Open** | | **344.5** | |
 
-Per cycle that is 75.03 ns for commit and 123.06 ns for open, 198.09 ns together. At point 2, where only `c` changes, 73.06 and 99.81. The two estimated phases of the opening, 352.9 ms, stand where the source's measured ring switch and rounds take `447.2 + 122.8 = 570.0` ms; the difference is the slices that this scheme does not compute and a first round that is modelled and not built, and it is the least certain part of the model.
+Per cycle that is 75.03 ns for commit and 82.14 ns for open, 157.17 ns together (estimated). At point 2, where only `c` changes, 73.06 and 69.75. The set-up of the tables of `Φ_α` is under 25,000 operations and is charged as zero (§9); the release points of §9 add no copy. The estimated rows of the opening are 182.8 ms of the 344.5, 53%, and none of them has a measured counterpart: the source's ring switch and rounds take `447.2 + 122.8 = 570.0` ms for a reduction of shape 64 by 192 over `2^24` symbols with the slices computed. This is the least certain part of the model. Without the composed lookup round 1 would cost `48·2^22` multiplications and the opening 83.97 ns per cycle; what the composed lookup has to show in measurement is that tables of 192 KiB with 48-byte entries are read at the price of `Lw`.
 
 **Thresholds.** A threshold is single-thread nanoseconds per cycle at `log_t = 22`, the unrounded model times 1.25 to the nearest nanosecond, as in the kernels spec.
 
 | Benchmark | Model, point 1 | Threshold | Model, point 2 | Threshold at point 2 |
 |---|---:|---:|---:|---:|
 | `bits_whir/commit` | 75.03 | 94 | 73.06 | 91 |
-| `bits_whir/open` | 123.06 | 154 | 99.81 | 125 |
+| `bits_whir/open` | 82.14 | 103 | 69.75 | 87 |
 
-The thresholds of point 1 are in force. They move only when a row of the unit table is replaced by a measurement of the operation that the row names, on a quiet host and on this scheme's code, and then every model and threshold is recomputed in the same PR; no threshold moves to meet a result. The measured rows above are provisional in that sense: they come from a loaded host and from the source. At `log_t = 20` the benchmark reports and has no threshold: the schedule has four levels and a different final message, and no measurement exists at that size.
+The thresholds of point 1 are in force and are provisional: they are forecasts from a model, not ceilings that a run has shown. They move only when a row of the unit table is replaced by a measurement of the operation that the row names, on a quiet host and on this scheme's code, and then every model and threshold is recomputed in the same PR; no threshold moves to meet a result. Every source row above is to be replaced in that way. At `log_t = 20` the benchmark reports and has no threshold: the schedule has four levels and a different final message, and no measurement exists at that size.
 
-On twelve threads at `log_t = 22` the house rule divides the threshold by 9.6: 9.8 ns per cycle for commit and 16.0 for open, 41 ms and 67 ms. The measurement does not support that factor for this workload. The source reaches 16.2 and 34.0 ns per cycle, 67.8 ms and 142.6 ms, which is a speed-up of 4.6 and 5.1 over its single thread and not 9.6. The data cannot separate the load on the host from the memory traffic of the transform and the hashing and from the four efficiency cores. The requirement stays as the rule gives it, it is recorded as at risk, and item 8 measures the scaling on a quiet host before anyone relies on it (Open, 6).
+**Twelve threads.** The kernels spec divides a single-thread threshold by 9.6 for twelve threads. This spec does not rely on that factor: acceptance on twelve threads is wall time, measured directly. The one measurement available, of the source, gives 67.8 ms and 142.6 ms, a speed-up of 4.59 for commit and 5.12 for open over its single thread, on a loaded host with eight performance and four efficiency cores. The data cannot separate the load from the memory traffic of the transform and the hashing and from the core mix, and the ratio of the source says nothing about the scaling of this scheme's bridge. The provisional requirement at `log_t = 22` on twelve threads is the single-thread threshold in wall time divided by the ratio measured for the source: `94·2^22 ns / 4.593 = 86` ms for commit and `103·2^22 ns / 5.118 = 84` ms for open (estimated). The benchmark item measures both on a quiet host, and the requirement is then replaced under the rule for unit rows. At 9.6 the figures would be 41 ms and 45 ms; that is an aspiration.
 
-**Budget.** The prover's budget is 2,100 ns per cycle on one core, 918 ms at `2^22` cycles on twelve threads at the factor 9.6. The scheme takes `94 + 154 = 248` ns of it, 11.8%; with the 745 ns of the kernels' thresholds, 993 ns are allotted and 1,107 remain. In wall time on twelve threads that is 108 ms if the factor of 9.6 holds and `248·2^22/5.02 = 207` ms at the scaling measured for the source. The earlier proposal of 400 ms, 180 for commit and 220 for open, is not adopted: the existing implementation measures 210 ms for both on a loaded host, and the model with the bridge and the commit sample is below the source on one thread. The budget is the thresholds above and nothing looser.
+**Budget.** The prover's budget is 2,100 ns per cycle on one core. The scheme takes `94 + 103 = 197` ns of it, 9.4%; with the 745 ns of the kernels' thresholds, 942 ns are allotted and 1,158 remain. The prover's wall-time target of 918 ms at `2^22` cycles on twelve threads is that budget at 9.6 effective cores. The provisional twelve-thread requirement of this scheme, 170 ms, is 18.5% of it where the single-thread share is 9.4%, so meeting the thresholds above does not certify the wall-time target, which is measured on the whole prover. For reference, the source measures 207.9 ms for commit and open together on twelve threads on the loaded host.
 
 **Memory.** Counted, §9: 576 MiB owned at the peak, 704 MiB with the rows, under the allocation lifetimes that §9 specifies; the source measures 1,325 MiB of resident memory with its packed copy. The benchmark reports the peak of owned allocations by capacity, not by length, and the shared rows separately, through the recorder of the bench support. The requirement is that the owned peak does not exceed the counted 576 MiB by more than 5% at `log_t = 22`, which an implementation that only truncates its vectors does not meet (688 MiB, §9).
 
@@ -244,7 +248,7 @@ with `2^(d_i)` positions `x` and `2^(k_i)` lanes `u`. Leaf `x` of its Merkle tre
 3  P → V   y_0[u] = Σ_w eq_E(z_0, w)·p[u + 2^(k_0)·w]  ∈ E,  u < 2^(k_0)    absorbed
 ```
 
-The commitment is `root_0` and the `2^(k_0)` values `y_0`: `32 + 24·32 = 800` bytes at `t = 22`. The sample is one evaluation of every lane's message at a common point, and not one evaluation of `p` at a point of `E^μ`, for a reason of cost: a claim about `p` would join the sumcheck at level 0 with a weight of `2^μ` elements of `E`, while the lane values combine, after the lane variables are folded, into one claim about `f_1`, whose weight has `2^(c_0)` elements (§4, §9). `verify_commit` checks nothing: it absorbs, draws, and keeps `(t, root_0, z_0, y_0)` as its state. What the sample buys is invariant 2. The word in the leaves is within the decoding radius of at most `L_0` codewords of the interleaved code (§8), where distance counts the positions at which any lane differs. For each pair of members choose one lane in which their messages differ: the two lane messages agree at a uniform point of `E^(c_0)`, drawn after the root, with probability at most `c_0/|E|`, and agreement in every lane implies agreement in that one. So after step 3 at most one member of the list is consistent with `(z_0, y_0)`, and possibly none, except with probability `C(L_0, 2)·c_0/|E|`. The bound has no factor for the number of lanes, and one point shared by all lanes loses nothing. The point is uniform over all of `E^(c_0)`: a point that falls in `K` or on the Boolean cube is used as drawn. A commitment that is a root alone binds the list, and every error term of the front end would then be paid once per member of the list; at the reference size that is a loss of `log2 249 = 7.96` bits on terms that have no margin (§8).
+The commitment is `root_0` and the `2^(k_0)` values `y_0`: `32 + 24·32 = 800` bytes at `t = 22`. The sample is one evaluation of every lane's message at a common point, and not one evaluation of `p` at a point of `E^μ`, for a reason of cost: a claim about `p` would join the sumcheck at level 0 with a weight of `2^μ` elements of `E`, while the lane values combine, after the lane variables are folded, into one claim about `f_1`, whose weight has `2^(c_0)` elements (§4, §9). `verify_commit` validates the geometry, `1 ≤ t ≤ 32`, and the shape of the commitment, `2^(k_0)` values `y_0` for that `t`, and returns a typed error otherwise; then it absorbs, draws, and keeps `(t, root_0, z_0, y_0)` as its state. It makes no algebraic check. `verify_opening` first checks that the geometry of the request is the one retained and that the request has 8 column coordinates, `t` cycle coordinates and 256 column values, and returns a typed error before it indexes any of them. These checks are made on the typed values, since a caller of the two functions does not pass through `read`; offsets and products of lengths use checked arithmetic, and an allocation that fails is a typed error. What the sample buys is invariant 2. The word in the leaves is within the decoding radius of at most `L_0` codewords of the interleaved code (§8), where distance counts the positions at which any lane differs. For each pair of members choose one lane in which their messages differ: the two lane messages agree at a uniform point of `E^(c_0)`, drawn after the root, with probability at most `c_0/|E|`, and agreement in every lane implies agreement in that one. So after step 3 at most one member of the list is consistent with `(z_0, y_0)`, and possibly none, except with probability `C(L_0, 2)·c_0/|E|`. The bound has no factor for the number of lanes, and one point shared by all lanes loses nothing. The point is uniform over all of `E^(c_0)`: a point that falls in `K` or on the Boolean cube is used as drawn. A commitment that is a root alone binds the list, and every error term of the front end would then be paid once per member of the list; at the reference size that is a loss of `log2 249 = 7.96` bits on terms that have no margin (§8).
 
 #### 3. The bridge
 
@@ -281,7 +285,7 @@ w~(q) = Σ_h G[h]·α^h.
 
 `M_r` is the 128 by 128 matrix over `F_2` of multiplication by `r` in `H`; its column `h'` is `r·x^(h')`, obtained from the previous column by `mul_x`. One step is 128 multiplications in `E` and at most `128·128` additions in `E`, half of that for a uniform `r`. At `μ = 23` the recurrence is 2,944 multiplications and at most 376,832 additions, and the final combination 127 multiplications by Horner's rule (counted).
 
-The prover evaluates `Φ_α` with 16 tables of 256 entries of `E`, one per byte of the argument: `16·256·24 = 98,304` bytes, built from the powers of `α` with 16·255 additions each of one entry to another.
+The prover evaluates `Φ_α`, and with it the composed map `e ↦ Φ_α(r[0]·e)`, from 16 tables of 256 entries, one table per byte of the argument (§9).
 
 #### 4. The opening
 
@@ -378,17 +382,17 @@ The table is derived by the rule of §8: for each level in order, with `η = √
 ```text
 commit    L("whir_commit") B(root_0);   then z_0;   L("whir_ood") B(y_0)
 open      L("whir_open");               then α
-level i   λ_i
+level i   i ≥ 1:      λ_i                                     (level 0 draws no λ)
           per round:  L("whir_round") B(u_0 ‖ u_2);   then a
           i < R−1:    L("whir_root") B(root_{i+1});   then z_{i+1};   L("whir_ood") B(y_{i+1})
           i = R−1:    L("whir_final") B(f_R[0] ‖ … ‖ f_R[2^res − 1])
-          then the positions of level i
+          Q_i a number:  the positions of level i             (a level with Q_i "all" draws nothing)
 closing   per round:  L("whir_round") B(u_0 ‖ u_2);   then a
 ```
 
 An element of `E` is absorbed as its 24 canonical bytes and a root as its 32 bytes. Nothing of the opening request is absorbed again: the front end has absorbed `C` and has drawn `rho` and `r_6` from the same transcript, so its state binds them when `whir_open` is absorbed. `y_0` is absorbed as the concatenation of its `2^(k_0)` elements in lane order, in one call. The scheme absorbs nothing after the last closing round.
 
-**Challenges.** An element of `E` is one call of `squeeze_bytes` for 24 bytes: two draws of 16 bytes, their little-endian encodings concatenated, the first 24 bytes kept and read as three little-endian `u64` coefficients. Vectors are drawn coordinate by coordinate in index order. The positions of level `i` are one call of `squeeze_bytes` for `4·Q_i` bytes; position `j` is the little-endian `u32` at bytes `4j..4j+4`, reduced to its low `d_i` bits. Since `2^(d_i)` divides `2^32` the positions are uniform and independent. `d_i ≤ 29` for every admitted `t`.
+**Challenges.** An element of `E` is one call of `squeeze_bytes` for 24 bytes: two draws of 16 bytes, their little-endian encodings concatenated, the first 24 bytes kept and read as three little-endian `u64` coefficients. Vectors are drawn coordinate by coordinate in index order. The positions of level `i` are one call of `squeeze_bytes` for `4·Q_i` bytes; position `j` is the little-endian `u32` at bytes `4j..4j+4`, reduced to its low `d_i` bits. Since `2^(d_i)` divides `2^32` the positions are uniform and independent. `d_i ≤ 29` for every admitted `t`. A level whose `Q_i` is "all" makes no call: its positions are `0, …, 2^(d_i) − 1`.
 
 **Wire.** The commitment is `root_0 ‖ y_0[0] ‖ … ‖ y_0[2^(k_0) − 1]`, `32 + 24·2^(k_0)` bytes. The opening proof is the concatenation, in protocol order, of:
 
@@ -404,7 +408,7 @@ for each level i:
 res closing rounds, each u_0 ‖ u_2                                48 bytes per round
 ```
 
-The multiproof is the standard one. With the distinct positions as the known nodes of the leaf layer, each layer is processed from the leaves up and, within a layer, from left to right: a known node whose sibling is not known takes the next digest of the list as that sibling. The digests are therefore in the order in which the verifier consumes them, and `g_i` is a function of the positions. `read` checks `1 ≤ n_i ≤ min(Q_i, 2^(d_i))`, `g_i ≤ n_i·d_i` and that the length of the string is exactly the sum of the parts, before it allocates; `verify_opening` checks that `n_i` and `g_i` are the counts that the drawn positions determine and rejects otherwise. No position, no claim value `c_x`, no bridge value and no nonce is on the wire.
+The multiproof is the standard one. With the distinct positions as the known nodes of the leaf layer, each layer is processed from the leaves up and, within a layer, from left to right: a known node whose sibling is not known takes the next digest of the list as that sibling. The digests are therefore in the order in which the verifier consumes them, and `g_i` is a function of the positions. `read` works in two passes. The first walks the string without allocating: at each level it reads `n_i` and `g_i` at offsets computed with checked arithmetic, checks `1 ≤ n_i ≤ min(Q_i, 2^(d_i))` and `g_i ≤ n_i·d_i` for a level with a numeric `Q_i`, and `n_i = 2^(d_i)` and `g_i = 0` for a level whose `Q_i` is "all", and at the end checks that the length of the string is exactly the sum of the parts. The second pass constructs the proof. A string that `read` accepts is canonical in form; whether it is accepted as a proof is decided by `verify_opening`, which checks that `n_i` and `g_i` are the counts that the drawn positions determine and rejects otherwise. No position, no claim value `c_x`, no bridge value and no nonce is on the wire.
 
 At `t = 22` the fixed part is `23·48 + 4·56 + 4·24 + 5·8 = 1,464` bytes (counted). The query part depends on the positions. A node that spans a fraction `π = 2^(h−d)` of the leaves, at height `h` of a tree of depth `d`, is sent as a sibling digest when no position falls under it and one falls under its sibling, which for `Q` draws has probability `(1 − π)^Q − (1 − 2π)^Q`; the two events are not independent and are not multiplied. So
 
@@ -470,21 +474,22 @@ a = ( 2·(m + 1/2)^5 + 3·(m + 1/2)·γ·ϱ ) / (3·ϱ^(3/2)) · n + (m + 1/2)/�
 | Batching `λ_i` | `(J_i − 1)·L_i/\|E\|` | a false claim cancels in the combination, for some list member |
 | Fold round `j ≤ k_i` of level `i` | `2·L_i/\|E\| + 2^(k_i − j)·ε_i` | for some list member, a sumcheck round of degree 2 or, at level 0, the vanishing of its residual sample discrepancy (Lemma 2); or correlated agreement of the partial fold |
 | Sample `z_{i+1}` | `C(L_{i+1}, 2)·c_i/\|E\|` | as the commit sample, for level `i+1` |
-| Positions of level `i` | `(1 − γ_i)^(Q_i)` | every queried column agrees with a word that is `γ_i`-far |
+| Positions of level `i` | `(1 − γ_i)^(Q_i)`, and 0 where every position is opened | every queried column agrees with a word that is `γ_i`-far |
 | Closing round | `2/\|E\|` | a sumcheck round of degree 2 |
-| Merkle | `q^2/2^257` for `q` hash queries | a collision of BLAKE2s-256 |
 
-At the reference size, with `|E| = 2^192`, as `−log2` of the error (computed, in double precision):
+Two further terms are not transitions with an error independent of the adversary's work, and they are kept apart from the table. A collision of BLAKE2s-256 as an ideal hash of 256 bits has probability at most `q_h·(q_h − 1)/2^257` for `q_h` queries to it; every row above is conditional on there being none. The Fiat-Shamir transformation, under whichever compilation theorem is taken for the transcript (Open, 3), multiplies the largest transition error by the number `q_t` of queries to the transcript's hash. `q_h` and `q_t` are different budgets.
+
+At the reference size, with `|E| = 2^192`, as `−log2` of the error (computed, in decimal arithmetic at 80 digits):
 
 | Level | `ϱ` | `m` | `η` | `γ` | `L` | `Q` | Positions | Fold, `j = 1` | Sample | Batching | `2L/\|E\|` |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | `(2^18−1)/2^19` | 187 | 0.003781 | 0.28911 | 187.0 | 260 | 128.00 | 129.33 | 173.74 | none | 183.45 |
-| 1 | `(2^14−1)/2^18` | 47 | 0.005319 | 0.74469 | 376.0 | 65 | 128.03 | 137.74 | 171.72 | 175.41 | 182.45 |
-| 2 | `(2^10−1)/2^17` | 35 | 0.002524 | 0.90913 | 2,242.2 | 37 | 128.02 | 136.33 | 166.93 | 174.82 | 179.87 |
-| 3 | `(2^6−1)/2^16` | 16 | 0.001938 | 0.96706 | 8,322.0 | 26 | 128.02 | 138.33 | 163.63 | 173.73 | 177.98 |
-| 4 | `(2^2−1)/2^15` | 5 | 0.001914 | 0.98852 | 27,306.7 | 20 | 128.89 | 142.17 | 160.94 | 172.51 | 176.26 |
+| 0 | `(2^18−1)/2^19` | 249 | 0.002840 | 0.29005 | 249.0 | 259 | 128.003 | 128.270 | 172.92 | none | 183.04 |
+| 1 | `(2^14−1)/2^18` | 47 | 0.005319 | 0.74469 | 376.0 | 65 | 128.029 | 137.74 | 171.72 | 175.42 | 182.45 |
+| 2 | `(2^10−1)/2^17` | 35 | 0.002524 | 0.90913 | 2,242.2 | 37 | 128.022 | 136.33 | 166.93 | 174.82 | 179.87 |
+| 3 | `(2^6−1)/2^16` | 16 | 0.001938 | 0.96706 | 8,322.0 | 26 | 128.021 | 138.33 | 163.63 | 173.73 | 177.98 |
+| 4 | `(2^2−1)/2^15` | 5 | 0.001914 | 0.98852 | 27,306.7 | 20 | 128.890 | 142.17 | 160.94 | 172.51 | 176.26 |
 
-The bridge is at 185.01 bits, the lane combination of the commit sample at 181.87 and a closing round at 191. The "Fold" column is the correlated-agreement part at its worst round, `2^(k_i − 1)·ε_i`; the sample of row `i` is the one that binds level `i` (the commit sample for row 0). The weakest term is the positions of level 0, `(1 − 0.28911)^260 = 2^-128.0006`, and the weakest algebraic term is the fold of level 0 at `2^-129.33`. Each `η` is the largest slack of the form `√ϱ/m` for which the query count is minimal while the fold, sample and batching terms of the level stay below `2^-128`. Every term of the scheme meets the target with no grinding.
+The bridge is at 185.011 bits and a closing round at 191. The "Fold" column is the whole fold row at its worst round, `2·L_i/|E| + 2^(k_i − 1)·ε_i`, which the correlated-agreement part dominates; the sample of row `i` is the one that binds level `i` (the commit sample for row 0). The weakest term is the positions of level 0, `(√ϱ_0 + η_0)^259 = 2^-128.003083`, and the weakest algebraic term is the fold of level 0 at `2^-128.270474`. Each `m` is the smallest for which the query count is minimal while the fold, sample and batching terms of the level stay at most `2^-128`. Over the admitted sizes the minimum of the algebraic and query rows is `2^-128.000021`, at `t = 11`; for `t ≤ 9` every position of the single level is opened and the minimum is above 171.9 bits. Every algebraic and query transition meets the conditional target with no grinding; the hash and compilation terms depend on query budgets and are not in this table.
 
 **Lemma 1 (the candidates of level 0 are `V`-valued).** Let `D = 2^(c_0)` and `n = 2D`, and let `g` be a codeword of the interleaved code over `E` on `S_(d_0)` that agrees with the level-0 oracle on more than a fraction `√ϱ_0` of the positions. Then the message of every lane of `g` is `V`-valued. *Proof in outline.* The agreement set has more than `√((D − 1)·n)` positions, which is at least `D − 1`, so it has at least `D`. Fix a lane and write its polynomial as `g_0 + y·g_1 + y^2·g_2` with each `g_k` in `K[X]` of degree below `D`, which is possible because `1, y, y^2` is a basis of `E` over `K`. The domain lies in `K`, so the value at a position `x` is `g_0(x) + y·g_1(x) + y^2·g_2(x)` with each `g_k(x)` in `K`. The symbol of the oracle at a position of agreement is in `V`, so `g_2` vanishes at `D` distinct points and is zero. The change from monomials to the basis `X_w` has coefficients in `K`, so the message is `V`-valued. Agreement of a position of the interleaved word is agreement in every lane, so the argument applies lane by lane. ∎ The lemma holds for every admitted `t`, since `c_0 ≥ 2`. The fold challenges are in `E` and the relevant code is the one over `E`, but its list at level 0 consists of tables of bits; the commit sample selects at most one of them, and §3 proves the claims about that one. Messages of later levels are folds with challenges in `E` and are `E`-valued.
 
@@ -494,11 +499,23 @@ The bridge is at 185.01 bits, the lane combination of the commit sample at 181.8
 
 **The direct check of the last level.** The claims of the last level's queries are checked against the final message, which is sent in the clear, and not batched; this removes the batching round that they would need and adds no term.
 
-**What the field of the front end bounds.** Every challenge of the front end is in `H`, and each of its rounds has an error of the form `δ/2^128` with `δ ≥ 1`: the bound `8/2^128` for `rho` is `2^-125`, and a sumcheck round of degree `δ` is `δ/2^128`. A larger opening field does not strengthen any of them. The commit sample keeps them from being multiplied by the list size, and that is all the scheme does for them. An experiment that wants 128 bits from the front end needs challenges from a field larger than `H` in the front end, which is outside this spec.
+**The composition ledger.** Every challenge of the front end is in `H`, so the composed protocol has no claim of 128 bits whatever this scheme does. The bounds of the front end's own checks, from the protocol spec (derived):
 
-**Grinding.** There is none. Grinding `g` bits before the positions of a level are drawn does not change that round's error; it multiplies the work of each attempt at that round by `2^g`. Counted as error it would let the query counts drop to 225, 56, 32, 23, 17 at `g = 17` with the position terms at `2^-111.0`, saving 57,760 of the 428,512 bytes at most (41,784 of 332,112 bytes measured on the existing implementation), for an expected `5·2^17` hash evaluations of grinding. It buys nothing for the fold, sample, batching, bridge or front-end terms. It is not adopted, so that the target is met as an error bound.
+| Front-end check | Error | `−log2` |
+|---|---|---:|
+| Column reduction through `value()` alone, the contract | `8/2^128` | 125 |
+| Column reduction as this scheme proves it, for a fixed wrong `C` (§1) | `1/2^128` | 128 |
+| A sumcheck round of degree 6, the highest of the reference layout | `6/2^128` | 125.415 |
+| A sumcheck round of degree 17, the highest admitted | `17/2^128` | 123.913 |
+| The `8 + t = 30` coordinates of `tau` of `SpartanOuterF2` at `t = 22`, as one transition | `30/2^128` | 123.093 |
+| The `a = 61` coordinates of `tau` of the output check, at the largest admitted `a`, as one transition | `61/2^128` | 122.069 |
+| The 185 rounds of the reference layout, union bound over their degrees alone | `640/2^128` | 118.678 |
 
-**What remains below the target.** Not the scheme's rounds. Below it are: the front end's terms, as above; the Merkle term, which is a statement about work and reaches `2^-128` only for `q ≤ 2^64.5` hash queries, a collision costing about `2^128` evaluations; and the multiplication by `q` of the Fiat-Shamir transformation, under which a round error of `2^-128` is security against `2^128/q`-fold advantage and not an error of `2^-128` after `q` attempts.
+The per-round ceiling of the composed protocol is 125.415 bits at the reference layout and 123.913 bits at the largest admitted degree, unless the front end grinds or changes its field, which is outside this spec. These are ceilings read from single round bounds and not a theorem about the composed protocol. With a vector of challenges counted as one transition the two vector rows are lower; counted one coordinate at a time they need an invariant that the protocol spec does not state; and the failure of a whole interactive execution is bounded by a sum, of which the last row is one part. This scheme improves one row, the column reduction, and the commit sample keeps every row from being multiplied by the list size. It does not improve the sumchecks, and a larger opening field would not either.
+
+**Grinding.** There is none. Grinding `g` bits before the positions of a level are drawn does not change that round's error; it multiplies the work of each attempt at that round by `2^g`. Counted as error it would let the query counts drop to 225, 56, 32, 23, 17 at `g = 17` with the position terms at `2^-111.0`, saving 56,640 of the 427,392 bytes of the disjoint-path bound (counted; 41,784 of 332,112 bytes measured on the source), for an expected `5·2^17` hash evaluations of grinding. It buys nothing for the fold, sample, batching, bridge or front-end terms. It is not adopted, so that the target is met as an error bound.
+
+**What "128 bits" does not cover.** The algebraic and query transitions of the scheme meet the target, conditionally. Three things do not. The front end's rows, as above. The hash: the collision bound is at most `2^-128` only for `q_h ≤ 2^64.5` queries, a collision with constant probability costs on the order of `2^128` evaluations, and both figures are for an ideal hash against a classical adversary. The compilation: a transition error of `2^-128` is an advantage of at most `q_t·2^-128` after `q_t` queries to the transcript's hash and not an error of `2^-128`.
 
 #### 9. The prover
 

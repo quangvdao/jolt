@@ -192,73 +192,61 @@ impl CycleValidation<'_> {
         cycles: Range<usize>,
         rows: usize,
     ) -> Result<(), SourceError> {
-        for cycle in cycles {
+        let mut fault = cycles.clone().find_map(|cycle| {
             let row = source.bytecode_index(cycle);
-            if row >= rows {
-                return Err(SourceError::BytecodeIndex { cycle, row, rows });
-            }
-            let per_cycle = self.per_cycle.iter().find_map(|&(column, bound)| {
-                check_cycle_digit(source, column, cycle, bound)
-                    .err()
-                    .map(|error| (column, error))
-            });
-            let row_bytes = self.row_bytes.iter().find_map(|&(column, bound, cache)| {
-                check_cycle_digit(source, column, cycle, bound)
-                    .and_then(|digit| {
-                        if digit != cache[row].map(|value| usize::from(value.get()) - 1) {
-                            Err(SourceError::RowDigit { column, cycle, row })
-                        } else {
-                            Ok(())
+            (row >= rows).then_some((cycle, 0, SourceError::BytecodeIndex { cycle, row, rows }))
+        });
+        let end = fault.as_ref().map_or(cycles.end, |(cycle, _, _)| *cycle);
+        macro_rules! scan {
+            ($column:expr, $bound:expr, $matches:expr) => {{
+                let column = $column;
+                let bound = $bound;
+                for cycle in cycles.start..end {
+                    let digit = source.digit(column, cycle);
+                    let error = if let Some(digit) = digit.filter(|&digit| digit >= bound) {
+                        Some(SourceError::Digit {
+                            column,
+                            cycle,
+                            digit,
+                            bound,
+                        })
+                    } else {
+                        $matches(digit, cycle)
+                    };
+                    if let Some(error) = error {
+                        let rank = column + 1;
+                        if fault.as_ref().is_none_or(|(previous, previous_rank, _)| {
+                            (cycle, rank) < (*previous, *previous_rank)
+                        }) {
+                            fault = Some((cycle, rank, error));
                         }
-                    })
-                    .err()
-                    .map(|error| (column, error))
+                        break;
+                    }
+                }
+            }};
+        }
+        for &(column, bound) in &self.per_cycle {
+            scan!(column, bound, |_, _| None);
+        }
+        for &(column, bound, cache) in &self.row_bytes {
+            scan!(column, bound, |digit, cycle| {
+                let row = source.bytecode_index(cycle);
+                (digit != cache[row].map(|value| usize::from(value.get()) - 1))
+                    .then_some(SourceError::RowDigit { column, cycle, row })
             });
-            let row_words = self.row_words.iter().find_map(|&(column, bound, cache)| {
-                check_cycle_digit(source, column, cycle, bound)
-                    .and_then(|digit| {
-                        if digit != cache[row].map(|value| value.get() - 1) {
-                            Err(SourceError::RowDigit { column, cycle, row })
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .err()
-                    .map(|error| (column, error))
+        }
+        for &(column, bound, cache) in &self.row_words {
+            scan!(column, bound, |digit, cycle| {
+                let row = source.bytecode_index(cycle);
+                (digit != cache[row].map(|value| value.get() - 1))
+                    .then_some(SourceError::RowDigit { column, cycle, row })
             });
-            // Cache classes remove dispatch from each column check; their minimum
-            // restores column order when faults occur in more than one class.
-            if let Some((_, error)) = [per_cycle, row_bytes, row_words]
-                .into_iter()
-                .flatten()
-                .min_by_key(|(column, _)| *column)
-            {
-                return Err(error);
-            }
+        }
+        if let Some((_, _, error)) = fault {
+            return Err(error);
         }
         Ok(())
     }
-}
-
-#[inline]
-fn check_cycle_digit(
-    source: &impl CycleSource,
-    column: usize,
-    cycle: usize,
-    bound: usize,
-) -> Result<Option<usize>, SourceError> {
-    let digit = source.digit(column, cycle);
-    if let Some(digit) = digit {
-        if digit >= bound {
-            return Err(SourceError::Digit {
-                column,
-                cycle,
-                digit,
-                bound,
-            });
-        }
-    }
-    Ok(digit)
 }
 
 /// Shared source whose dimensions, indices and every digit column are checked.
@@ -320,10 +308,16 @@ impl<S: CycleSource> ValidatedTrace<S> {
         }
         if !row_digits.is_empty() {
             let chunk_count = rows.div_ceil(ROW_CHUNK);
-            check_validation_size::<Vec<RowChunk<'_>>>(chunk_count, "row chunk metadata")?;
-            let mut chunks: Vec<Vec<RowChunk<'_>>> = (0..chunk_count)
-                .map(|_| Vec::with_capacity(row_digits.len()))
-                .collect();
+            let descriptors = chunk_count.checked_mul(row_digits.len()).ok_or(
+                SourceError::ValidationScratchSize {
+                    name: "row chunk metadata",
+                    len: chunk_count,
+                    element_size: size_of::<RowChunk<'_>>(),
+                },
+            )?;
+            check_validation_size::<RowChunk<'_>>(descriptors, "row chunk metadata")?;
+            let column_count = row_digits.len();
+            let mut chunks = Vec::with_capacity(descriptors);
             for RowColumn {
                 column,
                 bound,
@@ -332,33 +326,40 @@ impl<S: CycleSource> ValidatedTrace<S> {
             {
                 match digits {
                     RowDigits::Byte(digits) => {
-                        for (chunk, digits) in chunks.iter_mut().zip(digits.chunks_mut(ROW_CHUNK)) {
-                            chunk.push(RowChunk::Byte {
-                                column: *column,
-                                bound: *bound,
-                                digits,
-                            });
+                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
+                            chunks.push((
+                                chunk,
+                                RowChunk::Byte {
+                                    column: *column,
+                                    bound: *bound,
+                                    digits,
+                                },
+                            ));
                         }
                     }
                     RowDigits::Word(digits) => {
-                        for (chunk, digits) in chunks.iter_mut().zip(digits.chunks_mut(ROW_CHUNK)) {
-                            chunk.push(RowChunk::Word {
-                                column: *column,
-                                bound: *bound,
-                                digits,
-                            });
+                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
+                            chunks.push((
+                                chunk,
+                                RowChunk::Word {
+                                    column: *column,
+                                    bound: *bound,
+                                    digits,
+                                },
+                            ));
                         }
                     }
                 }
             }
+            chunks.sort_unstable_by_key(|(chunk, _)| *chunk);
             if let Some(Some(fault)) = chunks
-                .into_par_iter()
+                .par_chunks_mut(column_count)
                 .enumerate()
-                .map(|(chunk, mut columns)| {
+                .map(|(chunk, columns)| {
                     let rows = chunk * ROW_CHUNK..((chunk + 1) * ROW_CHUNK).min(rows);
                     columns
                         .iter_mut()
-                        .filter_map(|column| column.validate(source.as_ref(), rows.clone()))
+                        .filter_map(|(_, column)| column.validate(source.as_ref(), rows.clone()))
                         .min_by_key(|fault| (fault.row, fault.column))
                 })
                 .find_first(Option::is_some)

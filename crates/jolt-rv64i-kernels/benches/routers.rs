@@ -358,7 +358,7 @@ fn main() -> Result<(), RunnerError> {
             times.set(3, start.elapsed());
             Ok::<_, BenchError>(core)
         },
-        |core, times, _| {
+        |core, times| {
             for (phase, time) in core.times.iter().enumerate() {
                 times.set(4 + phase, *time);
             }

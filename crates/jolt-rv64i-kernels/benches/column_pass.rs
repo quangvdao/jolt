@@ -87,7 +87,7 @@ fn main() -> Result<(), RunnerError> {
             times.set(3, clock.elapsed());
             Ok((pass, columns))
         },
-        |_, _, _| {},
+        |_, _| {},
         |record, _, ()| {
             println!("column_pass_parts/local/{}/{} pass_ns={:.6} merge_ns={:.6} readout_ns={:.6} bucket_bytes_per_worker={} samples={} model_pass_ns={} threshold_ns={:.6} loaded_machine=true", record.log_t, record.threads,
                 record.phases[4].median, record.phases[5].median, record.phases[6].median,

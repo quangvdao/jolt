@@ -196,7 +196,7 @@ fn main() -> Result<(), RunnerError> {
             }
             Ok((core, output))
         },
-        |(core, _), _, _| core.report_diagnostics(),
+        |(core, _), _| core.report_diagnostics(),
         |record, _, &bytes| {
             if bytes == FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT && record.threads == 1 {
                 record.print_requirement(

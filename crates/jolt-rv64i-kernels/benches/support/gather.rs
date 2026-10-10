@@ -110,6 +110,7 @@ pub struct GatherSample<S> {
 
 /// Times canonical gathers, checksum reductions and the first four lazy binds,
 /// including fourth-bind materialisation. Family construction is outside timing.
+/// The diagnostic requires exactly five columns, matching both chunk groups.
 pub fn measure_lazy_gathers<S: ChunkIndexSource>(
     source: S,
     tables: Vec<Vec<F128>>,
@@ -117,6 +118,9 @@ pub fn measure_lazy_gathers<S: ChunkIndexSource>(
 ) -> Result<GatherSample<S>, GatherError> {
     let log_t = source.cycles().ilog2() as usize;
     let d = source.num_polys();
+    if d != 5 {
+        return Err(ChunkProductError::Columns { columns: d }.into());
+    }
     let mut columns = LazyFoldedRa::try_new(tables, source)?;
     let mut duration = Duration::ZERO;
     for (round, &challenge) in challenges.iter().take(log_t.min(4)).enumerate() {
@@ -127,11 +131,11 @@ pub fn measure_lazy_gathers<S: ChunkIndexSource>(
             .map(|chunk| {
                 let start = chunk * geometry.chunk_len() / 2;
                 let end = start + geometry.chunk_len() / 2;
-                let mut values = [(F128::from_raw(0), F128::from_raw(0)); 7];
+                let mut values = [(F128::from_raw(0), F128::from_raw(0)); 5];
                 let mut sum = F128::from_raw(0);
                 for pair in start..end {
-                    columns.lo_hi_all(pair, &mut values[..d]);
-                    for &(low, high) in &values[..d] {
+                    columns.lo_hi_all(pair, &mut values);
+                    for &(low, high) in &values {
                         sum += low + high;
                     }
                 }
@@ -185,7 +189,7 @@ pub fn run_gathers(
             let _ = black_box(&sample.columns);
             Ok::<_, GatherError>(sample)
         },
-        |_, _, _| {},
+        |_, _| {},
         |record, _, _| {
             record.print_phase(&record.id, 0, None);
         },

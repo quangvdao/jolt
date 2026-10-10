@@ -613,7 +613,7 @@ fn main() -> Result<(), RunnerError> {
             times.set(3, start.elapsed());
             Ok::<_, RunnerError>((core, values))
         },
-        |(core, _), times, _| {
+        |(core, _), times| {
             times.set(4, core.combined);
             times.set(5, core.rounds[0]);
             times.set(6, core.rounds[1]);

@@ -250,7 +250,7 @@ fn main() -> Result<(), RunnerError> {
             times.set(3, clock.elapsed());
             Ok((core, values))
         },
-        |(core, _), times, _| {
+        |(core, _), times| {
             for (round, &duration) in core.rounds.iter().enumerate() {
                 times.set(4 + round, duration);
             }

@@ -164,7 +164,7 @@ fn main() -> Result<(), RunnerError> {
             times.set(3, clock.elapsed());
             Ok((core, values))
         },
-        |_, _, _| {},
+        |_, _| {},
         |record, _, &shared| {
             if shared {
                 println!("{}_prepared prepared_bytes={} incremental_peak_bytes={} incremental_final_bytes={} allocs_with_preparation={} loaded_machine=true", record.id,

@@ -1,11 +1,60 @@
-//! Run a core with `cargo bench -p jolt-rv64i-kernels --features test-utils
-//! --bench example -- --log-t 20,22 --threads 1,12`.
+//! Every kernel benchmark enters this runner, for example:
+//! `CARGO_TARGET_DIR=/Users/quangdao/Documents/SNARKs/jolt-wt/k-tail-target
+//! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels
+//! --features test-utils --bench tail -- --log-t 20 --threads 1 --samples 3`.
 //!
-//! The constructor includes prerequisite passes and returns the input claim.
-//! Rounds use fixed seeded challenges, finish binds the final challenge, and
-//! extraction includes subsequent passes. Source generation and pool creation
-//! precede measurement. Times are wall-clock nanoseconds per input cycle;
-//! allocator bytes and counts cover the four phases, excluding resident sources.
+//! A case record id is `name/profile/log_t/threads`: the synthetic distribution,
+//! log2 input-cycle count and warmed pool size are explicit. `samples` is the
+//! number of measured executions. Cases sharing a source are interleaved in the
+//! declared order (A B C A B C), with a fresh kernel per execution. Sources and
+//! pools are built before sampling; each pool outlives its last interval.
+//!
+//! `prepare_ns` is the once-per-source fixture cost, reported separately by the
+//! `name_source_setup` record with `samples=1`. The fixture and its disposal are
+//! outside all sample timers and allocation intervals. Seeded single-core
+//! challenges are prepared outside sampling; real batches supply their actual
+//! transcript challenges. `reduction_shared` additionally reports `prepare_ns`
+//! for its freshly owned word table per sample: this table must move into its
+//! core, so its creation remains untimed by the four primary phases but inside
+//! allocation accounting, as the `_prepared` record discloses.
+//!
+//! Case duration fields are wall-clock nanoseconds divided by the input-cycle
+//! count. Probe primary durations and machinery pass durations instead divide
+//! by the kernel's operation count. Probe `chain_ns` is per chain and `term_ns`
+//! divides that by its term count. Machinery `_construction` records are per
+//! input cycle; `_plan` construction is per operation. `<phase>_ns` is the phase
+//! median; `<phase>_min_ns` and `<phase>_max_ns` bound its samples. For cores, `construct` includes prerequisite passes and
+//! core allocation, `rounds` includes messages and claim evaluation, `finish`
+//! includes terminal binds, and `extract` includes final values and subsequent
+//! passes. Batches return disjoint round and finish durations. Extra named
+//! phases describe nested work and do not enter totals twice. `total_ns` is the
+//! median of per-sample sums of the case's nominated primary phases, NOT the sum
+//! of phase medians; `total_min_ns` and `total_max_ns` bound those same sums.
+//! Single-pass `ns`, `min_ns` and `max_ns` use the nominated pass distribution.
+//! `threshold_ns` is the fixed requirement and `meets_threshold` compares its
+//! median to that requirement. `model_ns` is a model rather than a measurement;
+//! `over_25_percent` compares a measured median to 1.25 times that model.
+//! Comparisons report `gain_over_default_ns`, the difference of total medians,
+//! `combined_spread_ns`, the sum of both max-minus-min ranges, and
+//! `gain_exceeds_spread`, the runner's decision. `loaded_machine=true` marks all
+//! figures as loaded-machine evidence, not quiet-machine calibration.
+//!
+//! `peak_bytes`, `final_bytes` and `allocs` are maxima across sample intervals.
+//! The counting allocator records successful Rust allocations/reallocations
+//! and requested heap bytes; reallocations count as allocations. `peak_bytes`
+//! is the high-water live-byte increase over the interval baseline;
+//! `final_bytes` is the live-byte increase with the measured state still alive
+//! when counters stop. The resident source, prepared fixture, warmed pools and
+//! runner bookkeeping are outside the baseline increase. These figures are not
+//! RSS, allocator retention, stack use or direct libc allocations. Measured
+//! state and fixtures are released only after their counters stop. Machinery
+//! construction and pass counters have separate intervals; probes include
+//! kernel construction in allocation accounting but report primary pass time.
+//!
+//! `standalone_gathers_and_lazy_binds` drives canonical lazy gathers, checksum
+//! reductions and the first four binds, including materialisation. Compact
+//! source and family construction are outside its timer. It is a separate
+//! diagnostic, not a share of the fused product rounds or an additive split.
 
 pub mod allocator;
 pub mod arithmetic;
@@ -236,17 +285,6 @@ fn warmed_pools(threads: &[usize]) -> Result<Vec<(usize, ThreadPool)>, RunnerErr
     Ok(pools)
 }
 
-/// Converts measured durations to nanoseconds per input cycle.
-#[derive(Clone, Copy)]
-pub struct CycleScale(usize);
-
-impl CycleScale {
-    /// Normalises durations using the measured source's cycle count.
-    pub fn durations<const N: usize>(self, values: [Duration; N]) -> [f64; N] {
-        values.map(|time| time.as_nanos() as f64 / self.0 as f64)
-    }
-}
-
 /// Clock for nested kernel phases. All benchmark clocks are owned by support.
 pub struct Clock(Instant);
 
@@ -268,10 +306,6 @@ pub struct PhaseTimes {
 impl PhaseTimes {
     pub fn set(&mut self, phase: usize, time: Duration) {
         self.times[phase] = time;
-    }
-
-    pub fn add(&mut self, phase: usize, time: Duration) {
-        self.times[phase] += time;
     }
 }
 
@@ -411,7 +445,7 @@ pub fn run_cases<P, R, E, V>(
     cases: &[Case<V>],
     prepare: impl Fn(Arc<SyntheticTrace>) -> Result<P, E> + Sync,
     measure: impl Fn(&P, &V, &[F128], &mut PhaseTimes) -> Result<R, E> + Sync,
-    inspect: impl Fn(&R, &mut PhaseTimes, CycleScale) + Sync,
+    inspect: impl Fn(&R, &mut PhaseTimes) + Sync,
     report: impl Fn(&Record, &P, &V) + Sync,
 ) -> Result<Vec<Record>, RunnerError>
 where
@@ -463,7 +497,7 @@ where
                                         message: error.to_string(),
                                     })?;
                             let allocation = measurement.finish();
-                            inspect(&state, &mut times, CycleScale(cycles));
+                            inspect(&state, &mut times);
                             drop(state);
                             Ok(Sample {
                                 times: times
@@ -601,12 +635,13 @@ where
             times.set(3, clock.elapsed());
             Ok::<_, E>((core, output, batch))
         },
-        |_, _, _| {},
+        |_, _| {},
         |record, fixture, ()| report(record, fixture),
     )?;
     Ok(())
 }
 
+/// Four-phase single-core entry; extraction receives the low-variable-first point.
 pub fn run_core<C, E, O>(
     bench: &str,
     profiles: &[SynthProfile],
@@ -617,50 +652,14 @@ where
     C: ProveRounds<F128> + Send,
     E: StdError,
 {
-    run_core_variants(
-        bench,
-        profiles,
-        &[("", ())],
-        |source, ()| construct(source),
-        extract,
-        |_, _, _| {},
-    )
-}
-
-pub fn run_core_variants<C, E, O, V: Sync>(
-    bench: &str,
-    profiles: &[SynthProfile],
-    variants: &[(&str, V)],
-    construct: impl Fn(Arc<SyntheticTrace>, &V) -> Result<(C, F128), E> + Sync,
-    extract: impl Fn(&C, &[F128]) -> Result<O, E> + Sync,
-    report: impl Fn(&C, &O, CycleScale) + Sync,
-) -> Result<(), RunnerError>
-where
-    C: ProveRounds<F128> + Send,
-    E: StdError,
-{
-    let cases: Vec<_> = variants
-        .iter()
-        .map(|(name, variant)| {
-            Case::core(
-                &if name.is_empty() {
-                    bench.to_owned()
-                } else {
-                    format!("{bench}/{name}")
-                },
-                variant,
-                &[],
-            )
-        })
-        .collect();
     let _ = run_cases(
         profiles,
-        &cases,
+        &[Case::core(bench, (), &[])],
         Ok::<_, RunnerError>,
-        |source, variant, point, times| {
+        |source, (), point, times| {
             let clock = Clock::start();
             let (mut core, claim) =
-                construct(Arc::clone(source), variant).map_err(|error| RunnerError::Core {
+                construct(Arc::clone(source)).map_err(|error| RunnerError::Core {
                     message: error.to_string(),
                 })?;
             times.set(0, clock.elapsed());
@@ -673,11 +672,10 @@ where
             })?;
             let _ = black_box(&output);
             times.set(3, clock.elapsed());
-            // Diagnostics execute after the runner closes the allocation interval.
             Ok((core, output))
         },
-        |(core, output), _, scale| report(core, output, scale),
-        |_, _, _| {},
+        |_, _| {},
+        |_, _, ()| {},
     )?;
     Ok(())
 }
@@ -739,7 +737,7 @@ struct ProbeInfo {
 /// Allocation fields are maxima across samples and include construction; final
 /// bytes count the state still resident after its measured passes. Probe defaults
 /// are log_t=22, threads=1,12 and samples=5; `--units` selects units or
-/// unit/variant prefixes. Samples alternate forward and reverse case order.
+/// unit/variant prefixes. Samples repeat declaration order (A B C A B C).
 /// Fixed-size records run once per thread count under independent/fixed, without
 /// generating a trace. A source is built only when selected cases consume it.
 #[expect(

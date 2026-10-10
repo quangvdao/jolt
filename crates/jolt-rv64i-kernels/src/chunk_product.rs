@@ -826,6 +826,11 @@ fn accumulate_product<const D: usize, const N: usize>(
     factors: &[[F128; 2]; 8],
     sums: &mut [F128Accumulator; 8],
 ) {
+    if D == 1 {
+        sums[0].fmadd(factors[0][0], factors[1][0]);
+        sums[1].fmadd(factors[0][1], factors[1][1]);
+        return;
+    }
     let (left, right, groups) = product_points::<N>(factors, D + 1);
     for i in 0..N + 2 {
         if groups == 1 {

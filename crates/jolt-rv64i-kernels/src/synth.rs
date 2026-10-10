@@ -40,6 +40,7 @@ use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use std::mem::size_of;
+use std::ops::Range;
 use thiserror::Error;
 
 const GENERATION_CHUNK: usize = 4096;
@@ -405,14 +406,26 @@ impl CycleSource for SyntheticTrace {
     fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
         self.cycles
             .get(cycle)
-            .and_then(|c| c.digits.get(column))
-            .and_then(|&d| {
-                if d & PRESENT != 0 {
-                    Some(usize::from(d & !PRESENT))
-                } else {
-                    None
-                }
+            .and_then(|row| row.digits.get(column))
+            .and_then(|&byte| {
+                let encoded = encoded_digit(byte);
+                (encoded != 0).then(|| usize::from(encoded - 1))
             })
+    }
+    fn digits(&self, cycles: Range<usize>, out: &mut [u16]) {
+        if cycles.len().checked_mul(DIGIT_COLUMNS) != Some(out.len()) {
+            out.fill(0);
+            return;
+        }
+        for (cycle, output) in cycles.zip(out.chunks_exact_mut(DIGIT_COLUMNS)) {
+            if let Some(row) = self.cycles.get(cycle) {
+                for (slot, &byte) in output.iter_mut().zip(&row.digits) {
+                    *slot = encoded_digit(byte);
+                }
+            } else {
+                output.fill(0);
+            }
+        }
     }
     #[inline]
     fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
@@ -426,14 +439,17 @@ impl CycleSource for SyntheticTrace {
                 .selectors
                 .get(column - 12)
                 .and_then(|&d| {
-                    if d & PRESENT != 0 {
-                        Some(usize::from(d & !PRESENT))
-                    } else {
-                        None
-                    }
+                    let encoded = encoded_digit(d);
+                    (encoded != 0).then(|| usize::from(encoded - 1))
                 })
         }
     }
+}
+
+#[inline]
+fn encoded_digit(byte: u8) -> u16 {
+    let value = u16::from(byte & !PRESENT) + 1;
+    value & 0_u16.wrapping_sub(u16::from(byte >> 7))
 }
 
 fn seeded_rng(seed: u64) -> ChaCha20Rng {

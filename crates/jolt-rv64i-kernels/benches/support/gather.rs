@@ -8,7 +8,7 @@ use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaErr
 use jolt_rv64i_kernels::chunk_product::ChunkProductError;
 use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use jolt_rv64i_kernels::round::eq::eq_table;
-use jolt_rv64i_kernels::source::{PrepareRequest, PresentGroup, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{PrepareRequest, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::SynthProfile;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -25,25 +25,6 @@ pub enum GatherError {
     Par(#[from] ParError),
     #[error(transparent)]
     Lazy(#[from] LazyRaError),
-}
-
-/// Present row-major digits, validated and compacted outside the gather timer.
-#[derive(Clone)]
-pub struct CompactDigits(PresentGroup);
-
-impl ChunkIndexSource for CompactDigits {
-    fn num_polys(&self) -> usize {
-        self.0.num_polys()
-    }
-    fn cycles(&self) -> usize {
-        self.0.cycles()
-    }
-    fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        self.0.index(column, cycle)
-    }
-    fn index_bound(&self, column: usize) -> Option<usize> {
-        self.0.index_bound(column)
-    }
 }
 
 /// Keeps the final family resident until allocation measurement has ended.
@@ -103,6 +84,7 @@ pub fn run_gathers(
         .iter()
         .enumerate()
         .map(|(index, (name, _))| Case {
+            preparation: "input_clone",
             name: (*name).to_owned(),
             variant: index,
             phases: vec!["standalone_gathers_and_lazy_binds".to_owned()],
@@ -121,13 +103,7 @@ pub fn run_gathers(
                     optional: vec![],
                 },
             )?;
-            Ok::<_, GatherError>(
-                groups
-                    .present
-                    .into_iter()
-                    .map(CompactDigits)
-                    .collect::<Vec<_>>(),
-            )
+            Ok::<_, GatherError>(groups.present)
         },
         |sources, &index| Ok::<_, GatherError>(sources[index].clone()),
         |_, source, &index, challenges, times| {

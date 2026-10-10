@@ -130,8 +130,8 @@ For any layout the round multiplications number `121 + (27 + 2D)·t + 5a + 3b` a
 | 3b | `5t` for the cycle weight of five members; under 100 for the slot weights | 67 | 15 |
 | 4 | `2t + 3a`; a split equality table over the address, `2^{⌈a/2⌉+1}` entries; one `lift` and two `M` per public I/O word | 18 | 46 |
 | 5 | `6t` for the two `lt` values; the same split table; one `lift` and two `M` per word of the initial RAM | 16 | 6 |
-| 6a | `t` for `FinalPc`; after the rounds, a split equality table over the bytecode index, `2^{⌈b/2⌉+1}` entries, and one pass over the valid bytecode rows: per row four `lift`s, lookups in the kind and register tables, and at most 10 `M` | 17 | 3 |
-| 6b | `6t` for six equality weights; 1,221 for `next(r_3, r_6)` (§3); 31 per chunk for `d_b + d_a` chunks; `3t + 6` per column weight as §8.17 writes it, about 18,000 for the 256 columns, or `3t + 6·256` when the three equality values are computed once; `2^8 + 256` for the value at `rho` | 308 | 9 |
+| 6a | `t` for `FinalPc`; 342 for the equality tables over the variant, the three kinds and the register index with their coefficients folded in, 118 for the five tables and 224 for the weighting; after the rounds, a split equality table over the bytecode index, `2^{⌈b/2⌉+1}` entries, and one pass over the valid bytecode rows: per row four `lift`s, lookups in the kind and register tables, and 9 `M`; two `M` after the pass for the entry and next coefficients | 17 | 3 |
+| 6b | `6t` for six equality weights; 1,221 for `next(r_3, r_6)` (§3); 29 per chunk of four bits, 14 for its equality table and 15 for its indicators, and fewer for a shorter top chunk, for `d_b + d_a` chunks; `3t + 6` per column weight as §8.17 writes it, about 18,000 for the 256 columns, or `3t + 6·256` when the three equality values are computed once; `2^8 − 2 + 256` for the value at `rho` | 308 | 9 |
 
 The expressions total 446 `M` and the folds 94.
 

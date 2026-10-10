@@ -922,6 +922,67 @@ fn cycle_scalar_becoming_zero_and_short_idle_zero_match_definitions() {
 }
 
 #[test]
+fn retained_word_lifts_move_the_original_allocation_and_drop_other_tables() {
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    pool.install(|| {
+        let mut rng = ChaCha20Rng::seed_from_u64(1420);
+        let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1420).unwrap());
+        let trace = ValidatedTrace::new(source.clone()).unwrap();
+        let shapes = synthetic_router_shapes().unwrap();
+        let x = point(17, &mut rng);
+        let bit_weights: Vec<_> = (0..64).map(|bit| equality(&x[..6], bit)).collect();
+        let words = source_lift(&trace, &shapes, &x)
+            .unwrap()
+            .lifts
+            .word_indices()
+            .to_vec();
+        assert!(words.len() > 1);
+        for word in words {
+            let lifted = source_lift(&trace, &shapes, &x).unwrap();
+            drop(lifted.source_tables);
+            let lifts = lifted.lifts;
+            let index = lifts.word_indices().binary_search(&word).unwrap();
+            let original = &lifts.tables()[index];
+            let pointer = original.as_ptr();
+            let length = original.len();
+            let capacity = original.capacity();
+            let other_bytes: usize = lifts
+                .tables()
+                .iter()
+                .enumerate()
+                .filter(|&(position, _)| position != index)
+                .map(|(_, table)| table.capacity() * size_of::<F128>())
+                .sum();
+            let expected: Vec<_> = (0..source.cycles())
+                .map(|cycle| word_extension(source.trace_word(word, cycle), &bit_weights))
+                .collect();
+            let before = CountingAllocator::live_bytes();
+            let table = lifts.into_word(word).unwrap();
+            let after = CountingAllocator::live_bytes();
+            assert_eq!(table.as_ptr(), pointer);
+            assert_eq!(table.len(), length);
+            assert_eq!(table.capacity(), capacity);
+            assert_eq!(table, expected);
+            assert!(after + other_bytes <= before);
+        }
+        for word in [3, usize::MAX] {
+            let lifted = source_lift(&trace, &shapes[..1], &x).unwrap();
+            drop(lifted.source_tables);
+            let lifts = lifted.lifts;
+            assert!(!lifts.word_indices().contains(&word));
+            let table_bytes: usize = lifts
+                .tables()
+                .iter()
+                .map(|table| table.capacity() * size_of::<F128>())
+                .sum();
+            let before = CountingAllocator::live_bytes();
+            assert!(lifts.into_word(word).is_none());
+            assert!(CountingAllocator::live_bytes() + table_bytes <= before);
+        }
+    });
+}
+
+#[test]
 fn malformed_router_sources_and_points_return_named_errors() {
     let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 3, 2, 1405).unwrap());
     let trace = Arc::new(ValidatedTrace::new(source.clone()).unwrap());

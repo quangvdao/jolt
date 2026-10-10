@@ -12,7 +12,6 @@ use jolt_field::F128;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use readout::{BankStorage, ReadBit, ReadoutShape};
-use std::time::{Duration, Instant};
 
 #[cfg(feature = "test-utils")]
 mod calibration;
@@ -292,23 +291,6 @@ impl FoldLayout {
         })
     }
 
-    /// Benchmark-only observation of the identical fold implementation. Durations
-    /// cover fused equality/buckets/emission, scatter application, visited-row
-    /// buckets, and preparation/merges/read-out, respectively. Lazy scratch
-    /// zero-fill is included in its bucket phase; the first phase cannot isolate
-    /// its fused multiplication and XORs without instrumenting every cycle.
-    #[cfg(feature = "test-utils")]
-    pub fn measure<S: CycleSource>(
-        &self,
-        source: &ValidatedTrace<S>,
-        shapes: &[RouterShape],
-        point: &[F128],
-        plan: &ScatterPlan<S>,
-        histogram_columns: &[usize],
-    ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-        fold_impl::<S, true>(source, shapes, point, plan, self, histogram_columns)
-    }
-
     /// Cycle bucket elements per worker; includes metadata and any constant totals.
     pub const fn entries(&self) -> usize {
         self.entries
@@ -401,8 +383,15 @@ pub fn fold_pass<S: CycleSource>(
     layout: &FoldLayout,
     histogram_columns: &[usize],
 ) -> Result<FoldOutput, RouterError> {
-    fold_impl::<S, false>(trace, shapes, r_cycle, plan, layout, histogram_columns)
-        .map(|(output, _)| output)
+    fold_impl(
+        trace,
+        shapes,
+        r_cycle,
+        plan,
+        layout,
+        histogram_columns,
+        &mut NoPhases,
+    )
 }
 
 struct Histograms<'a, S> {
@@ -710,20 +699,30 @@ impl<S: CycleSource> RowPass<'_, S> {
     }
 }
 
+trait PhaseHook {
+    fn finish_phase(&mut self, phase: usize);
+}
+
+struct NoPhases;
+
+impl PhaseHook for NoPhases {
+    #[inline]
+    fn finish_phase(&mut self, _: usize) {}
+}
+
 #[expect(
     clippy::expect_used,
     reason = "validated geometry, private scratch ownership and freshly sized scatter buffers cannot fail"
 )]
-fn fold_impl<S: CycleSource, const MEASURE: bool>(
+fn fold_impl<S: CycleSource, H: PhaseHook>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
     r_cycle: &[F128],
     plan: &ScatterPlan<S>,
     layout: &FoldLayout,
     histogram_columns: &[usize],
-) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
-    let mut times = [Duration::ZERO; 4];
-    let mut start = MEASURE.then(Instant::now);
+    phases: &mut H,
+) -> Result<FoldOutput, RouterError> {
     let source = trace.source().as_ref();
     let log_t = layout.validate(trace, shapes, r_cycle, plan)?;
     let histograms = Histograms::new(source, layout, histogram_columns)?;
@@ -735,10 +734,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         variables: usize::BITS as usize,
     })?;
     let mut weights = unsafe_allocate_zero_vec(source.cycles());
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(3);
     CyclePass {
         source,
         layout,
@@ -751,20 +747,14 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         weights: &mut weights,
     }
     .run();
-    if let Some(clock) = start {
-        times[0] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(0);
     drop(low);
     drop(high);
     let mut ra_fold = unsafe_allocate_zero_vec(source.bytecode_rows());
     plan.apply_buffer(&weights, &mut ra_fold)
         .expect("freshly sized scatter buffers");
     drop(weights);
-    if let Some(clock) = start {
-        times[1] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(1);
     let mut buckets = pool.merge().expect("all chunk loans returned");
     let mut folds: Vec<_> = shapes
         .iter()
@@ -777,10 +767,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         ScratchPool::new(histograms.row_entries).map_err(|_| RouterError::Dimension {
             variables: usize::BITS as usize,
         })?;
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(3);
     RowPass {
         source,
         layout,
@@ -790,24 +777,16 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         weights: &ra_fold,
     }
     .run(geometry.chunk_len());
-    if let Some(clock) = start {
-        times[2] = clock.elapsed();
-        start = Some(Instant::now());
-    }
+    phases.finish_phase(2);
     let row_buckets = row_pool.merge().expect("all row loans returned");
     readout(layout, FoldStorage::Rows(&row_buckets), &mut folds);
     histograms.read_rows(layout, &row_buckets, &mut histogram_outputs);
-    if let Some(clock) = start {
-        times[3] += clock.elapsed();
-    }
-    Ok((
-        FoldOutput {
-            folds,
-            ra_fold,
-            histograms: histogram_outputs,
-        },
-        times,
-    ))
+    phases.finish_phase(3);
+    Ok(FoldOutput {
+        folds,
+        ra_fold,
+        histograms: histogram_outputs,
+    })
 }
 
 enum FoldStorage<'a> {

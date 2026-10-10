@@ -58,9 +58,7 @@ pub trait CycleSource: Send + Sync + 'static {
         }
         for (cycle, row) in cycles.zip(out.chunks_exact_mut(columns)) {
             for (column, slot) in row.iter_mut().enumerate() {
-                *slot = self.digit(column, cycle).map_or(0, |digit| {
-                    digit.saturating_add(1).min(u16::MAX as usize) as u16
-                });
+                *slot = encode_digit(self.digit(column, cycle));
             }
         }
     }
@@ -78,6 +76,15 @@ pub enum SourceError {
     Column { column: usize, columns: usize },
     #[error("column {column} width {bits} exceeds the 15-bit source limit")]
     Width { column: usize, bits: usize },
+    #[error("{columns} digit columns exceed the stack tile limit {max_columns}")]
+    ColumnCapacity { columns: usize, max_columns: usize },
+    #[error("bulk digit {encoded} disagrees with {digit:?} at column {column}, cycle {cycle}")]
+    DigitView {
+        column: usize,
+        cycle: usize,
+        encoded: u16,
+        digit: Option<usize>,
+    },
     #[error("column {column} width {bits} exceeds group limit {max_bits}")]
     GroupWidth {
         column: usize,
@@ -262,29 +269,32 @@ impl GroupData {
     }
 }
 
-#[derive(Clone, Copy)]
-struct GroupTarget {
-    group: usize,
-    position: usize,
-    optional: bool,
-}
 struct GroupChunk<'a> {
     bytes: &'a mut [u8],
-    stride: usize,
+    columns: &'a [usize],
+    optional: bool,
 }
 
 const ROW_CHUNK: usize = 4096;
+const TILE_ENTRIES: usize = 4096;
+const MAX_COLUMNS: usize = 128;
 
 struct RowColumn {
     column: usize,
     bound: usize,
 }
 
+struct RowRun {
+    columns: Range<usize>,
+    cache: Range<usize>,
+}
+
 struct CycleValidation<'a> {
-    per_cycle: Vec<(usize, usize)>,
+    bounds: &'a [u16],
+    present: &'a [u16],
     row_columns: &'a [RowColumn],
+    row_runs: &'a [RowRun],
     row_cache: &'a [u16],
-    targets: Vec<Vec<GroupTarget>>,
 }
 
 impl CycleValidation<'_> {
@@ -293,149 +303,150 @@ impl CycleValidation<'_> {
         source: &impl CycleSource,
         cycles: Range<usize>,
         rows: usize,
-        output: &mut [(usize, GroupChunk<'_>)],
+        output: &mut [Option<GroupChunk<'_>>],
     ) -> Result<(), SourceError> {
-        let mut fault = cycles.clone().find_map(|cycle| {
-            let row = source.bytecode_index(cycle);
-            (row >= rows).then_some((cycle, 0, SourceError::BytecodeIndex { cycle, row, rows }))
-        });
-        let end = fault
-            .as_ref()
-            .map_or(cycles.end, |(cycle, _, _)| *cycle)
-            .min(source.cycles());
-        let source_columns = source.digit_columns();
-        macro_rules! scan {
-            ($column:expr, $bound:expr, $matches:expr, $slots:expr, $store:expr, $present:expr) => {{
-                let column = $column;
-                let bound = $bound;
-                for (cycle, slot) in (cycles.start..end).zip($slots) {
-                    let digit = source.digit(column, cycle);
-                    let error = if let Some(digit) = digit.filter(|&digit| digit >= bound) {
-                        Some(SourceError::Digit {
-                            column,
-                            cycle,
-                            digit,
-                            bound,
-                        })
-                    } else if let Some(error) = $matches(digit, cycle) {
-                        Some(error)
-                    } else if $present && digit.is_none() {
-                        Some(SourceError::MissingDigit { column, cycle })
-                    } else {
-                        $store(slot, digit, cycle);
-                        None
-                    };
-                    if let Some(error) = error {
-                        let rank = column + 1;
-                        if fault.as_ref().is_none_or(|(previous, previous_rank, _)| {
-                            (cycle, rank) < (*previous, *previous_rank)
-                        }) {
-                            fault = Some((cycle, rank, error));
+        let columns = self.bounds.len();
+        let tile_cycles = TILE_ENTRIES / columns.max(1);
+        let mut buffer = [0_u16; TILE_ENTRIES];
+        for start in (cycles.start..cycles.end).step_by(tile_cycles) {
+            let end = (start + tile_cycles).min(cycles.end);
+            let tile = &mut buffer[..(end - start) * columns];
+            source.digits(start..end, tile);
+            let mut maxima = [0_u16; MAX_COLUMNS];
+            let mut minima = [u16::MAX; MAX_COLUMNS];
+            let mut rejected = false;
+            if columns == 0 {
+                rejected = (start..end).any(|cycle| source.bytecode_index(cycle) >= rows);
+            } else {
+                for (offset, digits) in tile.chunks_exact(columns).enumerate() {
+                    let cycle = start + offset;
+                    let row = source.bytecode_index(cycle);
+                    if self.row_columns.is_empty() {
+                        rejected |= row >= rows;
+                    } else if let Some(cache) =
+                        self.row_cache.chunks_exact(self.row_columns.len()).nth(row)
+                    {
+                        for run in self.row_runs {
+                            for (&value, &expected) in digits[run.columns.clone()]
+                                .iter()
+                                .zip(&cache[run.cache.clone()])
+                            {
+                                rejected |= value != expected;
+                            }
                         }
-                        break;
+                    } else {
+                        rejected = true;
+                    }
+                    for ((maximum, minimum), &value) in maxima[..columns]
+                        .iter_mut()
+                        .zip(&mut minima[..columns])
+                        .zip(digits)
+                    {
+                        *maximum = (*maximum).max(value);
+                        *minimum = (*minimum).min(value);
+                    }
+                    for group in output.iter_mut().flatten() {
+                        let stride = group.columns.len();
+                        let output = &mut group.bytes
+                            [(cycle - cycles.start) * stride..(cycle - cycles.start + 1) * stride];
+                        if group.optional {
+                            for (slot, &column) in output.iter_mut().zip(group.columns) {
+                                *slot = digits[column] as u8;
+                            }
+                        } else {
+                            for (slot, &column) in output.iter_mut().zip(group.columns) {
+                                *slot = digits[column].wrapping_sub(1) as u8;
+                            }
+                        }
                     }
                 }
-            }};
+            }
+            rejected |= maxima[..columns]
+                .iter()
+                .zip(self.bounds)
+                .any(|(&maximum, &bound)| maximum > bound);
+            rejected |= minima[..columns]
+                .iter()
+                .zip(self.present)
+                .any(|(&minimum, &present)| minimum < present);
+            if rejected {
+                self.scalar_ladder(source, start..end, rows, tile)?;
+            }
         }
-        macro_rules! column {
-            ($column:expr, $bound:expr, $matches:expr) => {{
-                if $column >= source_columns {
-                    return Err(SourceError::Column {
-                        column: $column,
-                        columns: source_columns,
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scalar_ladder(
+        &self,
+        source: &impl CycleSource,
+        cycles: Range<usize>,
+        rows: usize,
+        tile: &[u16],
+    ) -> Result<(), SourceError> {
+        for cycle in cycles.clone() {
+            let row = source.bytecode_index(cycle);
+            if row >= rows {
+                return Err(SourceError::BytecodeIndex { cycle, row, rows });
+            }
+            for (column, &bound) in self.bounds.iter().enumerate() {
+                let digit = source.digit(column, cycle);
+                let encoded = tile[(cycle - cycles.start) * self.bounds.len() + column];
+                if encoded != encode_digit(digit) {
+                    return Err(SourceError::DigitView {
+                        column,
+                        cycle,
+                        encoded,
+                        digit,
                     });
                 }
-                let targets = &self.targets[$column];
-                match targets.as_slice() {
-                    [] => scan!(
-                        $column,
-                        $bound,
-                        $matches,
-                        std::iter::repeat(()),
-                        |_, _, _| {},
-                        false
-                    ),
-                    [target] => {
-                        let GroupChunk { bytes, stride } = &mut output[target.group].1;
-                        let slots = bytes.iter_mut().skip(target.position).step_by(*stride);
-                        if target.optional {
-                            scan!(
-                                $column,
-                                $bound,
-                                $matches,
-                                slots,
-                                |slot: &mut u8, digit: Option<usize>, _| *slot =
-                                    digit.map_or(0, |d| (d + 1) as u8),
-                                false
-                            );
-                        } else {
-                            scan!(
-                                $column,
-                                $bound,
-                                $matches,
-                                slots,
-                                |slot: &mut u8, digit: Option<usize>, _| *slot =
-                                    digit.unwrap_or(0) as u8,
-                                true
-                            );
-                        }
-                    }
-                    _ => {
-                        let present = targets.iter().any(|target| !target.optional);
-                        scan!(
-                            $column,
-                            $bound,
-                            $matches,
-                            std::iter::repeat(()),
-                            |_, digit: Option<usize>, cycle: usize| {
-                                for target in targets {
-                                    let group = &mut output[target.group].1;
-                                    let byte = if target.optional {
-                                        digit.map_or(0, |d| (d + 1) as u8)
-                                    } else {
-                                        digit.unwrap_or(0) as u8
-                                    };
-                                    group.bytes
-                                        [(cycle - cycles.start) * group.stride + target.position] =
-                                        byte;
-                                }
-                            },
-                            present
-                        );
+                if let Some(digit) = digit.filter(|&digit| digit >= usize::from(bound)) {
+                    return Err(SourceError::Digit {
+                        column,
+                        cycle,
+                        digit,
+                        bound: usize::from(bound),
+                    });
+                }
+                if source.by_row(column) {
+                    let position = self.row_columns.iter().position(|row| row.column == column);
+                    let cache_matches = position.is_none_or(|position| {
+                        self.row_cache[row * self.row_columns.len() + position] == encoded
+                    });
+                    if !cache_matches || digit != source.row_digit(column, row) {
+                        return Err(SourceError::RowDigit { column, cycle, row });
                     }
                 }
-            }};
+                if self.present[column] != 0 && digit.is_none() {
+                    return Err(SourceError::MissingDigit { column, cycle });
+                }
+            }
         }
-        for &(column, bound) in &self.per_cycle {
-            column!(column, bound, |_, _| None);
-        }
-        for (position, RowColumn { column, bound }) in self.row_columns.iter().enumerate() {
-            column!(*column, *bound, |digit: Option<usize>, cycle| {
-                let row = source.bytecode_index(cycle);
-                (digit.map_or(0, |value| value + 1)
-                    != usize::from(self.row_cache[row * self.row_columns.len() + position]))
-                .then_some(SourceError::RowDigit {
-                    column: *column,
-                    cycle,
-                    row,
-                })
-            });
-        }
-        if let Some((_, _, error)) = fault {
-            return Err(error);
-        }
+        // Every fast predicate forces a ladder fault on an immutable source:
+        // bad index, encoded range/presence, or disagreement with the row cache.
+        // A source that changes between reads violates the trait contract; this
+        // total recheck does not introduce an impossible arm or an unsafe premise.
         Ok(())
     }
 }
 
+#[inline]
+fn encode_digit(digit: Option<usize>) -> u16 {
+    digit.map_or(0, |digit| {
+        digit.saturating_add(1).min(u16::MAX as usize) as u16
+    })
+}
+
 /// Shared source whose dimensions, indices and every digit column are checked.
-/// Construction reads every row-based digit once and every cycle digit once.
+/// Successful construction reads each row-based digit once and each tile once.
+/// Rejected tiles are reread through the scalar accessors to locate their fault.
 /// Temporary row caches are dropped before returning; the source owns its data.
 /// After dimension and request checks, fault order is: all rows before all cycles; rows ascending, then columns
 /// ascending; cycles ascending, then `BytecodeIndex`, then columns ascending,
-/// and within a column `Digit`, `RowDigit`, `MissingDigit`. Each column scan
-/// stops at its first fault; each chunk chooses the least cycle and rank, and
-/// preparation returns the fault of the first offending chunk. A row-based
+/// and within a column `DigitView`, `Digit`, `RowDigit`, `MissingDigit`.
+/// Tiles are visited in ascending cycle order; rejected tiles use the scalar
+/// ladder in that order. Preparation returns the fault of the first offending chunk. A row-based
 /// column reads no cache entry at an invalid bytecode index. Parallel
 /// completion cannot change this order.
 /// The guarantee relies on the immutability contract of [`CycleSource`].
@@ -453,6 +464,8 @@ impl<S: CycleSource> ValidatedTrace<S> {
     /// walk. Request columns and widths are rejected before any digit read.
     /// Group buffers have exactly `cycles * columns` bytes; row caches and
     /// chunk descriptors are temporary, with no allocation per chunk.
+    /// At most 128 digit columns of at most 15 bits are accepted. Each active
+    /// worker uses an 8 KiB stack tile and two 256-byte column accumulators.
     pub fn prepare(
         source: Arc<S>,
         request: PrepareRequest,
@@ -470,7 +483,13 @@ impl<S: CycleSource> ValidatedTrace<S> {
         check_validation_size::<RowColumn>(columns, "row digit cache columns")?;
         let mut widths = Vec::with_capacity(columns);
         let mut row_columns = Vec::new();
-        let mut per_cycle = Vec::new();
+        if columns > MAX_COLUMNS {
+            return Err(SourceError::ColumnCapacity {
+                columns,
+                max_columns: MAX_COLUMNS,
+            });
+        }
+        let mut bounds = Vec::with_capacity(columns);
         for column in 0..columns {
             let bits = source.bits(column);
             if bits > 15 {
@@ -478,10 +497,9 @@ impl<S: CycleSource> ValidatedTrace<S> {
             }
             widths.push(bits);
             let bound = 1 << bits;
+            bounds.push(bound as u16);
             if source.by_row(column) {
                 row_columns.push(RowColumn { column, bound });
-            } else {
-                per_cycle.push((column, bound));
             }
         }
         let cache_len =
@@ -505,26 +523,22 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 .map(|columns| GroupData::allocate(columns, &widths, cycles, 7).map(OptionalGroup))
                 .collect::<Result<_, _>>()?,
         };
-        let mut targets = vec![Vec::new(); columns];
-        let mut group_count = 0;
-        for (group, optional) in groups
+        let mut present = vec![0_u16; columns];
+        for group in &groups.present {
+            for &column in &group.0.columns {
+                present[column] = 1;
+            }
+        }
+        let group_count = groups
             .present
             .iter()
-            .map(|group| (&group.0, false))
-            .chain(groups.optional.iter().map(|group| (&group.0, true)))
-        {
-            if group.columns.is_empty() {
-                continue;
-            }
-            for (position, &column) in group.columns.iter().enumerate() {
-                targets[column].push(GroupTarget {
-                    group: group_count,
-                    position,
-                    optional,
-                });
-            }
-            group_count += 1;
-        }
+            .filter(|g| !g.0.columns.is_empty())
+            .count()
+            + groups
+                .optional
+                .iter()
+                .filter(|g| !g.0.columns.is_empty())
+                .count();
         if !row_columns.is_empty() {
             if let Some(Some(error)) = row_cache
                 .par_chunks_mut(ROW_CHUNK * row_columns.len())
@@ -554,16 +568,32 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 return Err(error);
             }
         }
+        let mut row_runs: Vec<RowRun> = Vec::new();
+        for (position, row) in row_columns.iter().enumerate() {
+            if let Some(run) = row_runs
+                .last_mut()
+                .filter(|run| run.columns.end == row.column)
+            {
+                run.columns.end += 1;
+                run.cache.end += 1;
+            } else {
+                row_runs.push(RowRun {
+                    columns: row.column..row.column + 1,
+                    cache: position..position + 1,
+                });
+            }
+        }
         let validation = CycleValidation {
-            per_cycle,
+            bounds: &bounds,
+            present: &present,
             row_columns: &row_columns,
+            row_runs: &row_runs,
             row_cache: &row_cache,
-            targets,
         };
         let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)
             .map_err(|_| SourceError::CycleCount { cycles })?;
         let chunk_count = cycles / geometry.chunk_len();
-        let validate = |chunk: usize, output: &mut [(usize, GroupChunk<'_>)]| {
+        let validate = |chunk: usize, output: &mut [Option<GroupChunk<'_>>]| {
             let start = chunk * geometry.chunk_len();
             validation.validate_chunk(
                 source.as_ref(),
@@ -586,32 +616,34 @@ impl<S: CycleSource> ValidatedTrace<S> {
                         len: chunk_count,
                         element_size: size_of::<GroupChunk<'_>>(),
                     })?;
-            check_validation_size::<(usize, GroupChunk<'_>)>(len, "group chunk metadata")?;
-            let mut chunks = Vec::with_capacity(len);
+            check_validation_size::<Option<GroupChunk<'_>>>(len, "group chunk metadata")?;
+            let mut chunks: Vec<Option<GroupChunk<'_>>> =
+                std::iter::repeat_with(|| None).take(len).collect();
             let mut group_index = 0;
-            for group in groups
+            for (group, optional) in groups
                 .present
                 .iter_mut()
-                .map(|group| &mut group.0)
-                .chain(groups.optional.iter_mut().map(|group| &mut group.0))
+                .map(|group| (&mut group.0, false))
+                .chain(groups.optional.iter_mut().map(|group| (&mut group.0, true)))
             {
                 let stride = group.columns.len();
                 if stride == 0 {
                     continue;
                 }
-                for (chunk, bytes) in group
-                    .bytes
-                    .chunks_mut(geometry.chunk_len() * stride)
-                    .enumerate()
+                for (slot, bytes) in chunks
+                    .iter_mut()
+                    .skip(group_index)
+                    .step_by(group_count)
+                    .zip(group.bytes.chunks_mut(geometry.chunk_len() * stride))
                 {
-                    chunks.push((
-                        chunk * group_count + group_index,
-                        GroupChunk { bytes, stride },
-                    ));
+                    *slot = Some(GroupChunk {
+                        bytes,
+                        columns: &group.columns,
+                        optional,
+                    });
                 }
                 group_index += 1;
             }
-            chunks.sort_unstable_by_key(|(chunk, _)| *chunk);
             chunks
                 .par_chunks_mut(group_count)
                 .enumerate()

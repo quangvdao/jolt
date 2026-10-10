@@ -743,7 +743,7 @@ fn log_size_rejects_an_unrepresentable_table() {
 
 #[test]
 fn present_group_width_rejects_oversized_tables_on_one_cycle() {
-    for bits in [9, 59] {
+    for bits in [9, 15] {
         let source = Arc::new(UniformColumns {
             trace: SyntheticTrace::new(SynthProfile::UniformDigits, 1, 1, 0xc8_0011).unwrap(),
             columns: 1,

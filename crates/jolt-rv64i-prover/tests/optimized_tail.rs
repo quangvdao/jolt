@@ -1,0 +1,1 @@
+//! Tail adapter acceptance tests.

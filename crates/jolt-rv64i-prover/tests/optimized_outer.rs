@@ -1,0 +1,1 @@
+//! Outer adapter acceptance tests.

@@ -1,4 +1,8 @@
 //! Dense test oracles for the row zero-checks and witness-column reduction.
+//! Rows are required of the witness and are not checked: a violated row is detected
+//! algebraically, with the soundness error of the sum-check, at the driver's final-claim
+//! comparison on the optimized tier and at a round check on the reference tier;
+//! neither tier rejects it deterministically.
 
 use crate::error::Rv64iProverError;
 use crate::plane::{Rv64iPlane, Rv64iWitness};
@@ -7,7 +11,7 @@ use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
 use jolt_poly::{BindingOrder, Polynomial};
-use jolt_rv64i_arith::{RowSystem, WitnessRow, WITNESS_COLUMNS};
+use jolt_rv64i_arith::{RowSystem, WITNESS_COLUMNS};
 use jolt_rv64i_verifier::claims::spartan_inner::{SpartanInnerInputClaims, SpartanInnerSymbolic};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, InnerDerived, OpeningId, OuterDerived, RelationId, RowBlock,
@@ -20,33 +24,6 @@ use jolt_rv64i_verifier::stages::stage2::SpartanInner;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 
-fn row(witness: &Rv64iWitness, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
-    let bits = witness
-        .bits
-        .get(cycle)
-        .ok_or(Rv64iProverError::CycleIndex {
-            cycle,
-            rows: witness.bits.len(),
-        })?;
-    let index = witness.layout.bytecode_index(bits);
-    let fetched = usize::try_from(index)
-        .ok()
-        .and_then(|i| witness.bytecode.rows().get(i))
-        .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-    let variant = fetched
-        .variant
-        .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-    let words = witness
-        .words
-        .get(cycle)
-        .ok_or(Rv64iProverError::CycleIndex {
-            cycle,
-            rows: witness.words.len(),
-        })?;
-    let base = words.base_words(variant.is_store(), witness.layout.inc(bits));
-    Ok(WitnessRow::compute(&witness.layout, fetched, &base, bits))
-}
-
 /// A witness column is extended in the cycle variables without copying any
 /// stored witness table; `WitnessRow::compute` owns the derived columns.
 pub fn witness_column(
@@ -56,7 +33,7 @@ pub fn witness_column(
     Ok(Polynomial::new(
         (0..witness.bits.len())
             .map(|j| {
-                let z = row(witness, j)?;
+                let z = witness.row(j)?;
                 let value = z.bit(column).ok_or(PointsError::MissingColumn { column })?;
                 Ok(F128::from_u64(u64::from(value)))
             })
@@ -95,7 +72,7 @@ fn outer_tables(
         .ok_or_else(|| geometry("outer cube is not representable"))?;
     let mut tables: [Vec<F128>; 3] = std::array::from_fn(|_| vec![F128::zero(); size]);
     for j in 0..witness.bits.len() {
-        let z = row(witness, j).map_err(geometry)?;
+        let z = witness.row(j).map_err(geometry)?;
         for (table, matrix) in tables
             .iter_mut()
             .zip([&matrices.a, &matrices.b, &matrices.c])
@@ -155,7 +132,7 @@ impl PrepareKernel<F128, SpartanInner<F128>, Rv64iPlane> for SpartanInnerPrepare
         let mut routed = vec![F128::zero(); WITNESS_COLUMNS];
         let mut direct = vec![F128::zero(); WITNESS_COLUMNS];
         for (cycle, (bits, weight)) in witness.bits.iter().zip(weights).enumerate() {
-            let z = row(witness, cycle).map_err(geometry)?;
+            let z = witness.row(cycle).map_err(geometry)?;
             for column in (1..4).chain(16..27).chain(64..768) {
                 if z.bit(column)
                     .ok_or_else(|| geometry("routed column exceeds the witness domain"))?

@@ -3,20 +3,180 @@
 //! fetched-row successors; direct construction owes that same contract.
 
 use crate::error::{FactField, Rv64iProverError};
+#[cfg(feature = "allocative")]
+use allocative::Allocative;
 #[cfg(feature = "test-utils")]
 use common::{constants::RAM_START_ADDRESS, jolt_device::MemoryLayout};
 use jolt_field::JoltField;
 use jolt_kernels::WitnessPlane;
 use jolt_rv64i_arith::{
-    BaseWords, BitsBuilder, BitsRow, Bytecode, CycleError, CycleFacts, Layout, Variant,
+    BaseWords, BitsBuilder, BitsRow, Bytecode, Chunk, CycleError, CycleFacts, Layout, Variant,
+    WitnessRow,
 };
 use jolt_rv64i_verifier::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 #[cfg(feature = "test-utils")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::sync::Arc;
 
+/// Sixteen-byte replay cache: the increment and low-first bytecode/RAM indices,
+/// six position bits, `KeysDiffer`, `ShouldBranch`, `JalrLowBit` and six variant
+/// bits. `DigitFields::new` checks `b + a + 15 <= 64`; valid layouts have at most
+/// 49 index bits.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+pub struct DecodedCycle {
+    pub inc: u64,
+    pub digits: u64,
+}
+
+/// A checked shift and mask inside `DecodedCycle::digits`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+pub struct DigitField {
+    shift: usize,
+    bits: usize,
+    mask: u64,
+}
+impl DigitField {
+    fn new(shift: usize, bits: usize) -> Self {
+        Self {
+            shift,
+            bits,
+            mask: u64::MAX >> (64 - bits),
+        }
+    }
+    #[inline]
+    pub fn read(self, row: &DecodedCycle) -> u64 {
+        (row.digits >> self.shift) & self.mask
+    }
+    pub fn shift(self) -> usize {
+        self.shift
+    }
+    pub fn bits(self) -> usize {
+        self.bits
+    }
+    #[inline]
+    fn pack(self, value: u64) -> u64 {
+        (value & self.mask) << self.shift
+    }
+}
+
+/// The sole packing geometry. Chunks accumulate their layout widths low first;
+/// position, flags and variant follow the indices. Construction rejects overflow.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+pub struct DigitFields {
+    bytecode_index: DigitField,
+    ram_index: DigitField,
+    bytecode: [DigitField; 16],
+    bytecode_len: usize,
+    ram: [DigitField; 16],
+    ram_len: usize,
+    pos: [DigitField; 2],
+    keys_differ: DigitField,
+    should_branch: DigitField,
+    jalr_low_bit: DigitField,
+    variant: DigitField,
+}
+impl DigitFields {
+    pub fn new(layout: &Layout) -> Result<Self, Rv64iProverError> {
+        let b = layout.log_K_bytecode();
+        let a = layout.log_K_ram();
+        let bits = b + a + 15;
+        if bits > 64 {
+            return Err(Rv64iProverError::DecodedPacking { bits });
+        }
+        let mut shift = 0;
+        let mut chunks = |chunks: &[Chunk]| {
+            let mut fields = [DigitField::new(0, 1); 16];
+            for (output, chunk) in fields.iter_mut().zip(chunks) {
+                *output = DigitField::new(shift, usize::from(chunk.bits()));
+                shift += output.bits;
+            }
+            fields
+        };
+        let bytecode = chunks(layout.bytecode_ra());
+        let ram = chunks(layout.ram_ra());
+        Ok(Self {
+            bytecode_index: DigitField::new(0, b),
+            ram_index: DigitField::new(b, a),
+            bytecode,
+            ram,
+            bytecode_len: layout.bytecode_ra().len(),
+            ram_len: layout.ram_ra().len(),
+            pos: [DigitField::new(shift, 3), DigitField::new(shift + 3, 3)],
+            keys_differ: DigitField::new(shift + 6, 1),
+            should_branch: DigitField::new(shift + 7, 1),
+            jalr_low_bit: DigitField::new(shift + 8, 1),
+            variant: DigitField::new(shift + 9, 6),
+        })
+    }
+    pub fn bytecode_fields(&self) -> &[DigitField] {
+        &self.bytecode[..self.bytecode_len]
+    }
+    pub fn ram_fields(&self) -> &[DigitField] {
+        &self.ram[..self.ram_len]
+    }
+    pub fn bytecode_index(&self) -> DigitField {
+        self.bytecode_index
+    }
+    pub fn ram_index(&self) -> DigitField {
+        self.ram_index
+    }
+    pub fn bytecode_chunk(&self, chunk: usize) -> Option<DigitField> {
+        self.bytecode_fields().get(chunk).copied()
+    }
+    pub fn ram_chunk(&self, chunk: usize) -> Option<DigitField> {
+        self.ram_fields().get(chunk).copied()
+    }
+    pub fn pos_fields(&self) -> [DigitField; 2] {
+        self.pos
+    }
+    pub fn pos(&self, digit: usize) -> Option<DigitField> {
+        self.pos.get(digit).copied()
+    }
+    pub fn keys_differ(&self) -> DigitField {
+        self.keys_differ
+    }
+    pub fn should_branch(&self) -> DigitField {
+        self.should_branch
+    }
+    pub fn jalr_low_bit(&self) -> DigitField {
+        self.jalr_low_bit
+    }
+    pub fn variant(&self) -> DigitField {
+        self.variant
+    }
+
+    #[inline]
+    fn pack(
+        &self,
+        layout: &Layout,
+        committed: &BitsRow,
+        index: u64,
+        ram: u64,
+        variant: Variant,
+    ) -> DecodedCycle {
+        let flag = |column: usize| u64::from(committed[column / 64] >> (column % 64) & 1 != 0);
+        let pos = u64::from(layout.pos(committed));
+        DecodedCycle {
+            inc: layout.inc(committed),
+            digits: self.bytecode_index.pack(index)
+                | self.ram_index.pack(ram)
+                | self.pos[0].pack(pos)
+                | self.pos[1].pack(pos >> self.pos[0].bits)
+                | self.keys_differ.pack(flag(layout.keys_differ()))
+                | self.should_branch.pack(flag(layout.should_branch()))
+                | self.jalr_low_bit.pack(flag(layout.jalr_low_bit()))
+                | self.variant.pack(variant.index() as u64),
+        }
+    }
+}
+
 /// Replayed pre-state reads and successor PC for one committed cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
 pub struct CycleWords {
     /// Value selected by the fetched row's first register selector.
     pub rs1_value: u64,
@@ -55,6 +215,10 @@ pub struct Rv64iWitness {
     pub bits: Arc<[BitsRow]>,
     /// One pre-state record per committed cycle.
     pub words: Arc<[CycleWords]>,
+    /// Packed digits written in the replay, with one row per committed cycle.
+    pub decoded: Arc<[DecodedCycle]>,
+    /// Number of fetched cycles of each variant; unused variant indices stay zero.
+    pub variant_cycles: [u64; 64],
     /// Increasing nonzero initial RAM words; all omitted words start at zero.
     pub initial_ram: Vec<(u64, u64)>,
     /// Dense RAM after the final XOR update, with exactly `2^log_K_ram` words.
@@ -63,6 +227,37 @@ pub struct Rv64iWitness {
     pub final_pc: u64,
 }
 impl Rv64iWitness {
+    /// Composes the fetched row, replayed base words and committed bits; returns a
+    /// typed error for an absent cycle or invalid fetch. Packing is owned by `DigitFields`.
+    pub fn row(&self, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
+        let bits = self.bits.get(cycle).ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: self.bits.len(),
+        })?;
+        let decoded = self
+            .decoded
+            .get(cycle)
+            .ok_or(Rv64iProverError::CycleIndex {
+                cycle,
+                rows: self.decoded.len(),
+            })?;
+        let fields = DigitFields::new(&self.layout)?;
+        let index = fields.bytecode_index().read(decoded);
+        let fetched = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.bytecode.rows().get(i))
+            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+        let variant = fetched
+            .variant
+            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
+        let words = self.words.get(cycle).ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: self.words.len(),
+        })?;
+        let base = words.base_words(variant.is_store(), decoded.inc);
+        Ok(WitnessRow::compute(&self.layout, fetched, &base, bits))
+    }
+
     /// Replays shared committed rows from zero registers and canonical initial RAM without copying them.
     /// Rejects invalid geometry, fetches, chunk indicators, initial words or RAM allocation; it does
     /// not authenticate instruction transitions or check public outputs.
@@ -164,12 +359,16 @@ impl Rv64iWitness {
         }
         let _ = BitsBuilder::new(&layout, &bytecode)?;
         let _ = bytecode.final_pc_index(final_pc)?;
+        let _ = DigitFields::new(&layout)?;
+        let decoded = (0..bits.len()).map(|_| DecodedCycle::default()).collect();
         let words = (0..bits.len()).map(|_| CycleWords::default()).collect();
         Ok(Self {
             layout,
             bytecode,
             bits,
             words,
+            decoded,
+            variant_cycles: [0; 64],
             initial_ram,
             final_ram,
             final_pc,
@@ -177,6 +376,8 @@ impl Rv64iWitness {
     }
 
     fn replay(&mut self, facts: Option<&[CycleFacts]>) -> Result<(), Rv64iProverError> {
+        let fields = DigitFields::new(&self.layout)?;
+        let decoded = Arc::get_mut(&mut self.decoded).ok_or(Rv64iProverError::SharedBuffer)?;
         let builder = BitsBuilder::new(&self.layout, &self.bytecode)?;
         let mut rows = match facts {
             Some(facts) => ReplayRows::Facts {
@@ -287,7 +488,9 @@ impl Rv64iWitness {
             if let Some(previous) = cycle.checked_sub(1).and_then(|i| words.get_mut(i)) {
                 previous.next_pc = row.pc;
             }
-            let inc = self.layout.inc(&committed);
+            decoded[cycle] = fields.pack(&self.layout, &committed, index, ram_index, variant);
+            self.variant_cycles[variant.index()] += 1;
+            let inc = decoded[cycle].inc;
             if row.variant.is_some_and(|v| v.is_store()) {
                 *self
                     .final_ram

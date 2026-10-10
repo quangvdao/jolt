@@ -1,0 +1,1 @@
+//! Sources adapter acceptance tests.

@@ -1,0 +1,1 @@
+//! Routers adapter acceptance tests.

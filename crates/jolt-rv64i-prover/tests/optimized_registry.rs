@@ -1,0 +1,1 @@
+//! Registry adapter acceptance tests.

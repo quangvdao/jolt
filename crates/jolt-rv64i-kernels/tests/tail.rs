@@ -565,74 +565,103 @@ fn measure_rounds(
 
 #[test]
 fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
-    for (threads, log_t) in [(1, 8), (1, 14), (1, 17), (12, 14), (12, 17)] {
-        ThreadPoolBuilder::new()
+    // Keep pool teardown and LazyFoldedRa's spawned drops outside pass baselines.
+    let mut pools = Vec::with_capacity(2);
+    let mut fixtures = Vec::with_capacity(5);
+    for (threads, log_sizes) in [(1, &[8, 14, 17][..]), (12, &[14, 17][..])] {
+        let pool = ThreadPoolBuilder::new()
             .num_threads(threads)
-            .build_scoped(
-                |thread| thread.run(),
-                |pool| {
-                    let fixture = pool.install(|| Fixture::new(log_t));
-                    let map = map();
-                    let challenges = vec![F128::from_raw(79); log_t];
-                    let allowance = threads * RAYON_WORKER_ALLOWANCE.bytes;
-                    let allocs = threads * RAYON_WORKER_ALLOWANCE.allocs;
-                    assert!(
-                        log_t != 17 || CycleChunks::new(log_t, 0).unwrap().ranges().len() >= 32
-                    );
-                    let _ = pool.broadcast(|_| ());
-                    let baseline = CountingAllocator::live_bytes();
-                    let measurement = AllocationMeasurement::begin();
-                    let tables = pool
-                        .install(|| g_pass_digits(&fixture.trace, &map, &fixture.weights).unwrap());
-                    let stats = measurement.finish();
-                    let output = tables.capacity() * size_of::<Vec<F128>>()
-                        + tables
-                            .iter()
-                            .map(|table| table.capacity() * size_of::<F128>())
-                            .sum::<usize>();
-                    assert!(stats.allocs <= 256 + allocs);
-                    assert!((output..=output + allowance).contains(&stats.final_bytes));
-                    drop(tables);
-                    assert!((baseline..=baseline + allowance)
-                        .contains(&CountingAllocator::live_bytes()));
-                    for terms in &fixture.terms {
-                        let baseline = CountingAllocator::live_bytes();
-                        let measurement = AllocationMeasurement::begin();
-                        let weight = pool.install(|| combined_weight(log_t, terms).unwrap());
-                        let stats = measurement.finish();
-                        assert!(stats.allocs <= 256 + allocs);
-                        assert!((weight.capacity() * size_of::<F128>()
-                            ..=weight.capacity() * size_of::<F128>() + allowance)
-                            .contains(&stats.final_bytes));
-                        drop(weight);
-                        assert!((baseline..=baseline + allowance)
-                            .contains(&CountingAllocator::live_bytes()));
-                    }
-                    pool.install(|| {
-                        let (mut a, mut b, mut g) = fixture.cores();
-                        let claims = fixture.definition.claims();
-                        measure_rounds(&mut a, claims[0], &challenges, threads);
-                        measure_rounds(&mut b, claims[1], &challenges, threads);
-                        measure_rounds(&mut g, claims[2], &challenges, threads);
-                    });
-                    let baseline = CountingAllocator::live_bytes();
-                    let measurement = AllocationMeasurement::begin();
-                    let columns = pool.install(|| {
-                        column_pass(fixture.trace.source().rows(), &challenges).unwrap()
-                    });
-                    let stats = measurement.finish();
-                    assert_eq!(columns.len(), 256);
-                    assert!(stats.allocs <= 256 + allocs);
-                    assert!(
-                        stats.peak_bytes
-                            <= 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16 + allowance
-                    );
-                    assert!(stats.final_bytes <= allowance);
-                    assert!((baseline..=baseline + allowance)
-                        .contains(&CountingAllocator::live_bytes()));
-                },
-            )
+            .build()
             .unwrap();
+        let _ = pool.broadcast(|_| {
+            rayon::join(
+                || {
+                    let _ = rayon::yield_now();
+                },
+                || (),
+            )
+        });
+        let pool_index = pools.len();
+        pools.push(pool);
+        let pool = &pools[pool_index];
+        for &log_t in log_sizes {
+            let fixture = pool.install(|| Fixture::new(log_t));
+            let map = map();
+            let challenges = vec![F128::from_raw(79); log_t];
+            let allowance = threads * RAYON_WORKER_ALLOWANCE.bytes;
+            let allocs = threads * RAYON_WORKER_ALLOWANCE.allocs;
+            assert!(log_t != 17 || CycleChunks::new(log_t, 0).unwrap().ranges().len() >= 32);
+            let baseline = CountingAllocator::live_bytes();
+            let measurement = AllocationMeasurement::begin();
+            let tables =
+                pool.install(|| g_pass_digits(&fixture.trace, &map, &fixture.weights).unwrap());
+            let stats = measurement.finish();
+            let output = tables.capacity() * size_of::<Vec<F128>>()
+                + tables
+                    .iter()
+                    .map(|table| table.capacity() * size_of::<F128>())
+                    .sum::<usize>();
+            assert!(stats.allocs <= 256 + allocs);
+            assert!(
+                (output..=output + allowance).contains(&stats.final_bytes),
+                "g threads={threads}, log_t={log_t}: {} retained bytes for {output} output bytes",
+                stats.final_bytes
+            );
+            drop(tables);
+            assert!(
+                (baseline..=baseline + allowance).contains(&CountingAllocator::live_bytes()),
+                "g release threads={threads}, log_t={log_t}: baseline={baseline}, live={}",
+                CountingAllocator::live_bytes()
+            );
+            for terms in &fixture.terms {
+                let baseline = CountingAllocator::live_bytes();
+                let measurement = AllocationMeasurement::begin();
+                let weight = pool.install(|| combined_weight(log_t, terms).unwrap());
+                let stats = measurement.finish();
+                assert!(stats.allocs <= 256 + allocs);
+                assert!(
+                    (weight.capacity() * size_of::<F128>()
+                        ..=weight.capacity() * size_of::<F128>() + allowance)
+                        .contains(&stats.final_bytes),
+                    "threads={threads}, log_t={log_t}: {} retained bytes for {} output bytes",
+                    stats.final_bytes,
+                    weight.capacity() * size_of::<F128>()
+                );
+                drop(weight);
+                assert!(
+                    (baseline..=baseline + allowance).contains(&CountingAllocator::live_bytes()),
+                    "weight release threads={threads}, log_t={log_t}: baseline={baseline}, live={}",
+                    CountingAllocator::live_bytes()
+                );
+            }
+            let baseline = CountingAllocator::live_bytes();
+            let measurement = AllocationMeasurement::begin();
+            let columns =
+                pool.install(|| column_pass(fixture.trace.source().rows(), &challenges).unwrap());
+            let stats = measurement.finish();
+            assert_eq!(columns.len(), 256);
+            assert!(stats.allocs <= 256 + allocs);
+            assert!(
+                stats.peak_bytes <= 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16 + allowance
+            );
+            assert!(stats.final_bytes <= allowance);
+            assert!(
+                (baseline..=baseline + allowance).contains(&CountingAllocator::live_bytes()),
+                "column release threads={threads}, log_t={log_t}: baseline={baseline}, live={}",
+                CountingAllocator::live_bytes()
+            );
+            fixtures.push((pool_index, threads, fixture, challenges));
+        }
+    }
+    for (pool_index, threads, fixture, challenges) in fixtures {
+        let pool = &pools[pool_index];
+        pool.install(|| {
+            let (mut a, mut b, mut g) = fixture.cores();
+            let claims = fixture.definition.claims();
+            measure_rounds(&mut a, claims[0], &challenges, threads);
+            measure_rounds(&mut b, claims[1], &challenges, threads);
+            measure_rounds(&mut g, claims[2], &challenges, threads);
+        });
     }
 }
 

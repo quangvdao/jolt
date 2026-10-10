@@ -4,10 +4,13 @@
     reason = "test setup failures are assertion failures"
 )]
 
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, LaneSource, SourceError};
+use jolt_rv64i_kernels::source::{
+    CycleSource, DigitColumns, LaneSource, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rayon::ThreadPoolBuilder;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[test]
@@ -163,7 +166,8 @@ fn malformed_dimensions_columns_and_indices_are_total() {
         DigitColumns::new(Arc::clone(&trace), vec![21]),
         Err(SourceError::Column { column: 21, .. })
     ));
-    let selected = DigitColumns::new(Arc::clone(&trace), vec![0, 10, 12, 19]).unwrap();
+    let checked = Arc::new(ValidatedTrace::new(Arc::clone(&trace)).unwrap());
+    let selected = DigitColumns::from_validated(checked, vec![0, 10, 12, 19]).unwrap();
     assert_eq!(selected.columns(), &[0, 10, 12, 19]);
     assert_eq!(selected.index_bound(0), Some(16));
     assert_eq!(selected.index_bound(1), Some(8));
@@ -176,4 +180,179 @@ fn malformed_dimensions_columns_and_indices_are_total() {
     assert_eq!(trace.bytecode_word(4, 0), 0);
     assert_eq!(trace.row_digit(0, 16), None);
     assert_eq!(trace.digit(21, 0), None);
+}
+
+#[derive(Debug)]
+struct SourceFixture {
+    cycles: usize,
+    rows: usize,
+    widths: [usize; 2],
+    indices: [usize; 4],
+    digits: [[Option<usize>; 4]; 2],
+    row_digits: [Option<usize>; 2],
+    digit_reads: AtomicUsize,
+    row_reads: AtomicUsize,
+}
+
+impl SourceFixture {
+    fn new() -> Self {
+        Self {
+            cycles: 4,
+            rows: 2,
+            widths: [2, 2],
+            indices: [0, 1, 0, 1],
+            digits: [
+                [Some(0), Some(1), Some(0), Some(1)],
+                [Some(2), None, Some(3), Some(1)],
+            ],
+            row_digits: [Some(0), Some(1)],
+            digit_reads: AtomicUsize::new(0),
+            row_reads: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CycleSource for SourceFixture {
+    fn cycles(&self) -> usize {
+        self.cycles
+    }
+    fn trace_words(&self) -> usize {
+        1
+    }
+    fn trace_word(&self, _word: usize, _cycle: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        self.rows
+    }
+    fn bytecode_words(&self) -> usize {
+        1
+    }
+    fn bytecode_word(&self, _word: usize, _row: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        self.indices.get(cycle).copied().unwrap_or(0)
+    }
+    fn digit_columns(&self) -> usize {
+        2
+    }
+    fn bits(&self, column: usize) -> usize {
+        self.widths.get(column).copied().unwrap_or(0)
+    }
+    fn by_row(&self, column: usize) -> bool {
+        column == 0
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        let _previous = self.digit_reads.fetch_add(1, Ordering::Relaxed);
+        self.digits
+            .get(column)
+            .and_then(|values| values.get(cycle))
+            .copied()
+            .flatten()
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        let _previous = self.row_reads.fetch_add(1, Ordering::Relaxed);
+        if column == 0 {
+            self.row_digits.get(row).copied().flatten()
+        } else {
+            None
+        }
+    }
+}
+
+#[test]
+fn source_validation_rejects_each_malformed_source_contract() {
+    let mut source = SourceFixture::new();
+    source.cycles = 3;
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::CycleCount { cycles: 3 })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.rows = 3;
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::BytecodeRows { rows: 3 })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.widths[1] = usize::BITS as usize;
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::Width { column: 1, .. })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.indices[2] = 2;
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::BytecodeIndex {
+            cycle: 2,
+            row: 2,
+            rows: 2
+        })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.digits[1][3] = Some(4);
+    assert!(matches!(
+        DigitColumns::new(Arc::new(source), vec![0]),
+        Err(SourceError::Digit {
+            column: 1,
+            cycle: 3,
+            digit: 4,
+            bound: 4
+        })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.row_digits[1] = Some(4);
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::RowDigitRange {
+            column: 0,
+            row: 1,
+            digit: 4,
+            bound: 4
+        })
+    ));
+
+    let mut source = SourceFixture::new();
+    source.digits[0][2] = Some(1);
+    assert!(matches!(
+        ValidatedTrace::new(Arc::new(source)),
+        Err(SourceError::RowDigit {
+            column: 0,
+            cycle: 2,
+            row: 0
+        })
+    ));
+
+    let validated = Arc::new(ValidatedTrace::new(Arc::new(SourceFixture::new())).unwrap());
+    assert!(matches!(
+        DigitColumns::from_validated(validated, vec![2]),
+        Err(SourceError::Column {
+            column: 2,
+            columns: 2
+        })
+    ));
+}
+
+#[test]
+fn validated_source_is_scanned_once_and_reused_by_column_selections() {
+    let source = Arc::new(SourceFixture::new());
+    let validated = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+    assert!(Arc::ptr_eq(validated.source(), &source));
+    assert_eq!(source.digit_reads.load(Ordering::Relaxed), 8);
+    assert_eq!(source.row_reads.load(Ordering::Relaxed), 2);
+    let first = DigitColumns::from_validated(Arc::clone(&validated), vec![0, 1]).unwrap();
+    let second = DigitColumns::from_validated(validated, vec![1, 0, 1]).unwrap();
+    assert_eq!(source.digit_reads.load(Ordering::Relaxed), 8);
+    assert_eq!(source.row_reads.load(Ordering::Relaxed), 2);
+    assert_eq!(first.cycles(), 4);
+    assert_eq!(second.num_polys(), 3);
+    assert_eq!(first.index_bound(0), Some(4));
+    assert_eq!(second.index(0, 1), None);
 }

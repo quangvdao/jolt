@@ -1,6 +1,7 @@
 //! Shared packed inputs for sum-check kernels. Digits are absent or smaller than
 //! `2^bits(column)`; a row-based column is a function of the bytecode row alone.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -17,6 +18,8 @@ pub trait LaneSource: Send + Sync + 'static {
 /// A `by_row(column)` column satisfies
 /// `digit(column, cycle) == row_digit(column, bytecode_index(cycle))`.
 /// Invalid word, column, cycle and row indices return zero or absence.
+/// All dimensions and values must remain immutable while the source is shared;
+/// checked adapters validate this data once and subsequently read it directly.
 pub trait CycleSource: Send + Sync + 'static {
     fn cycles(&self) -> usize;
     fn trace_words(&self) -> usize;
@@ -71,44 +74,43 @@ pub enum SourceError {
     },
 }
 
-/// A checked column selection retaining shared ownership of its source.
+/// Shared source whose dimensions, indices and every digit column are checked.
+/// Construction reads every row-based digit once and every cycle digit once.
+/// Temporary row caches are dropped before returning; the source owns its data.
+/// The guarantee relies on the immutability contract of [`CycleSource`].
 #[derive(Debug, Clone)]
-pub struct DigitColumns<S: CycleSource> {
+pub struct ValidatedTrace<S: CycleSource> {
     source: Arc<S>,
-    columns: Vec<usize>,
+    cycles: usize,
+    widths: Vec<usize>,
 }
 
-impl<S: CycleSource> DigitColumns<S> {
-    pub fn new(source: Arc<S>, columns: Vec<usize>) -> Result<Self, SourceError> {
-        if !source.cycles().is_power_of_two() {
-            return Err(SourceError::CycleCount {
-                cycles: source.cycles(),
-            });
+impl<S: CycleSource> ValidatedTrace<S> {
+    pub fn new(source: Arc<S>) -> Result<Self, SourceError> {
+        let cycles = source.cycles();
+        if !cycles.is_power_of_two() {
+            return Err(SourceError::CycleCount { cycles });
         }
-        if !source.bytecode_rows().is_power_of_two() {
-            return Err(SourceError::BytecodeRows {
-                rows: source.bytecode_rows(),
-            });
+        let rows = source.bytecode_rows();
+        if !rows.is_power_of_two() {
+            return Err(SourceError::BytecodeRows { rows });
         }
-        for &column in &columns {
-            if column >= source.digit_columns() {
-                return Err(SourceError::Column {
-                    column,
-                    columns: source.digit_columns(),
-                });
+        let mut widths = Vec::with_capacity(source.digit_columns());
+        let mut row_digits = Vec::with_capacity(source.digit_columns());
+        for column in 0..source.digit_columns() {
+            let bits = source.bits(column);
+            if bits >= usize::BITS as usize {
+                return Err(SourceError::Width { column, bits });
             }
-            if source.bits(column) >= usize::BITS as usize {
-                return Err(SourceError::Width {
-                    column,
-                    bits: source.bits(column),
-                });
-            }
+            widths.push(bits);
+            row_digits.push(source.by_row(column).then(|| vec![None; rows]));
         }
-        for &column in &columns {
-            if source.by_row(column) {
-                let bound = 1 << source.bits(column);
-                for row in 0..source.bytecode_rows() {
-                    if let Some(digit) = source.row_digit(column, row) {
+        for row in 0..rows {
+            for (column, cache) in row_digits.iter_mut().enumerate() {
+                if let Some(cache) = cache {
+                    let bound = 1 << widths[column];
+                    let digit = source.row_digit(column, row);
+                    if let Some(digit) = digit {
                         if digit >= bound {
                             return Err(SourceError::RowDigitRange {
                                 column,
@@ -118,21 +120,19 @@ impl<S: CycleSource> DigitColumns<S> {
                             });
                         }
                     }
+                    cache[row] = digit.and_then(|value| NonZeroUsize::new(value + 1));
                 }
             }
         }
-        for cycle in 0..source.cycles() {
+        for cycle in 0..cycles {
             let row = source.bytecode_index(cycle);
-            if row >= source.bytecode_rows() {
-                return Err(SourceError::BytecodeIndex {
-                    cycle,
-                    row,
-                    rows: source.bytecode_rows(),
-                });
+            if row >= rows {
+                return Err(SourceError::BytecodeIndex { cycle, row, rows });
             }
-            for &column in &columns {
-                let bound = 1 << source.bits(column);
-                if let Some(digit) = source.digit(column, cycle) {
+            for (column, &bits) in widths.iter().enumerate() {
+                let bound = 1 << bits;
+                let digit = source.digit(column, cycle);
+                if let Some(digit) = digit {
                     if digit >= bound {
                         return Err(SourceError::Digit {
                             column,
@@ -142,24 +142,63 @@ impl<S: CycleSource> DigitColumns<S> {
                         });
                     }
                 }
-                if source.by_row(column)
-                    && source.digit(column, cycle) != source.row_digit(column, row)
-                {
-                    return Err(SourceError::RowDigit { column, cycle, row });
+                if let Some(cache) = &row_digits[column] {
+                    if digit != cache[row].map(|value| value.get() - 1) {
+                        return Err(SourceError::RowDigit { column, cycle, row });
+                    }
                 }
             }
         }
-        Ok(Self { source, columns })
+        Ok(Self {
+            source,
+            cycles,
+            widths,
+        })
     }
 
     pub fn source(&self) -> &Arc<S> {
         &self.source
     }
+}
+
+/// A checked column selection retaining shared ownership of its source.
+/// Multiple selections share a [`ValidatedTrace`] without repeating its scan.
+#[derive(Debug, Clone)]
+pub struct DigitColumns<S: CycleSource> {
+    trace: Arc<ValidatedTrace<S>>,
+    columns: Vec<usize>,
+}
+
+impl<S: CycleSource> DigitColumns<S> {
+    /// Checks the entire arbitrary source, including columns outside the selection.
+    pub fn new(source: Arc<S>, columns: Vec<usize>) -> Result<Self, SourceError> {
+        Self::from_validated(Arc::new(ValidatedTrace::new(source)?), columns)
+    }
+
+    /// Checks only the column list against an already validated source.
+    pub fn from_validated(
+        trace: Arc<ValidatedTrace<S>>,
+        columns: Vec<usize>,
+    ) -> Result<Self, SourceError> {
+        for &column in &columns {
+            if column >= trace.widths.len() {
+                return Err(SourceError::Column {
+                    column,
+                    columns: trace.widths.len(),
+                });
+            }
+        }
+        Ok(Self { trace, columns })
+    }
+
+    pub fn source(&self) -> &Arc<S> {
+        self.trace.source()
+    }
     pub fn columns(&self) -> &[usize] {
         &self.columns
     }
     pub fn cycles(&self) -> usize {
-        self.source.cycles()
+        self.trace.cycles
     }
     pub fn num_polys(&self) -> usize {
         self.columns.len()
@@ -168,10 +207,10 @@ impl<S: CycleSource> DigitColumns<S> {
     pub fn index(&self, column: usize, cycle: usize) -> Option<usize> {
         self.columns
             .get(column)
-            .and_then(|&c| self.source.digit(c, cycle))
+            .and_then(|&c| self.trace.source.digit(c, cycle))
     }
     #[inline]
     pub fn index_bound(&self, column: usize) -> Option<usize> {
-        self.columns.get(column).map(|&c| 1 << self.source.bits(c))
+        self.columns.get(column).map(|&c| 1 << self.trace.widths[c])
     }
 }

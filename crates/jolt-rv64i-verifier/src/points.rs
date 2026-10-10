@@ -7,7 +7,7 @@
 //! calling the polynomial layer's infallible evaluators.
 
 use jolt_field::JoltField;
-use jolt_poly::{EqPlusOnePolynomial, EqPolynomial, LtPolynomial};
+use jolt_poly::{EqPlusOnePolynomial, EqPolynomial};
 use jolt_rv64i_arith::Chunk;
 use thiserror::Error;
 
@@ -30,8 +30,8 @@ pub fn to_high_to_low<F: Copy>(point: &[F]) -> Vec<F> {
     point.iter().rev().copied().collect()
 }
 
-/// Evaluates the equality extension on low-variable-first points of equal length.
-/// Returns `Dimension` if their lengths differ.
+/// Evaluates the equality extension on low-variable-first points of equal length,
+/// with one multiplication per coordinate. Returns `Dimension` if their lengths differ.
 pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -39,7 +39,7 @@ pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    Ok(EqPolynomial::mle(x, y))
+    Ok(x.iter().zip(y).map(|(x, y)| F::one() + *x + *y).product())
 }
 
 /// Evaluates equality with the integer vertex whose bit `i` is coordinate `i`.
@@ -59,12 +59,12 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
     eq(point, &vertex)
 }
 
-/// Materializes at most 64 equality weights in low-variable-first index order.
+/// Materializes at most 1,024 equality weights in low-variable-first index order.
 /// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    if point.len() > 6 {
+    if point.len() > 10 {
         return Err(PointsError::Dimension {
-            expected: 6,
+            expected: 10,
             actual: point.len(),
         });
     }
@@ -80,9 +80,15 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    let x_high: Vec<F> = x.iter().rev().copied().collect();
-    let y_high: Vec<F> = y.iter().rev().copied().collect();
-    Ok(LtPolynomial::evaluate(&x_high, &y_high))
+    Ok(x.iter().zip(y).fold(F::zero(), |less, (x, y)| {
+        if y.is_zero() {
+            (F::one() + *x) * less
+        } else if *y == F::one() {
+            F::one() + *x + *x * less
+        } else {
+            (F::one() + *x) * *y + (F::one() + *x + *y) * less
+        }
+    }))
 }
 
 /// Evaluates the extension of `y = x + 1` without wrap, with low-variable-first integer bits.
@@ -97,18 +103,47 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
+/// A word lift against one reusable 64-entry equality table of a six-coordinate
+/// low-variable-first bit point. Evaluating a word sums the weights of its set bits
+/// without multiplying.
+#[derive(Clone)]
+pub struct WordLift<F: JoltField> {
+    weights: [F; 64],
+}
+
+impl<F: JoltField> WordLift<F> {
+    /// Returns `Dimension` unless the point has six coordinates.
+    pub fn new(point: &[F]) -> Result<Self, PointsError> {
+        if point.len() != 6 {
+            return Err(PointsError::Dimension {
+                expected: 6,
+                actual: point.len(),
+            });
+        }
+        let weights =
+            eq_table(point)?
+                .try_into()
+                .map_err(|values: Vec<F>| PointsError::Dimension {
+                    expected: 64,
+                    actual: values.len(),
+                })?;
+        Ok(Self { weights })
+    }
+
+    pub fn evaluate(&self, word: u64) -> F {
+        self.weights
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| word & (1_u64 << bit) != 0)
+            .map(|(_, weight)| *weight)
+            .sum()
+    }
+}
+
 /// Evaluates the 64-bit table of a word at a six-coordinate low-variable-first bit point.
 /// Returns `Dimension` for any other point length.
 pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
-    if point.len() != 6 {
-        return Err(PointsError::Dimension {
-            expected: 6,
-            actual: point.len(),
-        });
-    }
-    (0..64)
-        .filter(|bit| word & (1_u64 << bit) != 0)
-        .try_fold(F::zero(), |sum, bit| Ok(sum + eq_index(point, bit)?))
+    Ok(WordLift::new(point)?.evaluate(word))
 }
 
 /// Evaluates the full digit selector in low-variable-first digit order, reconstructing digit zero from stored columns.
@@ -125,13 +160,21 @@ pub fn chunk<F: JoltField>(
             actual: point.len(),
         });
     }
-    let zero = eq_index(point, 0)?;
+    let weights = eq_table(point)?;
+    let zero = weights.first().copied().ok_or(PointsError::Index {
+        index: 0,
+        variables: expected,
+    })?;
     (1..=descriptor.indicators()).try_fold(zero, |sum, digit| {
         let column = usize::from(descriptor.start()) + digit - 1;
         let value = columns
             .get(column)
             .ok_or(PointsError::MissingColumn { column })?;
-        Ok(sum + (eq_index(point, digit)? + zero) * *value)
+        let weight = weights.get(digit).copied().ok_or(PointsError::Index {
+            index: digit,
+            variables: expected,
+        })?;
+        Ok(sum + (weight + zero) * *value)
     })
 }
 
@@ -264,10 +307,9 @@ mod tests {
         let point = seeded(&mut seed, 6);
         let word = 0xf023_51a5_4802_7feb;
         let table = (0..64).map(|i| F128::from_u64((word >> i) & 1)).collect();
-        assert_eq!(
-            lift(word, &point).unwrap(),
-            Polynomial::new(table).evaluate(&to_high_to_low(&point))
-        );
+        let expected = Polynomial::new(table).evaluate(&to_high_to_low(&point));
+        assert_eq!(lift(word, &point).unwrap(), expected);
+        assert_eq!(WordLift::new(&point).unwrap().evaluate(word), expected);
     }
 
     #[test]

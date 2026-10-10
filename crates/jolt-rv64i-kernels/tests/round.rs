@@ -43,7 +43,6 @@ fn variable_order_matches_literal_vertices_and_shared_conventions() {
         GruenSplitEqPolynomial::new(&point, BindingOrder::LowToHigh).current_linear_evals(),
         (ZERO, ONE)
     );
-    // The ReductionCore first-message clause (X + X^2) is added in execution item 10.
 }
 
 #[test]

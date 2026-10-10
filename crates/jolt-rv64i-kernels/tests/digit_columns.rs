@@ -6,7 +6,6 @@
 
 use jolt_field::F128;
 use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaError};
-use jolt_rv64i_kernels::oracle::mle_at;
 use jolt_rv64i_kernels::round::eq::eq_table;
 use jolt_rv64i_kernels::source::{CycleSource, DigitColumns};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
@@ -18,6 +17,22 @@ use std::sync::Arc;
 struct CountedTrace {
     trace: SyntheticTrace,
     digit_reads: AtomicUsize,
+}
+
+fn partial_sum(table: &[F128], challenges: &[F128], suffix: usize) -> F128 {
+    let width = 1 << challenges.len();
+    (0..width)
+        .map(|u| {
+            let weight =
+                challenges
+                    .iter()
+                    .enumerate()
+                    .fold(F128::from_raw(1), |weight, (k, &rho)| {
+                        weight * (F128::from_raw(1) + rho + F128::from_raw(((u >> k) & 1) as u128))
+                    });
+            weight * table[suffix * width + u]
+        })
+        .sum()
 }
 
 impl CycleSource for CountedTrace {
@@ -103,9 +118,15 @@ fn bounded_digit_columns_skip_scan_and_bind_to_dense_summation() {
                             let digit = source.trace.digit(c, cycle);
                             assert_eq!(ChunkIndexSource::index(&columns, column, cycle), digit);
                             if let Some(index) = digit {
-                                let mut vertex = vec![F128::from_raw(0); 1 << source.bits(c)];
-                                vertex[index] = F128::from_raw(1);
-                                mle_at(&vertex, point).unwrap()
+                                point.iter().enumerate().fold(
+                                    F128::from_raw(1),
+                                    |weight, (k, &a)| {
+                                        weight
+                                            * (F128::from_raw(1)
+                                                + a
+                                                + F128::from_raw(((index >> k) & 1) as u128))
+                                    },
+                                )
                             } else {
                                 saw_absent = true;
                                 F128::from_raw(0)
@@ -123,11 +144,10 @@ fn bounded_digit_columns_skip_scan_and_bind_to_dense_summation() {
             for bound in 0..=log_t {
                 for (column, table) in dense.iter().enumerate() {
                     for suffix in 0..1 << (log_t - bound) {
-                        let mut point = challenges[..bound].to_vec();
-                        point.extend(
-                            (0..log_t - bound).map(|i| F128::from_raw(((suffix >> i) & 1) as u128)),
+                        assert_eq!(
+                            lazy.value(column, suffix),
+                            partial_sum(table, &challenges[..bound], suffix)
                         );
-                        assert_eq!(lazy.value(column, suffix), mle_at(table, &point).unwrap());
                     }
                 }
                 if bound < log_t {
@@ -138,7 +158,7 @@ fn bounded_digit_columns_skip_scan_and_bind_to_dense_summation() {
                 lazy.final_values(),
                 dense
                     .iter()
-                    .map(|table| mle_at(table, &challenges).unwrap())
+                    .map(|table| partial_sum(table, &challenges, 0))
                     .collect::<Vec<_>>()
             );
         }

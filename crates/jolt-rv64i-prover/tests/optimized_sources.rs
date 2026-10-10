@@ -62,6 +62,7 @@ fn bit(row: &BitsRow, column: usize) -> bool {
 fn check_decoded(witness: &Rv64iWitness) {
     let layout = &witness.layout;
     let fields = DigitFields::new(layout);
+    let cycles = witness.cycles();
     let mut counts = [0_u64; 64];
     assert_eq!(witness.decoded.len(), witness.bits.len());
     for (cycle, (decoded, committed)) in witness.decoded.iter().zip(witness.bits.iter()).enumerate()
@@ -114,7 +115,7 @@ fn check_decoded(witness: &Rv64iWitness) {
             &witness.words[cycle].base_words(variant.is_store(), layout.inc(committed)),
             committed,
         );
-        let found = witness.row(cycle).unwrap();
+        let found = cycles.row(cycle).unwrap();
         for column in 0..WITNESS_COLUMNS {
             assert_eq!(
                 found.bit(column),
@@ -340,7 +341,7 @@ fn source_indices_are_total_and_wrong_decoded_length_is_rejected() {
         assert_eq!(source.columns().committed(column), None);
     }
     assert!(matches!(
-        witness.row(usize::MAX),
+        witness.cycles().row(usize::MAX),
         Err(Rv64iProverError::CycleIndex { .. })
     ));
     witness.decoded = witness.decoded[..63].iter().copied().collect();

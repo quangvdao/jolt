@@ -9,9 +9,10 @@ use allocative::Allocative;
 use common::{constants::RAM_START_ADDRESS, jolt_device::MemoryLayout};
 use jolt_field::JoltField;
 use jolt_kernels::WitnessPlane;
+use jolt_rv64i_arith::decode::SourceParts;
 use jolt_rv64i_arith::{
-    BaseWords, BitsBuilder, BitsRow, Bytecode, Chunk, CycleError, CycleFacts, Layout, Variant,
-    WitnessRow,
+    BaseWords, BitsBuilder, BitsRow, Bytecode, BytecodeRow, Chunk, CycleError, CycleFacts, Layout,
+    Variant, WitnessRow,
 };
 use jolt_rv64i_verifier::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 #[cfg(feature = "test-utils")]
@@ -223,36 +224,98 @@ pub struct Rv64iWitness {
     /// Successor after the final cycle; it must name a valid bytecode row.
     pub final_pc: u64,
 }
-impl Rv64iWitness {
-    /// Composes the fetched row, replayed base words and committed bits; returns a
-    /// typed error for an absent cycle or invalid fetch. Packing is owned by `DigitFields`.
-    pub fn row(&self, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
-        let bits = self.bits.get(cycle).ok_or(Rv64iProverError::CycleIndex {
-            cycle,
-            rows: self.bits.len(),
-        })?;
-        let decoded = self
+/// A borrowed cycle walk with its packed geometry prepared once.
+pub struct WitnessCycles<'w> {
+    witness: &'w Rv64iWitness,
+    fields: DigitFields,
+}
+
+/// Fetched instruction and decoded inputs, without reading a committed row.
+pub struct CycleParts<'w> {
+    pub fetched: &'w BytecodeRow,
+    pub variant: Variant,
+    pub base: BaseWords,
+    pub sources: SourceParts,
+}
+
+impl<'w> WitnessCycles<'w> {
+    /// Rejects an absent cycle or invalid fetch before decoding its inputs.
+    #[inline]
+    pub fn parts(&self, cycle: usize) -> Result<CycleParts<'w>, Rv64iProverError> {
+        let witness = self.witness;
+        if cycle >= witness.bits.len() {
+            return Err(Rv64iProverError::CycleIndex {
+                cycle,
+                rows: witness.bits.len(),
+            });
+        }
+        let decoded = witness
             .decoded
             .get(cycle)
             .ok_or(Rv64iProverError::CycleIndex {
                 cycle,
-                rows: self.decoded.len(),
+                rows: witness.decoded.len(),
             })?;
-        let fields = DigitFields::new(&self.layout);
-        let index = fields.bytecode_index().read(decoded);
+        let index = self.fields.bytecode_index().read(decoded);
         let fetched = usize::try_from(index)
             .ok()
-            .and_then(|i| self.bytecode.rows().get(i))
+            .and_then(|i| witness.bytecode.rows().get(i))
             .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
         let variant = fetched
             .variant
             .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-        let words = self.words.get(cycle).ok_or(Rv64iProverError::CycleIndex {
-            cycle,
-            rows: self.words.len(),
-        })?;
-        let base = words.base_words(variant.is_store(), decoded.inc);
-        Ok(WitnessRow::compute(&self.layout, fetched, &base, bits))
+        let words = witness
+            .words
+            .get(cycle)
+            .ok_or(Rv64iProverError::CycleIndex {
+                cycle,
+                rows: witness.words.len(),
+            })?;
+        let [low, high] = self.fields.pos_fields();
+        let sources = SourceParts {
+            inc: decoded.inc,
+            ram_index: self.fields.ram_index().read(decoded),
+            pos: (low.read(decoded) | (high.read(decoded) << low.bits())) as u8,
+            keys_differ: self.fields.keys_differ().read(decoded) != 0,
+            should_branch: self.fields.should_branch().read(decoded) != 0,
+            jalr_low_bit: self.fields.jalr_low_bit().read(decoded) != 0,
+        };
+        Ok(CycleParts {
+            fetched,
+            variant,
+            base: words.base_words(variant.is_store(), sources.inc),
+            sources,
+        })
+    }
+
+    /// Composes decoded inputs with the committed row through `WitnessRow::compute`.
+    #[inline]
+    pub fn row(&self, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
+        let parts = self.parts(cycle)?;
+        let bits = self
+            .witness
+            .bits
+            .get(cycle)
+            .ok_or(Rv64iProverError::CycleIndex {
+                cycle,
+                rows: self.witness.bits.len(),
+            })?;
+        Ok(WitnessRow::compute(
+            &self.witness.layout,
+            parts.fetched,
+            &parts.base,
+            bits,
+        ))
+    }
+}
+
+impl Rv64iWitness {
+    /// Prepares packed geometry once for a borrowed walk of the cycles.
+    pub fn cycles(&self) -> WitnessCycles<'_> {
+        WitnessCycles {
+            witness: self,
+            fields: DigitFields::new(&self.layout),
+        }
     }
 
     /// Replays shared committed rows from zero registers and canonical initial RAM without copying them.

@@ -1,7 +1,7 @@
 //! Packed lanes and the degree-three binary-row outer adapter.
 
 use crate::error::Rv64iProverError;
-use crate::plane::{DigitFields, Rv64iPlane, Rv64iWitness};
+use crate::plane::{Rv64iPlane, Rv64iWitness, WitnessCycles};
 #[cfg(feature = "allocative")]
 use allocative::Allocative;
 use jolt_field::F128;
@@ -9,7 +9,6 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
-use jolt_rv64i_arith::decode::SourceParts;
 use jolt_rv64i_arith::words::F2Words;
 use jolt_rv64i_arith::{FormError, RowSystem, Sources};
 use jolt_rv64i_kernels::outer_f2::{OuterF2Core, OuterF2Options};
@@ -77,7 +76,7 @@ impl WitnessLanes {
         }
         let chunks = CycleChunks::new(cycles.ilog2() as usize, 0)?;
         let rows = RowSystem::new(&witness.layout);
-        let fields = DigitFields::new(&witness.layout);
+        let view = witness.cycles();
         let mut lanes = Vec::new();
         lanes
             .try_reserve_exact(cycles)
@@ -94,7 +93,7 @@ impl WitnessLanes {
             .filter_map(|(chunk, (lanes, tail))| {
                 for (offset, (lanes, tail)) in lanes.iter_mut().zip(tail).enumerate() {
                     let cycle = chunk * chunks.chunk_len() + offset;
-                    match Self::cycle_with_fields(witness, &rows, &fields, cycle) {
+                    match Self::cycle(&view, &rows, cycle) {
                         Ok((values, byte)) => {
                             *lanes = values;
                             *tail = byte;
@@ -114,64 +113,15 @@ impl WitnessLanes {
     /// Returns one cycle's lane families and packed tail without storing them.
     #[inline]
     pub fn cycle(
-        witness: &Rv64iWitness,
+        view: &WitnessCycles<'_>,
         rows: &RowSystem,
         cycle: usize,
     ) -> Result<([[u64; 3]; 2], u8), LanesError> {
-        let fields = DigitFields::new(&witness.layout);
-        Self::cycle_with_fields(witness, rows, &fields, cycle)
-    }
-
-    #[inline]
-    fn cycle_with_fields(
-        witness: &Rv64iWitness,
-        rows: &RowSystem,
-        fields: &DigitFields,
-        cycle: usize,
-    ) -> Result<([[u64; 3]; 2], u8), LanesError> {
-        let words = witness
-            .words
-            .get(cycle)
-            .ok_or(Rv64iProverError::CycleIndex {
-                cycle,
-                rows: witness.words.len(),
-            })?;
-        let decoded = witness
-            .decoded
-            .get(cycle)
-            .ok_or(Rv64iProverError::CycleIndex {
-                cycle,
-                rows: witness.decoded.len(),
-            })?;
-        if cycle >= witness.bits.len() {
-            return Err(Rv64iProverError::CycleIndex {
-                cycle,
-                rows: witness.bits.len(),
-            }
-            .into());
-        }
-        let index = fields.bytecode_index().read(decoded);
-        let fetched = usize::try_from(index)
-            .ok()
-            .and_then(|index| witness.bytecode.rows().get(index))
-            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-        let variant = fetched
-            .variant
-            .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-        let [low, high] = fields.pos_fields();
-        let parts = SourceParts {
-            inc: decoded.inc,
-            ram_index: fields.ram_index().read(decoded),
-            pos: (low.read(decoded) | (high.read(decoded) << low.bits())) as u8,
-            keys_differ: fields.keys_differ().read(decoded) != 0,
-            should_branch: fields.should_branch().read(decoded) != 0,
-            jalr_low_bit: fields.jalr_low_bit().read(decoded) != 0,
-        };
-        let base = words.base_words(variant.is_store(), parts.inc);
-        let sources = Sources::from_parts(fetched, &base, parts);
-        let evaluated = F2Words::compute(fetched, &sources, parts.pos)
+        let parts = view.parts(cycle)?;
+        let sources = Sources::from_parts(parts.fetched, &parts.base, parts.sources);
+        let evaluated = F2Words::compute(parts.fetched, &sources, parts.sources.pos)
             .map_err(|source| LanesError::Evaluation { cycle, source })?;
-        let (lanes, packed) = rows.f2_values(&evaluated, parts.keys_differ);
+        let (lanes, packed) = rows.f2_values(&evaluated, parts.sources.keys_differ);
         let mut tail = 0;
         for (row, values) in packed.into_iter().enumerate() {
             for (column, value) in values.into_iter().enumerate() {

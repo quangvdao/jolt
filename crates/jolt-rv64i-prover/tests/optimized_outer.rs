@@ -39,6 +39,7 @@ fn outer_backend() -> Rv64iBackend {
 
 fn check_lanes(witness: &Rv64iWitness) {
     let rows = RowSystem::new(&witness.layout);
+    let cycles = witness.cycles();
     for threads in [1, 12] {
         let pool = ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -47,7 +48,7 @@ fn check_lanes(witness: &Rv64iWitness) {
         let lanes = pool.install(|| WitnessLanes::new(witness)).unwrap();
         assert_eq!(lanes.cycles(), witness.bits.len());
         for cycle in 0..lanes.cycles() {
-            let row = witness.row(cycle).unwrap();
+            let row = cycles.row(cycle).unwrap();
             let expected = rows.lane_rows().map(|family| family.values(&row));
             assert_eq!(lanes.lanes(cycle), expected, "cycle {cycle}");
             let tail = lanes.tail(cycle);
@@ -64,7 +65,7 @@ fn check_lanes(witness: &Rv64iWitness) {
             }
             assert_eq!(tail >> 6, 0, "cycle {cycle}");
             assert_eq!(
-                WitnessLanes::cycle(witness, &rows, cycle).unwrap(),
+                WitnessLanes::cycle(&cycles, &rows, cycle).unwrap(),
                 (expected, tail),
                 "cycle {cycle}",
             );
@@ -73,7 +74,7 @@ fn check_lanes(witness: &Rv64iWitness) {
         for cycle in [lanes.cycles(), usize::MAX] {
             assert_eq!(lanes.lanes(cycle), [[0; 3]; 2]);
             assert_eq!(lanes.tail(cycle), 0);
-            assert!(WitnessLanes::cycle(witness, &rows, cycle).is_err());
+            assert!(WitnessLanes::cycle(&cycles, &rows, cycle).is_err());
         }
     }
 }
@@ -94,12 +95,14 @@ fn lanes_match_row_definitions_on_programs_and_separating_jalr() {
                 == Some(Variant::JALR)
         })
         .unwrap();
-    let before = WitnessLanes::cycle(&witness, &rows, cycle).unwrap();
+    let cycles = witness.cycles();
+    let before = WitnessLanes::cycle(&cycles, &rows, cycle).unwrap();
     let mut changed = witness.clone();
     Arc::make_mut(&mut changed.words)[cycle].next_pc ^= 4;
-    let after = WitnessLanes::cycle(&changed, &rows, cycle).unwrap();
+    let changed_cycles = changed.cycles();
+    let after = WitnessLanes::cycle(&changed_cycles, &rows, cycle).unwrap();
     assert_ne!(before.0[0], after.0[0], "JALR adder must read NextPC");
-    let row = changed.row(cycle).unwrap();
+    let row = changed_cycles.row(cycle).unwrap();
     assert_eq!(after.0[0], rows.lane_rows()[0].values(&row));
 }
 
@@ -342,7 +345,8 @@ fn malformed_lanes_report_first_cycle_on_every_pool_and_invalid_geometry() {
         decoded.digits =
             (decoded.digits & !(mask << field.shift())) | ((invalid_index as u64) << field.shift());
     }
-    let expected = WitnessLanes::cycle(&witness, &rows, cycles[0])
+    let view = witness.cycles();
+    let expected = WitnessLanes::cycle(&view, &rows, cycles[0])
         .err()
         .unwrap()
         .to_string();

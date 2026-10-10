@@ -30,10 +30,11 @@ pub fn witness_column(
     witness: &Rv64iWitness,
     column: usize,
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    let cycles = witness.cycles();
     Ok(Polynomial::new(
         (0..witness.bits.len())
             .map(|j| {
-                let z = witness.row(j)?;
+                let z = cycles.row(j)?;
                 let value = z.bit(column).ok_or(PointsError::MissingColumn { column })?;
                 Ok(F128::from_u64(u64::from(value)))
             })
@@ -71,8 +72,9 @@ fn outer_tables(
         .checked_mul(witness.bits.len())
         .ok_or_else(|| geometry("outer cube is not representable"))?;
     let mut tables: [Vec<F128>; 3] = std::array::from_fn(|_| vec![F128::zero(); size]);
+    let cycles = witness.cycles();
     for j in 0..witness.bits.len() {
-        let z = witness.row(j).map_err(geometry)?;
+        let z = cycles.row(j).map_err(geometry)?;
         for (table, matrix) in tables
             .iter_mut()
             .zip([&matrices.a, &matrices.b, &matrices.c])
@@ -131,8 +133,9 @@ impl PrepareKernel<F128, SpartanInner<F128>, Rv64iPlane> for SpartanInnerPrepare
         }
         let mut routed = vec![F128::zero(); WITNESS_COLUMNS];
         let mut direct = vec![F128::zero(); WITNESS_COLUMNS];
+        let cycles = witness.cycles();
         for (cycle, (bits, weight)) in witness.bits.iter().zip(weights).enumerate() {
-            let z = witness.row(cycle).map_err(geometry)?;
+            let z = cycles.row(cycle).map_err(geometry)?;
             for column in (1..4).chain(16..27).chain(64..768) {
                 if z.bit(column)
                     .ok_or_else(|| geometry("routed column exceeds the witness domain"))?

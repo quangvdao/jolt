@@ -122,6 +122,7 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use support::merge::tree_merge;
 use support::scatter::{PartitionedScatter, ScatterError};
 use support::{run_probe, ProbeCase, ProbeKernel, RunnerError};
 
@@ -902,24 +903,12 @@ impl Scatter {
                             table[source.bytecode_index(cycle)] += trace_value(source, cycle);
                         }
                     });
-                let mut stride = 1;
-                while stride < tables.len() {
-                    tables.par_chunks_mut(stride * 2).for_each(|pair| {
-                        if pair.len() > stride {
-                            let (left, right) = pair.split_at_mut(stride);
-                            let left = left[0].get_mut().unwrap_or_else(PoisonError::into_inner);
-                            let right = right[0].get_mut().unwrap_or_else(PoisonError::into_inner);
-                            left.par_chunks_mut(CHUNK)
-                                .zip(right.par_chunks(CHUNK))
-                                .for_each(|(left, right)| {
-                                    for (left, &right) in left.iter_mut().zip(right) {
-                                        *left += right;
-                                    }
-                                });
-                        }
-                    });
-                    stride *= 2;
-                }
+                tree_merge(tables, CHUNK, |table| {
+                    table
+                        .get_mut()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_mut_slice()
+                });
                 let table = tables[0].get_mut().unwrap_or_else(PoisonError::into_inner);
                 let _ = black_box(&*table);
                 table[0]
@@ -1194,56 +1183,49 @@ impl Readout {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeMode {
+    Zero,
+    ZeroTree,
+    Tree,
+}
+
 struct Merge {
     arrays: Vec<Vec<F128>>,
-    tree: bool,
+    mode: MergeMode,
 }
 
 impl Merge {
-    fn new(threads: usize, tree: bool) -> Self {
+    fn new(threads: usize, mode: MergeMode) -> Self {
         Self {
             arrays: (0..threads)
                 .map(|_| vec![F128::from_raw(1); 10 * 1024 * 1024 / size_of::<F128>()])
                 .collect(),
-            tree,
+            mode,
         }
     }
 
     fn operations(&self) -> usize {
-        let arrays = if self.tree {
-            2 * self.arrays.len() - 1
-        } else {
-            self.arrays.len()
+        let arrays = match self.mode {
+            MergeMode::Zero => self.arrays.len(),
+            MergeMode::ZeroTree => 2 * self.arrays.len() - 1,
+            MergeMode::Tree => self.arrays.len() - 1,
         };
         arrays * self.arrays[0].len()
     }
 
     fn run(&mut self) -> F128 {
         let arrays = black_box(&mut self.arrays);
-        arrays.par_iter_mut().for_each(|array| {
-            array
-                .par_chunks_mut(CHUNK)
-                .for_each(|chunk| chunk.fill(F128::from_raw(0)));
-        });
+        if self.mode != MergeMode::Tree {
+            arrays.par_iter_mut().for_each(|array| {
+                array
+                    .par_chunks_mut(CHUNK)
+                    .for_each(|chunk| chunk.fill(F128::from_raw(0)));
+            });
+        }
         let _ = black_box(&mut *arrays);
-        if self.tree {
-            let mut stride = 1;
-            while stride < arrays.len() {
-                arrays.par_chunks_mut(stride * 2).for_each(|pair| {
-                    if pair.len() > stride {
-                        let (left, right) = pair.split_at_mut(stride);
-                        left[0]
-                            .par_chunks_mut(CHUNK)
-                            .zip(right[0].par_chunks(CHUNK))
-                            .for_each(|(left, right)| {
-                                for (left, &right) in left.iter_mut().zip(right) {
-                                    *left += right;
-                                }
-                            });
-                    }
-                });
-                stride *= 2;
-            }
+        if self.mode != MergeMode::Zero {
+            tree_merge(arrays, CHUNK, Vec::as_mut_slice);
         }
         let _ = black_box(&*arrays);
         arrays[0][0]
@@ -1332,7 +1314,9 @@ impl Unit {
                 };
                 Ok(Self::Scatter(Scatter::new(trace()?, method, threads)?))
             }
-            "sct" => Ok(Self::Partitioned(Box::new(PartitionedScatter::new(trace()?)?))),
+            "sct" => Ok(Self::Partitioned(Box::new(PartitionedScatter::new(
+                trace()?,
+            )?))),
             "fmadd" => {
                 let terms = case
                     .variant
@@ -1374,12 +1358,13 @@ impl Unit {
                 Ok(Self::Readout(Readout::new(layout)))
             }
             "merge" => {
-                let tree = match case.variant.as_str() {
-                    "zero_fill_10mib" => false,
-                    "zero_fill_tree_10mib" => true,
+                let mode = match case.variant.as_str() {
+                    "zero_fill_10mib" => MergeMode::Zero,
+                    "zero_fill_tree_10mib" => MergeMode::ZeroTree,
+                    "tree_only_10mib" => MergeMode::Tree,
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Merge(Merge::new(threads, tree)))
+                Ok(Self::Merge(Merge::new(threads, mode)))
             }
             _ => Err(invalid()),
         }
@@ -1475,6 +1460,7 @@ fn main() -> Result<(), RunnerError> {
                     format!("pressure_{pattern}_{kib}kib")
                 },
                 profiles: BOTH,
+                minimum_threads: 1,
             });
         }
     }
@@ -1482,6 +1468,7 @@ fn main() -> Result<(), RunnerError> {
         unit: "bucket",
         variant: "column_128kib".to_owned(),
         profiles: BOTH,
+        minimum_threads: 1,
     });
     for layout in ["none", "hot8", "all"] {
         for share in [0, 25, 50, 75, 100] {
@@ -1489,6 +1476,7 @@ fn main() -> Result<(), RunnerError> {
                 unit: "bucket",
                 variant: format!("fold_{layout}_share_{share}"),
                 profiles: BOTH,
+                minimum_threads: 1,
             });
         }
     }
@@ -1498,6 +1486,7 @@ fn main() -> Result<(), RunnerError> {
                 unit: "scatter",
                 variant: format!("{method}_rows_{rows}"),
                 profiles: if rows == 16 { LOCAL } else { ALL_ROWS },
+                minimum_threads: 1,
             });
         }
     }
@@ -1506,6 +1495,7 @@ fn main() -> Result<(), RunnerError> {
             unit: "sct",
             variant: format!("partitioned_emit_rows_{rows}"),
             profiles: if rows == 16 { LOCAL } else { ALL_ROWS },
+            minimum_threads: 1,
         });
     }
     for terms in [0, 1, 2, 4, 8, 20] {
@@ -1513,13 +1503,15 @@ fn main() -> Result<(), RunnerError> {
             unit: "fmadd",
             variant: format!("chain_{terms}"),
             profiles: BOTH,
+            minimum_threads: 1,
         });
     }
-    for variant in ["zero_fill_10mib", "zero_fill_tree_10mib"] {
+    for variant in ["zero_fill_10mib", "zero_fill_tree_10mib", "tree_only_10mib"] {
         cases.push(ProbeCase {
             unit: "merge",
             variant: variant.to_owned(),
             profiles: &[],
+            minimum_threads: if variant == "tree_only_10mib" { 2 } else { 1 },
         });
     }
     for variant in [
@@ -1531,6 +1523,7 @@ fn main() -> Result<(), RunnerError> {
             unit: "arithmetic",
             variant: variant.to_owned(),
             profiles: BOTH,
+            minimum_threads: 1,
         });
     }
     for variant in ["column_128kib", "fold_none", "fold_hot8", "fold_all"] {
@@ -1538,6 +1531,7 @@ fn main() -> Result<(), RunnerError> {
             unit: "readout",
             variant: variant.to_owned(),
             profiles: &[],
+            minimum_threads: 1,
         });
     }
     run_probe(&cases, Unit::new)

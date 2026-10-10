@@ -9,6 +9,7 @@
 
 mod allocator;
 pub mod example;
+pub mod merge;
 pub mod scatter;
 
 use std::error::Error as StdError;
@@ -320,6 +321,7 @@ pub struct ProbeCase {
     pub unit: &'static str,
     pub variant: String,
     pub profiles: &'static [SynthProfile],
+    pub minimum_threads: usize,
 }
 
 /// A preallocated operation stream. The runner times each pass once per sample.
@@ -426,6 +428,7 @@ where
             let selected_cases: Vec<_> = cases
                 .iter()
                 .filter(selected)
+                .filter(|case| *threads >= case.minimum_threads)
                 .filter(|case| {
                     setting.map_or(case.profiles.is_empty(), |(profile, _)| {
                         case.profiles.contains(&profile)

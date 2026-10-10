@@ -5,6 +5,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct CountingAllocator;
 
+pub struct AllocationAllowance {
+    pub allocs: usize,
+    pub bytes: usize,
+}
+
+// Rayon lazily boxes a 64-byte mutex and a 48-byte condition variable per worker.
+pub const RAYON_WORKER_ALLOWANCE: AllocationAllowance = AllocationAllowance {
+    allocs: 2,
+    bytes: 64 + 48,
+};
+
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);

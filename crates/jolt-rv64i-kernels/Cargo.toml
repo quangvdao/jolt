@@ -18,6 +18,7 @@ jolt-poly.workspace = true
 jolt-sumcheck.workspace = true
 jolt-utils = { workspace = true }
 jolt-kernels.workspace = true
+jolt-utils = { workspace = true }
 rayon.workspace = true
 thiserror.workspace = true
 rand_chacha = { workspace = true, optional = true }

@@ -43,6 +43,22 @@ fn variable_order_matches_literal_vertices_and_shared_conventions() {
         GruenSplitEqPolynomial::new(&point, BindingOrder::LowToHigh).current_linear_evals(),
         (ZERO, ONE)
     );
+    use jolt_rv64i_kernels::reduction::{ReductionCore, ReductionLeg};
+    use jolt_sumcheck::ProveRounds;
+    let mut core = ReductionCore::new(
+        vec![table.to_vec()],
+        vec![ReductionLeg {
+            table: 0,
+            point: point.to_vec(),
+            coefficient: ONE,
+            claim: ZERO,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        core.prove_round(None, 0, ZERO).unwrap().coefficients(),
+        [ZERO, ONE, ONE]
+    );
 }
 
 #[test]

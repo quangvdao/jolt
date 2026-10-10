@@ -20,12 +20,11 @@ use jolt_rv64i_verifier::claims::spartan_outer::{
 use jolt_rv64i_verifier::stages::stage1::SpartanOuterF2;
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rayon::prelude::*;
-use std::collections::TryReserveError;
 use std::fmt::Display;
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Geometry, allocation or per-cycle evaluation rejected by the lanes pass.
+/// Geometry or per-cycle evaluation rejected by the lanes pass.
 #[derive(Debug, Error)]
 pub enum LanesError {
     #[error(transparent)]
@@ -34,11 +33,6 @@ pub enum LanesError {
     Cycles { cycles: usize },
     #[error(transparent)]
     Geometry(#[from] ParError),
-    #[error("lanes allocation for {cycles} cycles failed: {source}")]
-    Allocation {
-        cycles: usize,
-        source: TryReserveError,
-    },
     #[error("cycle {cycle} evaluation failed: {source}")]
     Evaluation { cycle: usize, source: FormError },
 }
@@ -77,15 +71,8 @@ impl WitnessLanes {
         let chunks = CycleChunks::new(cycles.ilog2() as usize, 0)?;
         let rows = RowSystem::new(&witness.layout);
         let view = witness.cycles();
-        let mut lanes = Vec::new();
-        lanes
-            .try_reserve_exact(cycles)
-            .map_err(|source| LanesError::Allocation { cycles, source })?;
-        lanes.resize(cycles, [[0; 3]; 2]);
-        let mut tail = Vec::new();
-        tail.try_reserve_exact(cycles)
-            .map_err(|source| LanesError::Allocation { cycles, source })?;
-        tail.resize(cycles, 0);
+        let mut lanes = vec![[[0; 3]; 2]; cycles];
+        let mut tail = vec![0; cycles];
         let error = lanes
             .par_chunks_mut(chunks.chunk_len())
             .zip(tail.par_chunks_mut(chunks.chunk_len()))

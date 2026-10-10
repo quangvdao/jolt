@@ -16,16 +16,43 @@ use std::fmt::Display;
 use std::ops::Range;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "allocative", derive(Allocative))]
-enum DigitRead {
-    Field(DigitField),
-    Flag(DigitField),
-    Kind(KindTable),
+struct ColumnReads {
+    fields: Vec<DigitField>,
+    variant: DigitField,
+    kinds: [KindTable; 4],
+    flags: [FlagRead; 3],
+}
+impl ColumnReads {
+    fn variant_column(&self) -> usize {
+        self.fields.len()
+    }
+
+    fn kind_start(&self) -> usize {
+        self.variant_column() + 1
+    }
+
+    fn kind_column(&self, kind: KindTable) -> usize {
+        self.kind_start() + kind.index()
+    }
+
+    fn flag_start(&self) -> usize {
+        self.kind_start() + self.kinds.len()
+    }
+
+    fn flag_column(&self, flag: FlagTable) -> usize {
+        self.flag_start() + flag.index()
+    }
+
+    fn len(&self) -> usize {
+        self.flag_start() + self.flags.len()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "allocative", derive(Allocative))]
+#[repr(usize)]
 enum KindTable {
     Shift,
     Access,
@@ -34,6 +61,10 @@ enum KindTable {
 }
 impl KindTable {
     const ALL: [Self; 4] = [Self::Shift, Self::Access, Self::Key, Self::Branch];
+
+    fn index(self) -> usize {
+        self as usize
+    }
 
     fn bits(self) -> usize {
         match self {
@@ -54,6 +85,28 @@ impl KindTable {
             Self::Branch => variant.branch().map(|_| 0),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+#[repr(usize)]
+enum FlagTable {
+    KeysDiffer,
+    ShouldBranch,
+    JalrLowBit,
+}
+impl FlagTable {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct FlagRead {
+    flag: FlagTable,
+    field: DigitField,
+    committed: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,29 +142,26 @@ struct DigitDecoder {
 }
 impl DigitDecoder {
     fn new(columns: &WitnessColumns) -> Self {
-        let mut fields = Vec::new();
+        let reads = &columns.reads;
+        let fields = reads
+            .fields
+            .iter()
+            .copied()
+            .map(|field| EncodedField::new(field, 1))
+            .collect();
         let mut kinds = [[0; KindTable::ALL.len()]; 64];
-        let mut flags = [EncodedField::default(); 3];
-        let mut flag = 0;
-        let mut kind = 0;
-        for read in &columns.reads {
-            match *read {
-                DigitRead::Field(field) => fields.push(EncodedField::new(field, 1)),
-                DigitRead::Flag(field) => {
-                    flags[flag] = EncodedField::new(field, 0);
-                    flag += 1;
-                }
-                DigitRead::Kind(table) => {
-                    for variant in Variant::ALL {
-                        kinds[variant.index()][kind] =
-                            table.digit(variant).map_or(0, |digit| u16::from(digit) + 1);
-                    }
-                    kind += 1;
-                }
+        for table in reads.kinds {
+            for variant in Variant::ALL {
+                kinds[variant.index()][table.index()] =
+                    table.digit(variant).map_or(0, |digit| u16::from(digit) + 1);
             }
         }
+        let mut flags = [EncodedField::default(); 3];
+        for read in reads.flags {
+            flags[read.flag.index()] = EncodedField::new(read.field, 0);
+        }
         Self {
-            variant: fields[columns.variant()],
+            variant: EncodedField::new(reads.variant, 1),
             fields,
             kinds,
             flags,
@@ -128,8 +178,10 @@ impl DigitDecoder {
     fn digit(&self, column: usize, digits: u64) -> Option<usize> {
         let encoded = if let Some(field) = self.fields.get(column) {
             field.read(digits)
+        } else if column == self.fields.len() {
+            self.variant.read(digits)
         } else {
-            let column = column - self.fields.len();
+            let column = column - self.fields.len() - 1;
             if let Some(&kind) = self.kinds[self.variant(digits)].get(column) {
                 kind
             } else {
@@ -152,15 +204,15 @@ impl DigitDecoder {
         };
         for (row, output) in cycles.iter().zip(out.as_chunks_mut::<COLUMNS>().0) {
             let digits = row.digits;
-            for (column, slot) in output[..FIELDS - 1].iter_mut().enumerate() {
+            for (column, slot) in output[..FIELDS].iter_mut().enumerate() {
                 *slot = fields[column].read(digits);
             }
-            // WitnessColumns::new terminates the field run with Variant.
-            let variant = fields[FIELDS - 1].read(digits);
-            output[FIELDS - 1] = variant;
+            let variant = self.variant.read(digits);
+            output[FIELDS] = variant;
             let variant = usize::from(variant.wrapping_sub(1)) & (self.kinds.len() - 1);
-            output[FIELDS..FIELDS + KindTable::ALL.len()].copy_from_slice(&self.kinds[variant]);
-            for (slot, field) in output[FIELDS + KindTable::ALL.len()..]
+            output[FIELDS + 1..FIELDS + 1 + KindTable::ALL.len()]
+                .copy_from_slice(&self.kinds[variant]);
+            for (slot, field) in output[FIELDS + 1 + KindTable::ALL.len()..]
                 .iter_mut()
                 .zip(self.flags)
             {
@@ -187,7 +239,7 @@ pub struct WitnessColumns {
     keys_differ: usize,
     should_branch: usize,
     jalr_low_bit: usize,
-    reads: Vec<DigitRead>,
+    reads: ColumnReads,
     widths: Vec<usize>,
     committed: [Option<(usize, usize)>; 256],
     #[cfg_attr(feature = "allocative", allocative(skip))]
@@ -207,7 +259,7 @@ impl WitnessColumns {
 
     pub fn new(layout: &Layout) -> Self {
         let fields = DigitFields::new(layout);
-        let mut reads = Vec::new();
+        let mut read_fields = Vec::new();
         let mut widths = Vec::new();
         let mut committed = [None; 256];
         let mut map = vec![ColumnMap::Word {
@@ -215,8 +267,8 @@ impl WitnessColumns {
             trace_word: Self::inc_word(),
         }];
         let mut add = |chunk: Chunk, field: DigitField| {
-            let column = reads.len();
-            reads.push(DigitRead::Field(field));
+            let column = read_fields.len();
+            read_fields.push(field);
             widths.push(field.bits());
             let start = usize::from(chunk.start());
             map.push(ColumnMap::Indicators { start, column });
@@ -242,29 +294,43 @@ impl WitnessColumns {
         let pos_fields = fields.pos_fields();
         let chunks = layout.pos_ra();
         let pos = [add(chunks[0], pos_fields[0]), add(chunks[1], pos_fields[1])];
-        let variant = reads.len();
-        reads.push(DigitRead::Field(fields.variant()));
-        widths.push(fields.variant().bits());
-        let shift_kind = reads.len();
-        let access_kind = shift_kind + 1;
-        let key_kind = shift_kind + 2;
-        let branch = shift_kind + 3;
-        for kind in KindTable::ALL {
-            reads.push(DigitRead::Kind(kind));
-            widths.push(kind.bits());
+        let reads = ColumnReads {
+            fields: read_fields,
+            variant: fields.variant(),
+            kinds: KindTable::ALL,
+            flags: [
+                FlagRead {
+                    flag: FlagTable::KeysDiffer,
+                    field: fields.keys_differ(),
+                    committed: layout.keys_differ(),
+                },
+                FlagRead {
+                    flag: FlagTable::ShouldBranch,
+                    field: fields.should_branch(),
+                    committed: layout.should_branch(),
+                },
+                FlagRead {
+                    flag: FlagTable::JalrLowBit,
+                    field: fields.jalr_low_bit(),
+                    committed: layout.jalr_low_bit(),
+                },
+            ],
+        };
+        let variant = reads.variant_column();
+        widths.push(reads.variant.bits());
+        let shift_kind = reads.kind_column(KindTable::Shift);
+        let access_kind = reads.kind_column(KindTable::Access);
+        let key_kind = reads.kind_column(KindTable::Key);
+        let branch = reads.kind_column(KindTable::Branch);
+        widths.resize(reads.len(), 0);
+        for table in reads.kinds {
+            widths[reads.kind_column(table)] = table.bits();
         }
-        let keys_differ = reads.len();
-        let should_branch = keys_differ + 1;
-        let jalr_low_bit = keys_differ + 2;
-        for (field, start) in [
-            (fields.keys_differ(), layout.keys_differ()),
-            (fields.should_branch(), layout.should_branch()),
-            (fields.jalr_low_bit(), layout.jalr_low_bit()),
-        ] {
-            let column = reads.len();
-            reads.push(DigitRead::Flag(field));
-            widths.push(0);
-            committed[start] = Some((column, 0));
+        let keys_differ = reads.flag_column(FlagTable::KeysDiffer);
+        let should_branch = reads.flag_column(FlagTable::ShouldBranch);
+        let jalr_low_bit = reads.flag_column(FlagTable::JalrLowBit);
+        for read in reads.flags {
+            committed[read.committed] = Some((reads.flag_column(read.flag), 0));
         }
         map.push(ColumnMap::Flags {
             start: layout.keys_differ(),
@@ -488,20 +554,25 @@ impl CycleSource for WitnessSource {
             out.fill(0);
             return;
         }
-        let Some(rows) = self.decoded.get(cycles) else {
+        let valid_end = cycles.end.min(self.decoded.len());
+        if cycles.start >= valid_end {
             out.fill(0);
             return;
-        };
-        // Layout::new admits five through sixteen fields; specialise once per tile.
+        }
+        let rows = &self.decoded[cycles.start..valid_end];
+        let valid_len = rows.len() * self.digit_columns();
+        let (out, absent) = out.split_at_mut(valid_len);
+        absent.fill(0);
+        // Layout::new admits four through fifteen fields before Variant.
         macro_rules! decode {
             ($($fields:literal),*) => {
                 match self.decoder.fields.len() {
-                    $($fields => self.decoder.cycles::<$fields, { $fields + KindTable::ALL.len() + 3 }>(rows, out),)*
+                    $($fields => self.decoder.cycles::<$fields, { $fields + 1 + KindTable::ALL.len() + 3 }>(rows, out),)*
                     _ => out.fill(0),
                 }
             };
         }
-        decode!(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+        decode!(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     }
     #[inline]
     fn row_digit(&self, column: usize, row: usize) -> Option<usize> {

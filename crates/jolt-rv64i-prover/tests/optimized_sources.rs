@@ -371,7 +371,12 @@ fn bulk_digits_match_scalar_encoding_and_zero_wrong_lengths() {
     for witness in witnesses() {
         let source = WitnessSource::new(&witness).unwrap();
         let columns = source.digit_columns();
-        for cycles in [0..source.cycles(), 3..17, 11..61] {
+        for cycles in [
+            0..source.cycles(),
+            3..17,
+            11..61,
+            source.cycles() - 2..source.cycles() + 2,
+        ] {
             let len = cycles.len() * columns;
             let mut output = vec![u16::MAX; len];
             source.digits(cycles.clone(), &mut output);

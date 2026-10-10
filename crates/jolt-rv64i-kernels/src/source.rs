@@ -38,6 +38,33 @@ pub trait CycleSource: Send + Sync + 'static {
     fn bits(&self, column: usize) -> usize;
     fn by_row(&self, column: usize) -> bool;
     fn digit(&self, column: usize, cycle: usize) -> Option<usize>;
+    /// Writes encoded digits in cycle-major, column-list order: slot
+    /// `(j - cycles.start) * digit_columns() + c` is zero for absence and
+    /// `min(d.saturating_add(1), u16::MAX)` for `digit(c, j) == Some(d)`.
+    /// Saturation preserves range rejection even for an over-wide malformed digit.
+    /// Every output slot is written. If the output length differs from
+    /// `cycles.len() * digit_columns()` (including overflow), all slots are zeroed
+    /// and no digit is read. Empty/reversed ranges therefore require empty output.
+    /// An override decodes the same storage with the same field description as
+    /// `digit`: these are two views of one immutable digit function.
+    /// Preparation checks agreement only in tiles it rejects; agreement in
+    /// accepted tiles is the source's obligation. No unsafe operation in this
+    /// crate may rely on that obligation; later source reads use safe indexing
+    /// or masking.
+    fn digits(&self, cycles: Range<usize>, out: &mut [u16]) {
+        let columns = self.digit_columns();
+        if cycles.len().checked_mul(columns) != Some(out.len()) || columns == 0 {
+            out.fill(0);
+            return;
+        }
+        for (cycle, row) in cycles.zip(out.chunks_exact_mut(columns)) {
+            for (column, slot) in row.iter_mut().enumerate() {
+                *slot = self.digit(column, cycle).map_or(0, |digit| {
+                    digit.saturating_add(1).min(u16::MAX as usize) as u16
+                });
+            }
+        }
+    }
     fn row_digit(&self, column: usize, row: usize) -> Option<usize>;
 }
 

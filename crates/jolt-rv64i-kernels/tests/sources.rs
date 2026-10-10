@@ -765,3 +765,18 @@ fn missing_digit_rank_preserves_cycle_column_and_chunk_order_on_every_pool() {
         });
     }
 }
+
+#[test]
+fn bulk_digits_default_saturates_and_zeroes_malformed_output() {
+    let mut source = SourceFixture::new();
+    source.digits[1][0] = Some(usize::MAX);
+    let mut out = [99; 8];
+    source.digits(0..4, &mut out);
+    assert_eq!(out, [1, u16::MAX, 2, 0, 1, 4, 2, 2]);
+    let before = source.digit_reads.load(Ordering::Relaxed);
+    let mut short = [99; 7];
+    source.digits(0..4, &mut short);
+    assert_eq!(short, [0; 7]);
+    source.digits(0..4, &mut []);
+    assert_eq!(source.digit_reads.load(Ordering::Relaxed), before);
+}

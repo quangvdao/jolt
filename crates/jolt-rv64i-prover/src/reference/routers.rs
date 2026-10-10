@@ -7,13 +7,13 @@ use jolt_claims::{Source, SymbolicSumcheck};
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
-use jolt_poly::{BindingOrder, EqPolynomial, Polynomial};
+use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, OpeningId, RelationId, Router, RouterCycleDerived,
     RouterShortDerived, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, to_high_to_low, PointsError};
+use jolt_rv64i_verifier::points::{eq_index, equality_table, PointsError};
 use jolt_rv64i_verifier::public::routes::{projected_index, selector_slots, source_slots, ROUTERS};
 use jolt_rv64i_verifier::stages::stage3a::RouterShort;
 use jolt_rv64i_verifier::stages::stage3b::{
@@ -21,16 +21,6 @@ use jolt_rv64i_verifier::stages::stage3b::{
 };
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::collections::{BTreeMap, BTreeSet};
-
-fn equality_table(point: &[F128]) -> Result<Vec<F128>, PointsError> {
-    if point.len() >= usize::BITS as usize {
-        return Err(PointsError::Dimension {
-            expected: usize::BITS as usize - 1,
-            actual: point.len(),
-        });
-    }
-    Ok(EqPolynomial::new(to_high_to_low(point)).evaluations())
-}
 
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
     let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {

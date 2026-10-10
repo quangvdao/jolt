@@ -7,7 +7,7 @@
 //! calling the polynomial layer's infallible evaluators.
 
 use jolt_field::JoltField;
-use jolt_poly::{EqPlusOnePolynomial, EqPolynomial};
+use jolt_poly::EqPlusOnePolynomial;
 use jolt_rv64i_arith::Chunk;
 use thiserror::Error;
 
@@ -59,8 +59,41 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
     eq(point, &vertex)
 }
 
+/// Allocates one equality table in low-variable-first index order, expanding it
+/// serially with `2^n - 2` multiplications. Rejects dimensions that cannot be
+/// shifted on this host before allocating.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the doubling loop stays inside the checked final table length"
+)]
+pub fn equality_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
+    let maximum = usize::BITS as usize - 1;
+    if point.len() > maximum {
+        return Err(PointsError::Dimension {
+            expected: maximum,
+            actual: point.len(),
+        });
+    }
+    let mut weights = vec![F::zero(); 1_usize << point.len()];
+    if let Some((first, rest)) = point.split_first() {
+        weights[0] = F::one() + *first;
+        weights[1] = *first;
+        let mut width = 2;
+        for coordinate in rest {
+            for index in 0..width {
+                let upper = weights[index] * *coordinate;
+                weights[index + width] = upper;
+                weights[index] += upper;
+            }
+            width *= 2;
+        }
+    } else {
+        weights[0] = F::one();
+    }
+    Ok(weights)
+}
+
 /// Materializes at most 1,024 equality weights in low-variable-first index order.
-/// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
     if point.len() > 10 {
         return Err(PointsError::Dimension {
@@ -68,7 +101,13 @@ pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError>
             actual: point.len(),
         });
     }
-    Ok(EqPolynomial::new(point.iter().rev().copied().collect()).evaluations())
+    equality_table(point)
+}
+
+/// Holds the two address halves for a pass, with no intermediate prefix copies.
+pub(crate) fn split_eq_tables<F: JoltField>(point: &[F]) -> Result<(Vec<F>, Vec<F>), PointsError> {
+    let (low, high) = point.split_at(point.len() / 2);
+    Ok((equality_table(low)?, equality_table(high)?))
 }
 
 /// Evaluates the extension of unsigned `x < y`, with low-variable-first integer bits.
@@ -310,6 +349,26 @@ mod tests {
         let expected = Polynomial::new(table).evaluate(&to_high_to_low(&point));
         assert_eq!(lift(word, &point).unwrap(), expected);
         assert_eq!(WordLift::new(&point).unwrap().evaluate(word), expected);
+    }
+
+    #[test]
+    fn equality_table_uses_low_variable_first_indices() {
+        assert_eq!(
+            equality_table(&[F128::zero(), F128::one()]).unwrap(),
+            vec![F128::zero(), F128::zero(), F128::one(), F128::zero()]
+        );
+        assert_eq!(equality_table::<F128>(&[]).unwrap(), vec![F128::one()]);
+        assert!(matches!(
+            equality_table(&vec![F128::one(); usize::BITS as usize]),
+            Err(PointsError::Dimension { .. })
+        ));
+    }
+
+    #[test]
+    fn split_address_tables_fit_the_twenty_two_bit_budget() {
+        let (low, high) = split_eq_tables(&[F128::zero(); 22]).unwrap();
+        assert_eq!((low.len(), high.len()), (2048, 2048));
+        assert_eq!(low.len() + high.len(), 4096);
     }
 
     #[test]

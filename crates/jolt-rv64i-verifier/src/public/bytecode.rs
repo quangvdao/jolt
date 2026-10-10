@@ -1,7 +1,6 @@
 //! Public bytecode folds use split equality tables and one pass over valid rows.
 
 use jolt_field::JoltField;
-use jolt_poly::EqPolynomial;
 use jolt_rv64i_arith::{Bytecode, BytecodeColumn, BytecodeRow};
 
 use crate::claims::bytecode_read::{BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims};
@@ -232,16 +231,7 @@ impl<F: JoltField> BytecodeWeights<F> {
             });
         }
         let split = a_bc.len() / 2;
-        let low = a_bc.get(..split).ok_or(PointsError::Dimension {
-            expected: split,
-            actual: a_bc.len(),
-        })?;
-        let high = a_bc.get(split..).ok_or(PointsError::Dimension {
-            expected: split,
-            actual: a_bc.len(),
-        })?;
-        let low_table = EqPolynomial::new(points::to_high_to_low(low)).evaluations();
-        let high_table = EqPolynomial::new(points::to_high_to_low(high)).evaluations();
+        let (low_table, high_table) = points::split_eq_tables(a_bc)?;
         let mask = (1_usize << split) - 1;
         let mut sums = [F::zero(); 4];
         for (index, row) in bytecode

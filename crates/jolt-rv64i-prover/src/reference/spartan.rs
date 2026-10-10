@@ -6,13 +6,13 @@ use crate::reference::views::bits_column;
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
-use jolt_poly::{BindingOrder, EqPolynomial, Polynomial};
+use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_arith::{RowSystem, WitnessRow, WITNESS_COLUMNS};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, InnerDerived, OpeningId, OuterDerived, RelationId, RowBlock,
     VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{to_high_to_low, PointsError};
+use jolt_rv64i_verifier::points::{equality_table, to_high_to_low, PointsError};
 use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::{SpartanOuterF128, SpartanOuterF2};
 use jolt_rv64i_verifier::stages::stage2::SpartanInner;
@@ -118,7 +118,7 @@ macro_rules! prepare_outer {
             fn prepare(&self, _session: &mut ProofSession, witness: &Rv64iWitness, inputs: ProverInputs<'_, F128, $relation<F128>>) -> Result<Box<dyn SumcheckKernel<F128, Relation = $relation<F128>>>, KernelError<F128>> {
                 let tables = outer_tables(witness, inputs.relation.block(), inputs.relation.row_variables())?;
                 let openings = [VirtualPolynomial::Az, VirtualPolynomial::Bz, VirtualPolynomial::Cz].into_iter().zip(tables).map(|(p, table)| (OpeningId::virtual_polynomial(p, RelationId::$id), table)).collect();
-                let eq = EqPolynomial::new(to_high_to_low(inputs.relation.tau())).evaluations();
+                let eq = equality_table(inputs.relation.tau()).map_err(|error| geometry(&error.to_string()))?;
                 let derived = BTreeMap::from([(DerivedId::SpartanOuter(inputs.relation.block(), OuterDerived::EqTau), Polynomial::new(eq))]);
                 Ok(Box::new(NaiveSumcheckProver::new(&inputs, openings, derived, BindingOrder::LowToHigh)?))
             }

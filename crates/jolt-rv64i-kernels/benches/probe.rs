@@ -34,7 +34,8 @@
 //! the two bytecode branch words and Imm in Compare. Variant has five trace
 //! words and eight metadata buckets (seven chunks and the three flags together).
 //! Its layouts occupy 10.383, 11.477 and 19.133 MiB per worker. A seeded trace
-//! word selects the requested share on the hot eight selectors. The hot-eight
+//! word selects the requested share on the hot eight selectors at construction;
+//! timing reads one precomputed selector byte per cycle. The hot-eight
 //! layout varies its byte-update fraction; the all-nibble and all-byte layouts
 //! keep fractions zero and one while the share changes locality. The separate
 //! pass over four bytecode words per visited row is excluded from this unit.
@@ -591,25 +592,31 @@ struct Bucket {
     layout: BucketLayout,
     scratch: Vec<Mutex<Vec<F128>>>,
     offsets: [usize; 5],
+    selectors: Vec<u8>,
     operations: usize,
 }
 
 impl Bucket {
     fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
         let (entries, offsets) = layout.geometry();
+        let selectors: Vec<u8> = match layout {
+            BucketLayout::Column => Vec::new(),
+            BucketLayout::Fold { share, .. } => (0..CycleSource::cycles(source.as_ref()))
+                .into_par_iter()
+                .map(|cycle| Self::selector(&source, cycle, share) as u8)
+                .collect(),
+        };
         let operations = match layout {
             BucketLayout::Column => CycleSource::cycles(source.as_ref()) * 32,
-            BucketLayout::Fold {
-                byte_selectors,
-                share,
-            } => (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
+            BucketLayout::Fold { byte_selectors, .. } => (0..CycleSource::cycles(source.as_ref())
+                .div_ceil(CHUNK))
                 .into_par_iter()
                 .map(|chunk| {
                     let start = chunk * CHUNK;
                     let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
                     (start..end)
                         .map(|cycle| {
-                            let selector = Self::selector(&source, cycle, share);
+                            let selector = usize::from(selectors[cycle]);
                             let variant = if selector < byte_selectors { 40 } else { 80 };
                             variant
                                 + 8
@@ -632,6 +639,7 @@ impl Bucket {
                 .map(|_| Mutex::new(vec![F128::from_raw(0); entries]))
                 .collect(),
             offsets,
+            selectors,
             operations,
         }
     }
@@ -649,6 +657,7 @@ impl Bucket {
     fn run(&mut self) -> F128 {
         let source = black_box(&self.source);
         let _ = black_box(&self.scratch);
+        let selectors = black_box(&self.selectors);
         (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
             .into_par_iter()
             .for_each(|chunk| {
@@ -658,6 +667,7 @@ impl Bucket {
                     .unwrap_or_else(PoisonError::into_inner);
                 let start = chunk * CHUNK;
                 let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
+                #[expect(clippy::needless_range_loop, reason = "the shared cycle loop also serves the column layout, which has no selector vector")]
                 for cycle in start..end {
                     let weight = trace_value(source, cycle);
                     match self.layout {
@@ -668,11 +678,8 @@ impl Bucket {
                                 }
                             }
                         }
-                        BucketLayout::Fold {
-                            byte_selectors,
-                            share,
-                        } => {
-                            let selector = Self::selector(source, cycle, share);
+                        BucketLayout::Fold { byte_selectors, .. } => {
+                            let selector = usize::from(selectors[cycle]);
                             let by_byte = selector < byte_selectors;
                             let variant_base = if by_byte {
                                 selector * 5 * 8 * 256

@@ -337,6 +337,10 @@ pub fn row_weights<S: CycleSource>(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "invalid fixtures and contract failures fail the test"
+)]
 mod tests {
     use super::MemoryTrace;
     use crate::source::{CycleSource, PrepareRequest, ValidatedTrace};

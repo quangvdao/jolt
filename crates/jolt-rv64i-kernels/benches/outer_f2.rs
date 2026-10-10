@@ -1,8 +1,8 @@
 //! Benchmark target for outer f2.
 
-use std::io::{self, Write};
+use std::io::{self, Result, Write};
 
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
     writeln!(
         io::stdout().lock(),
         "outer_f2: benchmark is not yet implemented"

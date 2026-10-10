@@ -1,8 +1,8 @@
 //! Benchmark target for column pass.
 
-use std::io::{self, Write};
+use std::io::{self, Result, Write};
 
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
     writeln!(
         io::stdout().lock(),
         "column_pass: benchmark is not yet implemented"

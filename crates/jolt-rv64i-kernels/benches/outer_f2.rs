@@ -82,14 +82,18 @@ impl Reports {
             });
     }
 
-    fn print(&self, variant: &str, _options: OuterF2Options) {
+    fn print(&self, variant: &str, options: OuterF2Options) {
         for (&(log_t, threads), samples) in &self.samples {
             let divisor = (1_usize << log_t) as f64;
             let prefix = format!("{variant}/local/{log_t}/{threads}");
             let models = [
                 6.9,
                 15.1,
-                36.6,
+                if options.monomial_rounds == 2 {
+                    74.0
+                } else {
+                    36.6
+                },
                 40.8,
                 32.0,
                 27.6,
@@ -109,7 +113,7 @@ impl Reports {
                     .map(|sample| sample.times[6] + sample.times[7])
                     .collect(),
                 divisor,
-                Some(43.9),
+                Some(37.21),
             );
             report(
                 &format!("{prefix}/cycles"),
@@ -118,7 +122,7 @@ impl Reports {
                     .map(|sample| sample.times[8..8 + log_t].iter().sum::<u128>() + sample.finish)
                     .collect(),
                 divisor,
-                Some(11.4),
+                Some(18.09),
             );
             for (phase, name) in ["construct", "rounds", "finish", "extract"]
                 .into_iter()

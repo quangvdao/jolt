@@ -3761,7 +3761,6 @@ dependencies = [
 name = "jolt-rv64i-arith"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "jolt-field",
  "jolt-program",
  "jolt-r1cs",

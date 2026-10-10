@@ -535,3 +535,115 @@ fn random_public_inputs_are_total() {
         }
     }
 }
+
+#[test]
+fn canonical_witness_always_sets_one() {
+    let layout = Layout::new(4, 4, 0).unwrap();
+    let mut rng = ChaCha8Rng::seed_from_u64(0x4f_4e45);
+    for variant in Variant::ALL.into_iter().map(Some).chain([None]) {
+        for _ in 0..64 {
+            let row = BytecodeRow {
+                variant,
+                pc: rng.next_u64(),
+                imm: rng.next_u64(),
+                fall_through_pc: rng.next_u64(),
+                pc_plus_imm: rng.next_u64(),
+                rs1: 0,
+                rs2: 0,
+                rd: 0,
+            };
+            let base = BaseWords {
+                rs1_value: rng.next_u64(),
+                rs2_value: rng.next_u64(),
+                rd_write_value: rng.next_u64(),
+                ram_read_value: rng.next_u64(),
+                next_pc: rng.next_u64(),
+            };
+            let bits = std::array::from_fn(|_| rng.next_u64());
+            assert_eq!(
+                WitnessRow::compute(&layout, &row, &base, &bits).bit(0),
+                Some(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn random_checked_descriptors_are_total_and_match_wire_definitions() {
+    use crate::{PackedForm, PackedTerm, Term};
+    let layout = Layout::new(4, 4, 0).unwrap();
+    let mut rng = ChaCha8Rng::seed_from_u64(0x6465_7363);
+    for i in 0..4096 {
+        let row = BytecodeRow::default();
+        let fact = facts(0, rng.next_u64(), rng.next_u64(), rng.next_u64());
+        let bits = std::array::from_fn(|_| rng.next_u64());
+        let sources = Sources::new(&layout, &row, &BaseWords::from_facts(&fact), &bits);
+        let from = rng.next_u32() as u8;
+        let to = rng.next_u32() as u8;
+        let len = rng.next_u32() as u8;
+        let fill = rng.next_u32() & 1 != 0;
+        for source in Source::ALL {
+            let term = if i % 2 == 0 {
+                Term::new(source, from % 64, to % 64, 1, fill)
+            } else {
+                Term::new(source, from, to, len, fill)
+            };
+            if let Ok(term) = term {
+                let expected = term.wires().fold(0, |value, wire| {
+                    value ^ (((sources.get(wire.source) >> wire.bit) & 1) << wire.out)
+                });
+                assert_eq!(term.eval(&sources), expected);
+                assert_eq!(
+                    Term::new(
+                        term.source(),
+                        term.from(),
+                        term.to(),
+                        term.length(),
+                        term.fill()
+                    ),
+                    Ok(term)
+                );
+            }
+        }
+        let start = rng.next_u32() as u16;
+        let stride = rng.next_u32() as u8;
+        let shift = rng.next_u32() as u8;
+        let term = if i % 2 == 0 {
+            PackedTerm::new(start % 1024, 1, stride, shift % 128, fill)
+        } else {
+            PackedTerm::new(start, len, stride, shift, fill)
+        };
+        if let Ok(term) = term {
+            let form = PackedForm {
+                one: fill,
+                terms: vec![term],
+            };
+            let witness = WitnessRow(std::array::from_fn(|_| rng.next_u64()));
+            let expected =
+                (0..term.length()).fold(u128::from(fill && witness.bit(0).unwrap()), |value, t| {
+                    let input = u128::from(
+                        witness
+                            .bit(usize::from(term.start()) + usize::from(t))
+                            .unwrap(),
+                    );
+                    value
+                        ^ (input
+                            * ((1_u128
+                                << (u32::from(term.shift())
+                                    + u32::from(term.stride()) * u32::from(t)))
+                                ^ u128::from(term.complement())))
+                });
+            assert_eq!(form.values(&witness).to_raw(), expected);
+            assert_eq!(
+                PackedTerm::new(
+                    term.start(),
+                    term.length(),
+                    term.stride(),
+                    term.shift(),
+                    term.complement()
+                ),
+                Ok(term)
+            );
+        }
+    }
+}

@@ -241,6 +241,19 @@ impl Layout {
         }
         out
     }
+    #[cfg(test)]
+    fn new_without_ram_range_check(
+        log_K_bytecode: usize,
+        log_K_ram: usize,
+        lowest_address: u64,
+    ) -> Result<Self, LayoutError> {
+        let mut layout = Self::new(log_K_bytecode, log_K_ram, 0)?;
+        if !lowest_address.is_multiple_of(8) {
+            return Err(LayoutError::LowestAddressNotAligned { lowest_address });
+        }
+        layout.lowest_address = lowest_address;
+        Ok(layout)
+    }
     /// Bytecode address exponent.
     #[inline]
     pub fn log_K_bytecode(&self) -> usize {
@@ -593,5 +606,35 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn unchecked_ram_range_admits_a_wrapped_address() {
+        use crate::{BaseWords, BytecodeRow, RowSystem, Variant, WitnessRow};
+        let lowest = u64::MAX - (1 << 22) + 1;
+        assert!(matches!(
+            Layout::new(1, 20, lowest),
+            Err(LayoutError::RamRangeOverflow { .. })
+        ));
+        let layout = Layout::new_without_ram_range_check(1, 20, lowest).unwrap();
+        let row = BytecodeRow {
+            variant: Some(Variant::LOAD8_X0),
+            pc: 0,
+            imm: 8_u64.wrapping_sub(lowest),
+            fall_through_pc: 4,
+            pc_plus_imm: 8_u64.wrapping_sub(lowest),
+            rs1: 0,
+            rs2: 0,
+            rd: 0,
+        };
+        let mut bits = [0; 4];
+        layout.write_ram_index(&mut bits, (1 << 19) + 1).unwrap();
+        let base = BaseWords {
+            next_pc: 4,
+            ..BaseWords::default()
+        };
+        let witness = WitnessRow::compute(&layout, &row, &base, &bits);
+        assert!(RowSystem::new(&layout).failing_rows(&witness).is_empty());
+        assert_eq!(8_u64.wrapping_sub(lowest), (1 << 22) + 8);
+        assert!(u128::from(lowest) + (8_u128 << 20) > 1_u128 << 64);
     }
 }

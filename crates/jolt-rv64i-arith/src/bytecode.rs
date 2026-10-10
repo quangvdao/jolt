@@ -263,6 +263,8 @@ pub enum BytecodeError {
     InstructionListTooLong { instructions: usize, rows: usize },
     #[error("bytecode exponent {log_K} cannot be represented by this platform")]
     TableSizeOutOfRange { log_K: usize },
+    #[error("allocation of bytecode table with {rows} rows failed")]
+    TableAllocationFailed { rows: usize },
     #[error("bytecode row {index}: {source}")]
     Row {
         index: usize,
@@ -308,7 +310,9 @@ impl Bytecode {
         if capacity > isize::MAX as usize / std::mem::size_of::<BytecodeRow>() {
             return Err(BytecodeError::TableSizeOutOfRange { log_K });
         }
-        let mut rows = Vec::with_capacity(capacity);
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(capacity)
+            .map_err(|_| BytecodeError::TableAllocationFailed { rows: capacity })?;
         let mut pc_indices = HashMap::with_capacity(instructions.len());
         for (index, instruction) in instructions.iter().enumerate() {
             let row = BytecodeRow::from_source(instruction, layout.lowest_address())
@@ -798,6 +802,42 @@ mod tests {
                 .imm,
                 u64::MAX
             );
+        }
+    }
+    #[test]
+    fn every_immediate_encoding_rejects_both_just_past_bounds() {
+        for (kind, bounds) in [
+            (Kind::ADDI, [-2049, 2048]),
+            (Kind::LB, [-2049, 2048]),
+            (Kind::SB, [-2049, 2048]),
+            (Kind::BEQ, [-4098, 4096]),
+            (Kind::JAL, [-1_048_578, 1_048_576]),
+            (Kind::LUI, [-2_147_487_744, 2_147_483_648]),
+            (Kind::SLLI, [-1, 64]),
+            (Kind::SLLIW, [-1, 32]),
+            (Kind::SRAI, [0x3ff, 0x440]),
+            (Kind::SRAIW, [0x3ff, 0x420]),
+        ] {
+            for immediate in bounds {
+                let source = SourceInstruction::new(
+                    kind,
+                    SourceInstructionRow {
+                        address: 0,
+                        operands: NormalizedOperands {
+                            rs1: Some(1),
+                            rs2: Some(2),
+                            rd: Some(3),
+                            imm: immediate,
+                        },
+                        inline: None,
+                        is_compressed: false,
+                    },
+                );
+                assert_eq!(
+                    BytecodeRow::from_source(&source, 0),
+                    Err(BytecodeRowError::ImmediateOutOfRange { kind, immediate })
+                );
+            }
         }
     }
 }

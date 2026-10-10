@@ -15,8 +15,11 @@ jolt-riscv = { workspace = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
 jolt-program = { workspace = true, features = ["image"] }
 rand = { workspace = true, features = ["std"] }
 rand_chacha.workspace = true
 rayon.workspace = true
+
+[[bench]]
+name = "witness"
+harness = false

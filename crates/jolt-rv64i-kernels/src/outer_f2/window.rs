@@ -1,4 +1,4 @@
-use super::{merge, Sums, ZERO};
+use super::{merge, Sums, ONE, ZERO};
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::LaneSource;
@@ -34,7 +34,7 @@ impl Window {
         let b: Vec<_> = bits.chunks_exact(8).map(byte_table).collect();
         let mut a = Vec::with_capacity(if folded { 2 } else { 1 });
         let mut c = Vec::with_capacity(a.capacity());
-        for &scale in if folded { &omega[..2] } else { &[super::ONE] } {
+        for &scale in if folded { &omega[..2] } else { &[ONE] } {
             a.push(std::array::from_fn(|byte| {
                 let weight = rho[byte / (2 * bytes)] * scale;
                 byte_table(&std::array::from_fn::<_, 8, _>(|bit| {

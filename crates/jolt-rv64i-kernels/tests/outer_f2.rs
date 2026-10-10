@@ -303,6 +303,17 @@ fn outer_messages_and_boolean_points_match_summation_for_every_option_and_verify
                         })
                         .unwrap();
                 }
+                let mut zero_factor_point = point.clone();
+                zero_factor_point[0] = ONE + tau[0];
+                let zero_factor_messages: Vec<_> = (0..rounds)
+                    .map(|round| definition.round(&zero_factor_point[..round]))
+                    .collect();
+                let zero_factor_values = definition.values(&zero_factor_point);
+                for options in options() {
+                    let mut core = OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
+                    assert_rounds(&mut core, &zero_factor_point, &zero_factor_messages);
+                    assert_eq!(core.final_values(), zero_factor_values);
+                }
             }
         }
     });

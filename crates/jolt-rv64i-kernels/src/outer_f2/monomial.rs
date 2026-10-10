@@ -35,16 +35,53 @@ impl Lift {
         Self { start, len, bits }
     }
 
+    fn view<'a>(&self, tables: &'a [F128]) -> LiftView<'a> {
+        let tables = &tables[self.start..self.start + self.len];
+        match self.bits {
+            8 => LiftView::Byte(tables.as_chunks::<256>().0),
+            4 => LiftView::Nibble(tables.as_chunks::<16>().0),
+            2 => LiftView::Two(&tables.as_chunks::<4>().0[0]),
+            _ => LiftView::One(&tables.as_chunks::<2>().0[0]),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LiftView<'a> {
+    Byte(&'a [[F128; 256]]),
+    Nibble(&'a [[F128; 16]]),
+    Two(&'a [F128; 4]),
+    One(&'a [F128; 2]),
+}
+
+impl LiftView<'_> {
     #[inline]
-    fn lift(&self, mut word: u64, tables: &[F128]) -> F128 {
-        let size = 1 << self.bits;
+    fn lift(self, mut word: u64) -> F128 {
         let mut value = ZERO;
-        for table in tables[self.start..self.start + self.len].chunks_exact(size) {
-            value += table[word as usize & (size - 1)];
-            word >>= self.bits;
+        match self {
+            Self::Byte(tables) => {
+                for table in tables {
+                    value += table[(word & 255) as usize];
+                    word >>= 8;
+                }
+            }
+            Self::Nibble(tables) => {
+                for table in tables {
+                    value += table[(word & 15) as usize];
+                    word >>= 4;
+                }
+            }
+            Self::Two(table) => value = table[(word & 3) as usize],
+            Self::One(table) => value = table[(word & 1) as usize],
         }
         value
     }
+}
+
+struct TermView<'a> {
+    pairs: &'a [(usize, usize, usize)],
+    x: [LiftView<'a>; 2],
+    y: Option<[LiftView<'a>; 2]>,
 }
 
 struct Term {
@@ -132,16 +169,47 @@ impl Monomial {
     }
 
     #[inline]
-    fn values<const K: usize, const AT_ONE: bool>(&self, lanes: [[u64; 3]; 2]) -> Sums {
+    fn values<const K: usize, const AT_ONE: bool>(
+        terms: &[TermView<'_>],
+        lanes: [[u64; 3]; 2],
+    ) -> Sums {
         let mut sums = [ZERO; 2];
         for (group, [a, b, _]) in lanes.into_iter().enumerate() {
             // K is dispatched in 0..=5; the checked helpers' error branches fold away.
             let a = moebius(a, K + 1).unwrap_or(0);
             let b = moebius(b, K + 1).unwrap_or(0);
-            for term in &self.terms {
+            if K <= 2 {
+                let count = 1 << K;
+                let x_a: [u64; 4] = std::array::from_fn(|i| a >> (count + i));
+                let x_b: [u64; 4] = std::array::from_fn(|i| b >> (count + i));
+                let y_a: [u64; 4] = std::array::from_fn(|i| {
+                    if AT_ONE {
+                        (a >> i) ^ (a >> (count + i))
+                    } else {
+                        a >> i
+                    }
+                });
+                let y_b: [u64; 4] = std::array::from_fn(|i| {
+                    if AT_ONE {
+                        (b >> i) ^ (b >> (count + i))
+                    } else {
+                        b >> i
+                    }
+                });
+                let x = products::<K>(x_a, x_b);
+                let y = repeated_products::<K>(y_a, y_b);
+                for (term, (&x, &y)) in terms.iter().zip(x.iter().zip(&y)) {
+                    sums[1] += term.x[group].lift(gather(x, K + 1).unwrap_or(0));
+                    if let Some(lifts) = term.y {
+                        sums[0] += lifts[group].lift(gather(y, K + 1).unwrap_or(0));
+                    }
+                }
+                continue;
+            }
+            for term in terms {
                 let mut x = 0;
                 let mut y = 0;
-                for &(_, left, right) in &self.pairs[term.start..term.end] {
+                for &(_, left, right) in term.pairs {
                     x ^= (a >> (left + (1 << K))) & (b >> (right + (1 << K)));
                     if term.y.is_some() {
                         let a0 = a >> left;
@@ -153,9 +221,9 @@ impl Monomial {
                         };
                     }
                 }
-                sums[1] += term.x[group].lift(gather(x, K + 1).unwrap_or(0), &self.tables);
+                sums[1] += term.x[group].lift(gather(x, K + 1).unwrap_or(0));
                 if let Some(lifts) = &term.y {
-                    sums[0] += lifts[group].lift(gather(y, K + 1).unwrap_or(0), &self.tables);
+                    sums[0] += lifts[group].lift(gather(y, K + 1).unwrap_or(0));
                 }
             }
         }
@@ -170,6 +238,17 @@ impl Monomial {
         hi: &[F128],
         histogram: Option<&ScratchPool>,
     ) -> Result<Sums, OuterError> {
+        let terms: Vec<_> = self
+            .terms
+            .iter()
+            .map(|term| TermView {
+                pairs: &self.pairs[term.start..term.end],
+                x: term.x.map(|lift| lift.view(&self.tables)),
+                y: term
+                    .y
+                    .map(|lifts| lifts.map(|lift| lift.view(&self.tables))),
+            })
+            .collect();
         let sums = (0..chunks.len() / chunks.chunk_len())
             .into_par_iter()
             .map(|chunk| {
@@ -183,7 +262,7 @@ impl Monomial {
                     let mut h = [ZERO; 64];
                     for (offset, &low) in lo.iter().enumerate() {
                         let cycle = start + block * chunks.block_len() + offset;
-                        let values = self.values::<K, AT_ONE>(source.lanes(cycle));
+                        let values = Self::values::<K, AT_ONE>(&terms, source.lanes(cycle));
                         if K != 0 {
                             inner[0].fmadd(low, values[0]);
                         }
@@ -210,4 +289,39 @@ impl Monomial {
             )?;
         Ok(sums.map(Accumulator::reduce))
     }
+}
+
+// Base-three exponent order for two variables: 00,10,20,01,11,21,02,12,22.
+#[inline]
+fn products<const K: usize>(a: [u64; 4], b: [u64; 4]) -> [u64; 9] {
+    let mut values = [0; 9];
+    values[0] = a[0] & b[0];
+    if K >= 1 {
+        values[1] = (a[1] & b[0]) ^ (a[0] & b[1]);
+        values[2] = a[1] & b[1];
+    }
+    if K >= 2 {
+        values[3] = (a[2] & b[0]) ^ (a[0] & b[2]);
+        values[4] = (a[3] & b[0]) ^ (a[2] & b[1]) ^ (a[1] & b[2]) ^ (a[0] & b[3]);
+        values[5] = (a[3] & b[1]) ^ (a[1] & b[3]);
+        values[6] = a[2] & b[2];
+        values[7] = (a[3] & b[2]) ^ (a[2] & b[3]);
+        values[8] = a[3] & b[3];
+    }
+    values
+}
+
+#[inline]
+fn repeated_products<const K: usize>(a: [u64; 4], b: [u64; 4]) -> [u64; 9] {
+    let mut values = [0; 9];
+    if K >= 1 {
+        values[2] = a[1] & b[1];
+    }
+    if K >= 2 {
+        values[5] = (a[3] & b[1]) ^ (a[1] & b[3]);
+        values[6] = a[2] & b[2];
+        values[7] = (a[3] & b[2]) ^ (a[2] & b[3]);
+        values[8] = a[3] & b[3];
+    }
+    values
 }

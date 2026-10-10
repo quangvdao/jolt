@@ -53,7 +53,7 @@ pub enum RouterError {
     EmptyShapes,
     #[error("shape has {actual} slots, expected the common slot count {expected}")]
     SlotCount { expected: usize, actual: usize },
-    #[error("router final values require every last bind to finish")]
+    #[error("router final values were read before the last bind")]
     Unfinished,
     /// No public rejecting input reaches this variant: only an internal panic
     /// while holding the shared cycle state can poison its lock.

@@ -1,4 +1,4 @@
-use super::super::shape::{SelectorFactor, SlotVariable};
+use super::super::shape::{SelectorFactor, SlotVariable, BIT_VARIABLES};
 use super::{BitEntry, NibbleBuckets, RouterShape, ShapeLayout, WordSlot};
 use crate::source::CycleSource;
 
@@ -45,12 +45,6 @@ impl ReadoutShape {
         layout: &ShapeLayout,
         source: &S,
     ) -> Self {
-        let mut factor_shifts = [0; 3];
-        let mut shift = 0;
-        for (index, factor) in shape.factors().iter().enumerate() {
-            factor_shifts[index] = shift;
-            shift += factor.slots.len();
-        }
         let bank_storage = shape
             .bank()
             .iter()
@@ -108,21 +102,7 @@ impl ReadoutShape {
             .collect();
         let destinations = (0..layout.selectors)
             .flat_map(|h| {
-                (0..shape.bank().len()).map(move |word| {
-                    shape.slot_map().iter().enumerate().skip(6).fold(
-                        0,
-                        |destination, (position, (_, variable))| {
-                            let value = match *variable {
-                                SlotVariable::Bit(_) => 0,
-                                SlotVariable::Word(bit) => word >> bit,
-                                SlotVariable::Selector { factor, bit } => {
-                                    h >> (factor_shifts[factor] + bit)
-                                }
-                            };
-                            destination | ((value & 1) << position)
-                        },
-                    )
-                })
+                (0..shape.bank().len()).map(move |word| shape.fold_index(word << BIT_VARIABLES, h))
             })
             .collect();
         let mut columns = Vec::new();

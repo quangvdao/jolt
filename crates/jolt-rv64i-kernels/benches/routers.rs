@@ -2,7 +2,6 @@
 
 pub mod support;
 
-use std::cmp::Reverse;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -101,9 +100,7 @@ impl RouterBench {
             let shapes = synthetic_router_shapes()?;
             let mut byte_values = vec![vec![]; shapes.len()];
             let counts = selector_counts(&trace, &shapes[0])?;
-            let mut values: Vec<_> = (0..counts.len()).collect();
-            values.sort_unstable_by_key(|&h| (Reverse(counts[h]), h));
-            byte_values[0] = values.into_iter().take(bytes).collect();
+            byte_values[0] = FoldLayout::byte_bucket_values(&counts, bytes);
             let layout = FoldLayout::new(&trace, &shapes, &byte_values)?;
             let plan = ScatterPlan::new(Arc::clone(&trace))?;
             let log_t = trace.source().cycles().ilog2() as usize;
@@ -464,7 +461,7 @@ fn main() -> Result<(), RunnerError> {
     let records = Mutex::new(Vec::new());
     for (name, bytes) in [
         ("routers/none", 0),
-        ("routers/default", 8),
+        ("routers/default", FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT),
         ("routers/all", 64),
     ] {
         let cache = Mutex::new(None);

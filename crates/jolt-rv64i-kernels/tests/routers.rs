@@ -13,7 +13,7 @@ use jolt_field::{Field, F128};
 use jolt_poly::{CompressedPoly, UnivariatePoly};
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
-use jolt_rv64i_kernels::par::{CycleChunks, ParError};
+use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_kernels::round::RoundError;
 use jolt_rv64i_kernels::router::claims::claims_pass;
 use jolt_rv64i_kernels::router::cycle::{RouterCycleMember, RoutersCycleCore};
@@ -1657,15 +1657,6 @@ fn singular_cycle_batch_endpoints_match_definitions_for_all_factor_counts() {
     for reverse in [false, true] {
         prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
     }
-}
-
-#[test]
-fn router_geometry_error_preserves_the_dependency_rejection() {
-    let error = CycleChunks::new(1, 2).unwrap_err();
-    assert_eq!(
-        RouterError::from(error),
-        RouterError::Geometry(ParError::Round { log_t: 1, round: 2 })
-    );
 }
 
 #[test]

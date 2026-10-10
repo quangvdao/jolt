@@ -65,7 +65,7 @@ pub fn round_polynomial(
     let first = leaves.first().ok_or(OracleError::EmptyLeaves)?;
     let variables = table_variables(first, 0)?;
     for (leaf, table) in leaves.iter().enumerate().skip(1) {
-        table_variables(table, leaf)?;
+        let _ = table_variables(table, leaf)?;
         if table.len() != first.len() {
             return Err(OracleError::LeafLength {
                 leaf,

@@ -3772,6 +3772,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-rv64i-kernels"
+version = "0.1.0"
+dependencies = [
+ "jolt-field",
+ "jolt-kernels",
+ "jolt-poly",
+ "jolt-sumcheck",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "jolt-sdk"
 version = "0.1.0"
 dependencies = [

@@ -1,10 +1,13 @@
 //! Dense degree-two example: the sum of the products of two multilinear tables.
 
-use jolt_field::{Accumulator, F128Accumulator, F128};
+use jolt_field::{Accumulator, WithAccumulator, F128};
+
 use jolt_poly::UnivariatePoly;
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rayon::prelude::*;
 use thiserror::Error;
+
+type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
 
 #[derive(Debug, Error)]
 pub enum ExampleError {

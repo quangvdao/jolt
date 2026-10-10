@@ -196,7 +196,7 @@ impl SyntheticTrace {
                         for (c, digit) in cycle.digits[..5].iter_mut().enumerate() {
                             *digit = PRESENT | ((k >> (4 * c)) & 15) as u8;
                         }
-                        let ram = if rng.next_u32() % 10 == 0 {
+                        let ram = if rng.next_u32().is_multiple_of(10) {
                             rng.next_u32() & 4095
                         } else {
                             rng.next_u32() & 63

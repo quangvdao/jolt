@@ -12,6 +12,7 @@
 mod support;
 
 use jolt_field::F128;
+use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs};
 use jolt_prover::ProverError;
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
@@ -181,5 +182,100 @@ fn optimized_rejects_the_same_public_statement_failures() {
             failure(Rv64iBackend::reference()),
             "{case:?}"
         );
+    }
+}
+
+fn assert_geometry(error: KernelError<F128>, cause: &str) {
+    let KernelError::InvalidGeometry { reason } = error else {
+        panic!("expected InvalidGeometry for {cause}, found {error:?}");
+    };
+    assert!(reason.contains(cause), "expected {cause}, found {reason}");
+}
+
+#[test]
+fn prepare_rejects_taken_members_and_missing_selectors() {
+    let (statement, preprocessing, witness) = support::separating_fixture();
+    let reference = support::reference_batches(&statement, &preprocessing, &witness);
+    let router = &reference.stage3b.inputs;
+    let tail = &reference.stage6b.inputs;
+    let router_challenges = router
+        .batch
+        .draw_challenges(&mut reference.stage3b.transcript.fork())
+        .unwrap();
+    let tail_challenges = tail
+        .batch
+        .draw_challenges(&mut reference.stage6b.transcript.fork())
+        .unwrap();
+    let router_inputs = || ProverInputs {
+        relation: &router.batch.variant,
+        claims: &router.claims.variant,
+        points: &router.points.variant,
+        challenges: &router_challenges.variant,
+    };
+    let chunk_inputs = || ProverInputs {
+        relation: &tail.batch.bytecode_read_cycle,
+        claims: &tail.claims.bytecode_read_cycle,
+        points: &tail.points.bytecode_read_cycle,
+        challenges: &tail_challenges.bytecode_read_cycle,
+    };
+
+    let mut router_session = ProofSession::default();
+    let _router = RouterCycleVariantPrepare
+        .prepare(&mut router_session, &witness, router_inputs())
+        .unwrap();
+    assert_geometry(
+        RouterCycleVariantPrepare
+            .prepare(&mut router_session, &witness, router_inputs())
+            .err()
+            .unwrap(),
+        "router member was already taken",
+    );
+
+    let mut chunk_session = ProofSession::default();
+    let _chunk = BytecodeReadCyclePrepare
+        .prepare(&mut chunk_session, &witness, chunk_inputs())
+        .unwrap();
+    assert_geometry(
+        BytecodeReadCyclePrepare
+            .prepare(&mut chunk_session, &witness, chunk_inputs())
+            .err()
+            .unwrap(),
+        "bytecode chunk group was already taken",
+    );
+
+    let mut tail_session = ProofSession::default();
+    let _tail = BytecodeReadCyclePrepare
+        .prepare(&mut tail_session, &witness, chunk_inputs())
+        .unwrap();
+    assert_geometry(
+        RouterCycleVariantPrepare
+            .prepare(&mut tail_session, &witness, router_inputs())
+            .err()
+            .unwrap(),
+        "selector group was not requested",
+    );
+}
+
+#[test]
+fn both_registries_reject_mismatched_decoded_length() {
+    let (statement, verifier, mut witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier,
+        scheme: (),
+    };
+    let expected_length = witness.bits.len();
+    witness.decoded = witness.decoded[..expected_length - 1].to_vec().into();
+    for (name, backend) in [
+        ("reference", Rv64iBackend::reference()),
+        ("optimized", Rv64iBackend::optimized()),
+    ] {
+        let error = prove::<TransparentBits>(&preprocessing, &statement, &witness, &backend)
+            .err()
+            .unwrap();
+        let Rv64iProverError::DecodedLength { expected, found } = error else {
+            panic!("registry {name}: expected DecodedLength, found {error:?}");
+        };
+        assert_eq!(expected, expected_length, "registry {name}");
+        assert_eq!(found, expected_length - 1, "registry {name}");
     }
 }

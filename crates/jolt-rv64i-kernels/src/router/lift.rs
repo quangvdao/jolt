@@ -356,7 +356,7 @@ impl Plan {
                             let shape = &self.shapes[shape_index];
                             for (output, sum) in outputs[row][offset..offset + count]
                                 .iter_mut()
-                                .zip(sums[shape_index - base])
+                                .zip(sums[shape_index - base].iter().copied())
                             {
                                 *output = shape.constant
                                     + if shape.bytecode_terms == 0 {
@@ -444,7 +444,9 @@ impl Plan {
                         for (local, shape) in self.shapes[base..base + group].iter().enumerate() {
                             let output = &mut outputs[base + local][offset..offset + count];
                             if shape.trace_terms != 0 && !shape.direct_trace {
-                                for (output, sum) in output.iter_mut().zip(sums[local]) {
+                                for (output, sum) in
+                                    output.iter_mut().zip(sums[local].iter().copied())
+                                {
                                     *output += sum.reduce();
                                 }
                             }

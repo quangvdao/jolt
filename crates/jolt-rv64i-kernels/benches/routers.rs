@@ -335,6 +335,7 @@ fn report(records: &[Record]) {
             8.73 + rho * 17.2,
         ];
         let mut measured = [0.0; 7];
+        let scaling = if record.threads == 12 { 9.6 } else { 1.0 };
         for phase in 0..7 {
             measured[phase] = median(
                 samples
@@ -342,7 +343,7 @@ fn report(records: &[Record]) {
                     .map(|sample| sample.times[phase] as f64 / cycles)
                     .collect(),
             );
-            println!("routers_phase/{}/{}/{} phase={} median_ns={:.6} min_ns={:.6} model_ns={:.6} over_model_25pct={} samples={} loaded_machine=true", record.layout, record.log_t, record.threads, ["fold_pass", "short", "source_cycles", "source_rows", "cycle_products", "cycle_selectors", "claims_pass"][phase], measured[phase], samples.iter().map(|sample| sample.times[phase] as f64 / cycles).fold(f64::INFINITY, f64::min), model[phase], measured[phase] > 1.25 * model[phase], samples.len());
+            println!("routers_phase/{}/{}/{} phase={} median_ns={:.6} min_ns={:.6} model_ns={:.6} model_threads=1 target_model_ns={:.6} over_model_25pct={} over_target_25pct={} samples={} loaded_machine=true", record.layout, record.log_t, record.threads, ["fold_pass", "short", "source_cycles", "source_rows", "cycle_products", "cycle_selectors", "claims_pass"][phase], measured[phase], samples.iter().map(|sample| sample.times[phase] as f64 / cycles).fold(f64::INFINITY, f64::min), model[phase], model[phase] / scaling, measured[phase] > 1.25 * model[phase], measured[phase] > 1.25 * model[phase] / scaling, samples.len());
         }
         let total = median(
             samples
@@ -350,8 +351,7 @@ fn report(records: &[Record]) {
                 .map(|sample| sample.runner_times.iter().sum::<u128>() as f64 / cycles)
                 .collect(),
         );
-        let threshold = if record.log_t == 22 { 299.0 } else { 376.0 }
-            / if record.threads == 12 { 9.6 } else { 1.0 };
+        let threshold = if record.log_t == 22 { 299.0 } else { 376.0 } / scaling;
         println!(
             "routers_setup/{}/{}/{} first_use_ns={:.6} short_finish_ns={:.6} loaded_machine=true",
             record.layout,
@@ -376,7 +376,7 @@ fn report(records: &[Record]) {
                     .collect(),
             )
         });
-        println!("routers_model/{}/{}/{} construct_ns={constructor:.6} rounds_ns={rounds:.6} finish_ns={finish:.6} extract_ns={extract:.6} total_ns={total:.6} model_construct_ns={:.6} model_rounds_ns={:.6} model_finish_ns={:.6} model_extract_ns={:.6} model_total_ns={:.6} threshold_ns={threshold:.6} meets_threshold={} cycle_setup_ns={:.6} loaded_machine=true", record.layout, record.log_t, record.threads, model[0], model[1], model[2..6].iter().sum::<f64>(), model[6], model.iter().sum::<f64>(), total <= threshold, median(samples.iter().map(|sample| sample.cycle_setup_ns as f64 / cycles).collect()));
+        println!("routers_model/{}/{}/{} construct_ns={constructor:.6} rounds_ns={rounds:.6} finish_ns={finish:.6} extract_ns={extract:.6} total_ns={total:.6} model_construct_ns={:.6} model_rounds_ns={:.6} model_finish_ns={:.6} model_extract_ns={:.6} model_total_ns={:.6} model_threads=1 target_model_total_ns={:.6} threshold_ns={threshold:.6} meets_threshold={} cycle_setup_ns={:.6} loaded_machine=true", record.layout, record.log_t, record.threads, model[0], model[1], model[2..6].iter().sum::<f64>(), model[6], model.iter().sum::<f64>(), model.iter().sum::<f64>() / scaling, total <= threshold, median(samples.iter().map(|sample| sample.cycle_setup_ns as f64 / cycles).collect()));
     }
 }
 
@@ -447,7 +447,13 @@ fn compare_layouts(records: &[Record]) -> Result<(), RunnerError> {
                 message: error.to_string(),
             })?;
         for (variant, samples) in measurements.iter().enumerate() {
-            println!("routers_layout_comparison/{log_t}/1 layout={} samples=5 alternating=true same_source=true min_ns={:.6} median_ns={:.6} max_ns={:.6} loaded_machine=true retained_default=8", [0, 8, 64][variant], samples.iter().copied().fold(f64::INFINITY, f64::min), median(samples.clone()), samples.iter().copied().fold(0.0, f64::max));
+            let spread = |samples: &[f64]| {
+                samples.iter().copied().fold(0.0, f64::max)
+                    - samples.iter().copied().fold(f64::INFINITY, f64::min)
+            };
+            let gain = median(measurements[1].clone()) - median(samples.clone());
+            let combined_spread = spread(&measurements[1]) + spread(samples);
+            println!("routers_layout_comparison/{log_t}/1 layout={} samples=5 alternating=true same_source=true min_ns={:.6} median_ns={:.6} max_ns={:.6} gain_over_default_ns={gain:.6} combined_spread_ns={combined_spread:.6} gain_exceeds_spread={} loaded_machine=true retained_default=8", [0, 8, 64][variant], samples.iter().copied().fold(f64::INFINITY, f64::min), median(samples.clone()), samples.iter().copied().fold(0.0, f64::max), gain > combined_spread);
         }
     }
     Ok(())

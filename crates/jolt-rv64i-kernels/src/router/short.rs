@@ -98,7 +98,8 @@ pub struct RouterShortCore {
 impl RouterShortCore {
     /// Builds each `W` by scattering `eq(w,o)` over the shape's route set.
     /// Checks one complete fold per shape, common slot counts and output-point
-    /// dimensions. No additional honest-input condition is required of the caller.
+    /// dimensions. Agreement of the supplied folds with the committed source is
+    /// required of the caller, not checked, and detected by the verifier.
     pub fn new(
         shapes: &[RouterShape],
         w: &[F128],

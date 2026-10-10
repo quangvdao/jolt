@@ -24,6 +24,29 @@ use rayon::ThreadPoolBuilder;
 
 use support::{run_core, RunnerError};
 
+// Columns follow the spec's M, A, R, L, Bk, w. The last two rows charge
+// the row binds to the passes that execute them, rather than to their messages.
+const DEFAULT_MODEL_COUNTS: [[f64; 6]; 8] = [
+    [0.0, 1.0, 0.0, 8.0, 1.0, 40.0],
+    [0.0, 2.0, 0.0, 16.0, 0.0, 130.0],
+    [0.0, 2.0, 0.0, 56.0, 0.0, 240.0],
+    [0.0, 18.0, 2.0, 40.0, 0.0, 0.0],
+    [0.0, 10.0, 2.0, 40.0, 0.0, 0.0],
+    [0.0, 6.0, 2.0, 40.0, 0.0, 0.0],
+    [7.0, 4.0, 0.0, 50.0, 0.0, 0.0],
+    [8.0, 2.0, 0.0, 3.0, 0.0, 0.0],
+];
+const POINT1_PRICES: [f64; 6] = [1.83, 1.10, 0.7, 0.4, 0.6, 0.05];
+const POINT2_PRICES: [f64; 6] = [0.9, 0.7, 0.2, 0.4, 0.6, 0.05];
+
+fn model_price(counts: &[f64; 6], prices: &[f64; 6]) -> f64 {
+    counts
+        .iter()
+        .zip(prices)
+        .map(|(count, price)| count * price)
+        .sum()
+}
+
 struct TimedCore {
     core: OuterF2Core<SyntheticTrace>,
     cycles: usize,
@@ -86,24 +109,21 @@ impl Reports {
         for (&(log_t, threads), samples) in &self.samples {
             let divisor = (1_usize << log_t) as f64;
             let prefix = format!("{variant}/local/{log_t}/{threads}");
-            let models = [
-                6.9,
-                15.1,
-                if options.monomial_rounds == 2 {
-                    74.0
-                } else {
-                    36.6
-                },
-                40.8,
-                32.0,
-                27.6,
-            ];
+            let default = OuterF2Options::default();
+            let is_default = options.monomial_rounds == default.monomial_rounds
+                && options.nibble_round_2 == default.nibble_round_2
+                && options.folded_group_weights == default.folded_group_weights;
+            let models = DEFAULT_MODEL_COUNTS.map(|counts| model_price(&counts, &POINT1_PRICES));
             for round in 0..8 + log_t {
                 report(
                     &format!("{prefix}/round{}", round + 1),
                     samples.iter().map(|sample| sample.times[round]).collect(),
                     divisor,
-                    models.get(round).copied(),
+                    if is_default && round < 6 {
+                        models.get(round).copied()
+                    } else {
+                        None
+                    },
                 );
             }
             report(
@@ -113,7 +133,7 @@ impl Reports {
                     .map(|sample| sample.times[6] + sample.times[7])
                     .collect(),
                 divisor,
-                Some(37.21),
+                is_default.then_some(models[6]),
             );
             report(
                 &format!("{prefix}/row8_bind_cycles"),
@@ -122,7 +142,7 @@ impl Reports {
                     .map(|sample| sample.times[8..8 + log_t].iter().sum::<u128>() + sample.finish)
                     .collect(),
                 divisor,
-                Some(18.09),
+                is_default.then_some(models[7]),
             );
             for (phase, name) in ["construct", "rounds", "finish", "extract"]
                 .into_iter()
@@ -183,8 +203,16 @@ fn main() -> Result<(), RunnerError> {
     {
         return Comparison::parse()?.run();
     }
+    let model_point1 = DEFAULT_MODEL_COUNTS
+        .iter()
+        .map(|counts| model_price(counts, &POINT1_PRICES))
+        .sum::<f64>();
+    let model_point2 = DEFAULT_MODEL_COUNTS
+        .iter()
+        .map(|counts| model_price(counts, &POINT2_PRICES))
+        .sum::<f64>();
     println!(
-        "outer_f2/local loaded_machine=true threshold_1_thread_ns=268 threshold_12_threads_log22_ns=28 model_point1_ns=214.3 model_point2_ns=173.9 tail_histogram_in_round1=true materialisation_in_round7=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true"
+        "outer_f2/local loaded_machine=true threshold_1_thread_ns=268 threshold_12_threads_log22_ns=28 model_point1_ns={model_point1:.1} model_point2_ns={model_point2:.1} tail_histogram_in_round1=true materialisation_in_round7=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true"
     );
     let default = OuterF2Options::default();
     let variants = [

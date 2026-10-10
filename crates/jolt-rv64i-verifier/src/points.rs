@@ -23,6 +23,9 @@ pub enum PointsError {
     #[error("column {column} is absent from the column values")]
     /// A chunk indicator references a column absent from the supplied values.
     MissingColumn { column: usize },
+    #[error("cannot allocate an equality table for {variables} coordinates")]
+    /// The table's capacity or byte size is unrepresentable, or reservation failed.
+    Allocation { variables: usize },
 }
 
 /// Converts a low-variable-first point to the most-significant-variable-first order of `jolt-poly`.
@@ -60,7 +63,7 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
             if (index >> bit) & 1 != 0 {
                 *coordinate
             } else {
-                F::one() + *coordinate
+                F::one() - *coordinate
             }
         })
         .product())
@@ -81,16 +84,32 @@ pub fn equality_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> 
             actual: point.len(),
         });
     }
-    let mut weights = vec![F::zero(); 1_usize << point.len()];
+    let allocation_error = || PointsError::Allocation {
+        variables: point.len(),
+    };
+    let shift = u32::try_from(point.len()).map_err(|_| allocation_error())?;
+    let elements = 1_usize.checked_shl(shift).ok_or_else(allocation_error)?;
+    let maximum_bytes = usize::try_from(isize::MAX).map_err(|_| allocation_error())?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<F>())
+        .ok_or_else(allocation_error)?;
+    if elements > maximum_bytes || bytes > maximum_bytes {
+        return Err(allocation_error());
+    }
+    let mut weights = Vec::new();
+    weights
+        .try_reserve_exact(elements)
+        .map_err(|_| allocation_error())?;
+    weights.resize(elements, F::zero());
     if let Some((first, rest)) = point.split_first() {
-        weights[0] = F::one() + *first;
+        weights[0] = F::one() - *first;
         weights[1] = *first;
         let mut width = 2;
         for coordinate in rest {
             for index in 0..width {
                 let upper = weights[index] * *coordinate;
                 weights[index + width] = upper;
-                weights[index] += upper;
+                weights[index] -= upper;
             }
             width *= 2;
         }
@@ -128,11 +147,11 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     }
     Ok(x.iter().zip(y).fold(F::zero(), |less, (x, y)| {
         if y.is_zero() {
-            (F::one() + *x) * less
+            (F::one() - *x) * less
         } else if *y == F::one() {
-            F::one() + *x + *x * less
+            F::one() - *x + *x * less
         } else {
-            (F::one() + *x) * *y + (F::one() + *x + *y) * less
+            (F::one() - *x) * *y + (F::one() + *x + *y) * less
         }
     }))
 }
@@ -251,7 +270,7 @@ impl<F: JoltField> ChunkWeights<F> {
                 index: digit,
                 variables,
             })?;
-            Ok(sum + (weight + zero) * *value)
+            Ok(sum + (weight - zero) * *value)
         })
     }
 }
@@ -401,6 +420,14 @@ mod tests {
             equality_table(&vec![F128::one(); usize::BITS as usize]),
             Err(PointsError::Dimension { .. })
         ));
+    }
+
+    #[test]
+    fn equality_tables_reject_unrepresentable_byte_capacity() {
+        let point = [F128::zero(); usize::BITS as usize - 5];
+        for result in [equality_table(&point), next_table(&point)] {
+            assert!(matches!(result, Err(PointsError::Allocation { .. })));
+        }
     }
 
     #[test]

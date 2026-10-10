@@ -129,8 +129,8 @@ fn seeded_nodes_recover_coefficients_for_every_degree() {
                 &nodes,
             )
             .unwrap();
-            assert_eq!(&recovered[..=degree], coefficients);
-            assert!(recovered[degree + 1..].iter().all(|&c| c == ZERO));
+            assert_eq!(recovered.len(), degree + 1);
+            assert_eq!(recovered, coefficients);
             for node in 0..=8 {
                 assert_eq!(eval_at_node(&coefficients, node), at(u128::from(node)));
             }

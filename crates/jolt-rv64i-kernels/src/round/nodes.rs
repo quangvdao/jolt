@@ -128,12 +128,15 @@ const fn mul_node(mut value: F128, mut node: u8) -> F128 {
 
 /// Recover degree `2..=8` coefficients from `p(0)`, `p`'s leading
 /// coefficient, `p(1)` and the `degree - 2` values at raw nodes `2..degree`.
-/// Returns coefficients in ascending order; entries above `degree` are zero.
+/// Returns exactly `degree + 1` coefficients in ascending order. The vector is
+/// the message's storage: pass it directly to `UnivariatePoly::new`, or borrow
+/// it for `round_poly_from_q_coeffs`, without trimming or copying.
 /// Runtime degrees need no const-generic dispatch or allocation by callers.
 ///
 /// Fixed matrices are module constants assembled at compile time from Lagrange
 /// bases and precomputed inverse denominators, using the const `F128::mul_x`.
-/// No call allocates, initializes a cache or performs inversion.
+/// Runs once per round and member, allocating only the returned message vector;
+/// no call initializes a cache or performs inversion.
 /// Multiplications by zero and one are skipped.
 /// Degrees 2, 3, 4, 5, 6, 7, 8 cost respectively 0, 4, 8, 15, 23, 36, 48
 /// field multiplications; subtracting the leading term uses shifts and XORs.
@@ -143,7 +146,7 @@ pub fn coefficients_from_nodes(
     leading: F128,
     at_one: F128,
     nodes: &[F128],
-) -> Result<[F128; 9], RoundError> {
+) -> Result<Vec<F128>, RoundError> {
     if !(2..=8).contains(&degree) {
         return Err(RoundError::Degree { degree });
     }
@@ -164,7 +167,7 @@ pub fn coefficients_from_nodes(
         }
         residuals[i + 1] = value + at_zero + leading_at_node;
     }
-    let mut coefficients = [ZERO; 9];
+    let mut coefficients = vec![ZERO; degree + 1];
     coefficients[0] = at_zero;
     coefficients[degree] = leading;
     for (row, entries) in MATRICES[degree - 2].iter().take(degree - 1).enumerate() {

@@ -4,6 +4,7 @@
 //! For the native node-evaluation assembly, use the same flags with
 //! `cargo rustc -p jolt-rv64i-kernels --features test-utils --release --bench round -- --emit=asm`.
 //! The three node wrappers retain six-value and four-value callers for inspection.
+//! Reconstruction timings include allocation and drop of the exact-length message vector.
 
 #![forbid(unsafe_code)]
 #![expect(

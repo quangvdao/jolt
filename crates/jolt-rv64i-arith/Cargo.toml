@@ -1,0 +1,22 @@
+[package]
+name = "jolt-rv64i-arith"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Bit-level constraint system for RV64I over the binary field"
+
+[lints]
+workspace = true
+
+[dependencies]
+jolt-field = { path = "../jolt-field", default-features = false, features = ["binary"] }
+jolt-r1cs = { path = "../jolt-r1cs", default-features = false }
+jolt-riscv = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+jolt-program = { workspace = true, features = ["image"] }
+rand = { workspace = true, features = ["std"] }
+rand_chacha.workspace = true
+rayon.workspace = true

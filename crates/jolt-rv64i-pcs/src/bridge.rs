@@ -374,6 +374,11 @@ mod tests {
                     .collect();
                 let alpha = rng.e();
                 let expected = reference_first_round(&rows, &point, alpha);
+                let composed = BridgeTables::new(&point, alpha)
+                    .unwrap()
+                    .first_round_composed(&rows)
+                    .unwrap();
+                assert_eq!(composed.coefficients(), expected);
                 let first = BridgeTables::new(&point, alpha)
                     .unwrap()
                     .first_round(&rows)

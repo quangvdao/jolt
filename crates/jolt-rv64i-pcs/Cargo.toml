@@ -21,3 +21,7 @@ rayon.workspace = true
 
 [dev-dependencies]
 jolt-rv64i-verifier = { workspace = true, features = ["test-utils"] }
+
+[[bench]]
+name = "bridge"
+harness = false

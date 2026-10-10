@@ -347,3 +347,240 @@ fn f128_word_accumulator_mixed_merges() {
         }
     }
 }
+
+// Polynomial long multiplication and division, independent of the field kernels.
+fn schoolbook_base(mut a: u64, mut b: u64, bits: u32, modulus: u64) -> u64 {
+    let top = 1u64 << (bits - 1);
+    let mask = u64::MAX >> (64 - bits);
+    let mut result = 0;
+    for _ in 0..bits {
+        if b & 1 != 0 {
+            result ^= a;
+        }
+        let carry = a & top != 0;
+        a = (a << 1) & mask;
+        if carry {
+            a ^= modulus;
+        }
+        b >>= 1;
+    }
+    result
+}
+
+fn schoolbook_cubic(a: [u64; 3], b: [u64; 3], bits: u32, modulus: u64) -> [u64; 3] {
+    let mut coefficients = [0; 5];
+    for (i, a) in a.into_iter().enumerate() {
+        for (j, b) in b.into_iter().enumerate() {
+            coefficients[i + j] ^= schoolbook_base(a, b, bits, modulus);
+        }
+    }
+    for degree in (3..=4).rev() {
+        coefficients[degree - 3] ^= coefficients[degree];
+        coefficients[degree - 2] ^= coefficients[degree];
+    }
+    [coefficients[0], coefficients[1], coefficients[2]]
+}
+
+#[test]
+fn f192_base_accumulator_schoolbook() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x6261_7365_0019);
+    let edges = [0, 1, u64::MAX, 1 << 63];
+    let supported = (0..3).flat_map(|position| {
+        edges.into_iter().flat_map(move |a| {
+            edges.map(|b| {
+                let mut coefficients = [0; 3];
+                coefficients[position] = a;
+                (coefficients, b)
+            })
+        })
+    });
+    let mut acc = F192Accumulator::default();
+    let mut expected_sum = [0; 3];
+    let dense_edges = [[0; 3], [1, 0, 0], [u64::MAX; 3], [0, 0, 1 << 63]]
+        .into_iter()
+        .flat_map(|a| edges.map(|b| (a, b)));
+    for (a, b) in supported
+        .chain(dense_edges)
+        .chain((0..1024).map(|_| (std::array::from_fn(|_| rng.next_u64()), rng.next_u64())))
+    {
+        let e = F192::from_base_fn(|i| F64::from_raw(a[i]));
+        let base = F64::from_raw(b);
+        let expected = schoolbook_cubic(a, [b, 0, 0], 64, 0x1b);
+        let field_expected = F192::from_base_fn(|i| F64::from_raw(expected[i]));
+        let mut single = F192Accumulator::default();
+        single.fmadd_base(e, base);
+        assert_eq!(single.reduce(), field_expected);
+        assert_eq!(e.mul_base(base), field_expected);
+        acc.fmadd_base(e, base);
+        for (sum, product) in expected_sum.iter_mut().zip(expected) {
+            *sum ^= product;
+        }
+        let portable_product = portable::product192_base(a, b);
+        assert_eq!(portable::reduce192(portable_product), expected);
+        #[cfg(any(
+            all(target_arch = "aarch64", target_feature = "aes"),
+            all(target_arch = "x86_64", target_feature = "pclmulqdq")
+        ))]
+        {
+            let product = kernels::product192_base(a, b);
+            assert_eq!(kernels::canonical192(product), portable_product);
+            assert_eq!(kernels::reduce192(product), expected);
+        }
+    }
+    assert_eq!(
+        acc.reduce(),
+        F192::from_base_fn(|i| F64::from_raw(expected_sum[i]))
+    );
+}
+
+#[test]
+fn f192_base_pair_schoolbook() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7061_6972_0019);
+    let edges = [0, 1, u64::MAX, 1 << 63];
+    let mut cases = Vec::new();
+    for i in 0..3 {
+        for j in 0..2 {
+            for a in edges {
+                for b in edges {
+                    let mut e = [0; 3];
+                    let mut v = [0; 2];
+                    e[i] = a;
+                    v[j] = b;
+                    cases.push((e, v));
+                }
+            }
+        }
+    }
+    for a in [[0; 3], [1, 0, 0], [u64::MAX; 3], [0, 0, 1 << 63]] {
+        for b in [[0; 2], [1, 0], [u64::MAX; 2], [0, 1 << 63]] {
+            cases.push((a, b));
+        }
+    }
+    cases.extend((0..1024).map(|_| {
+        (
+            std::array::from_fn(|_| rng.next_u64()),
+            std::array::from_fn(|_| rng.next_u64()),
+        )
+    }));
+    let mut acc = F192Accumulator::default();
+    let mut expected_sum = [0; 3];
+    for (a, b) in cases {
+        let e = F192::from_base_fn(|i| F64::from_raw(a[i]));
+        let v = b.map(F64::from_raw);
+        let expected = schoolbook_cubic(a, [b[0], b[1], 0], 64, 0x1b);
+        let field_expected = F192::from_base_fn(|i| F64::from_raw(expected[i]));
+        assert_eq!(e.mul_base_pair(v), field_expected);
+        let mut single = F192Accumulator::default();
+        single.fmadd_base_pair(e, v);
+        assert_eq!(single.reduce(), field_expected);
+        acc.fmadd_base_pair(e, v);
+        for (sum, product) in expected_sum.iter_mut().zip(expected) {
+            *sum ^= product;
+        }
+        let portable_product = portable::product192_base_pair(a, b);
+        assert_eq!(portable_product, portable::product192(a, [b[0], b[1], 0]));
+        assert_eq!(portable::multiply192_base_pair(a, b), expected);
+        #[cfg(any(
+            all(target_arch = "aarch64", target_feature = "aes"),
+            all(target_arch = "x86_64", target_feature = "pclmulqdq")
+        ))]
+        {
+            let product = kernels::product192_base_pair(a, b);
+            assert_eq!(kernels::canonical192(product), portable_product);
+            assert_eq!(kernels::multiply192_base_pair(a, b), expected);
+        }
+    }
+    assert_eq!(
+        acc.reduce(),
+        F192::from_base_fn(|i| F64::from_raw(expected_sum[i]))
+    );
+}
+
+#[test]
+fn f192_base_pair_exhaustive_toy() {
+    for e in 0..4096 {
+        let a = [e & 15, (e >> 4) & 15, e >> 8];
+        for v in 0..256 {
+            let b = [v & 15, v >> 4];
+            let d0 = schoolbook_base(a[0], b[0], 4, 0x3);
+            let d1 = schoolbook_base(a[1], b[1], 4, 0x3);
+            let c01 = schoolbook_base(a[0] ^ a[1], b[0] ^ b[1], 4, 0x3) ^ d0 ^ d1;
+            let c02 = schoolbook_base(a[2], b[0], 4, 0x3);
+            let c12 = schoolbook_base(a[2], b[1], 4, 0x3);
+            assert_eq!(
+                [d0 ^ c12, c01 ^ c12, d1 ^ c02],
+                schoolbook_cubic(a, [b[0], b[1], 0], 4, 0x3),
+                "e={e:x}, v={v:x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn f192_mul_y_and_base_pair_composition() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x6d75_6c79_0019);
+    let edges = [[0; 3], [1, 0, 0], [u64::MAX; 3], [0, 0, 1 << 63]]
+        .into_iter()
+        .flat_map(|a| [[0; 2], [1, 0], [u64::MAX; 2], [0, 1 << 63]].map(|b| (a, b)));
+    for (a, b) in edges.chain((0..1024).map(|_| {
+        (
+            std::array::from_fn(|_| rng.next_u64()),
+            std::array::from_fn(|_| rng.next_u64()),
+        )
+    })) {
+        let e = F192::from_base_fn(|i| F64::from_raw(a[i]));
+        let b = b.map(F64::from_raw);
+        let expected_y = [a[2], a[0] ^ a[2], a[1]];
+        assert_eq!(
+            e.mul_y(),
+            F192::from_base_fn(|i| F64::from_raw(expected_y[i]))
+        );
+        assert_eq!(expected_y, schoolbook_cubic(a, [0, 1, 0], 64, 0x1b));
+        let mut acc = F192Accumulator::default();
+        acc.fmadd_base(e, b[0]);
+        acc.fmadd_base(e.mul_y(), b[1]);
+        assert_eq!(acc.reduce(), e.mul_base_pair(b));
+    }
+}
+
+#[test]
+fn f192_specialized_accumulator_mixed_merges() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x6d69_7865_6419);
+    let mut accumulators = [F192Accumulator::default(); 2];
+    let mut expected = [0; 3];
+    for acc in &mut accumulators {
+        for term in 0..1024 {
+            let a = std::array::from_fn(|_| rng.next_u64());
+            let b = std::array::from_fn(|_| rng.next_u64());
+            let e = F192::from_base_fn(|i| F64::from_raw(a[i]));
+            let v = b.map(F64::from_raw);
+            let product = match term % 4 {
+                0 => {
+                    acc.fmadd_base(e, v[0]);
+                    schoolbook_cubic(a, [b[0], 0, 0], 64, 0x1b)
+                }
+                1 => {
+                    acc.fmadd_base_pair(e, [v[0], v[1]]);
+                    schoolbook_cubic(a, [b[0], b[1], 0], 64, 0x1b)
+                }
+                2 => {
+                    acc.fmadd(e, F192::from_base_fn(|i| v[i]));
+                    schoolbook_cubic(a, b, 64, 0x1b)
+                }
+                _ => {
+                    acc.add(e);
+                    a
+                }
+            };
+            for (sum, product) in expected.iter_mut().zip(product) {
+                *sum ^= product;
+            }
+        }
+    }
+    let [mut left, right] = accumulators;
+    left.merge(right);
+    assert_eq!(
+        left.reduce(),
+        F192::from_base_fn(|i| F64::from_raw(expected[i]))
+    );
+}

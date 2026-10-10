@@ -12,6 +12,23 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 pub struct F192([F64; 3]);
 
 impl F192 {
+    /// Multiplies by `b[0] + y*b[1]`, whose coefficient of `y^2` is zero.
+    /// Uses five unreduced base products and three base-field reductions.
+    #[inline]
+    pub fn mul_base_pair(self, b: [F64; 2]) -> Self {
+        Self(
+            arithmetic::multiply192_base_pair(self.0.map(F64::to_raw), b.map(F64::to_raw))
+                .map(F64::from_raw),
+        )
+    }
+
+    /// Multiplies by the extension generator using `y^3 = y + 1`.
+    #[inline]
+    pub fn mul_y(self) -> Self {
+        let [c0, c1, c2] = self.0;
+        Self([c2, c0 + c2, c1])
+    }
+
     fn add_coefficients(self, rhs: Self) -> Self {
         Self(std::array::from_fn(|i| self.0[i] + rhs.0[i]))
     }

@@ -110,6 +110,28 @@ pub(super) fn reduce128([low, high]: Unreduced128) -> u128 {
 }
 
 #[inline]
+pub(super) fn multiply192_base_pair(a: [u64; 3], b: [u64; 2]) -> [u64; 3] {
+    reduce192(product192_base_pair(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base(a: [u64; 3], b: u64) -> Unreduced192 {
+    a.map(|a| product64(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
+    let [a0, a1, a2] = a;
+    let [b0, b1] = b;
+    let d0 = product64(a0, b0);
+    let d1 = product64(a1, b1);
+    let c01 = product64(a0 ^ a1, b0 ^ b1) ^ d0 ^ d1;
+    let c02 = product64(a2, b0);
+    let c12 = product64(a2, b1);
+    [d0 ^ c12, c01 ^ c12, d1 ^ c02]
+}
+
+#[inline]
 pub(super) fn reduce192(product: Unreduced192) -> [u64; 3] {
     product.map(reduce64)
 }

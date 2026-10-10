@@ -146,6 +146,29 @@ pub(super) fn product192(a: [u64; 3], b: [u64; 3]) -> Unreduced192 {
 }
 
 #[inline]
+pub(super) fn multiply192_base_pair(a: [u64; 3], b: [u64; 2]) -> [u64; 3] {
+    reduce192(product192_base_pair(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base(a: [u64; 3], b: u64) -> Unreduced192 {
+    let b = Word::from_u64(b);
+    a.map(|a| Word::from_u64(a).mul_ll(b))
+}
+
+#[inline]
+pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
+    let [a0, a1, a2] = a.map(Word::from_u64);
+    let [b0, b1] = b.map(Word::from_u64);
+    let d0 = a0.mul_ll(b0);
+    let d1 = a1.mul_ll(b1);
+    let c01 = (a0 ^ a1).mul_ll(b0 ^ b1) ^ d0 ^ d1;
+    let c02 = a2.mul_ll(b0);
+    let c12 = a2.mul_ll(b1);
+    [d0 ^ c12, c01 ^ c12, d1 ^ c02]
+}
+
+#[inline]
 pub(super) fn reduce192(product: Unreduced192) -> [u64; 3] {
     product.map(reduce_word64)
 }

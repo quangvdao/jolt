@@ -121,6 +121,28 @@ impl Accumulator for F128Accumulator {
     scalar_methods!();
 }
 
+impl F192Accumulator {
+    /// Adds `a * b` without base-field reduction, using three base products.
+    /// `b` is a field element; all its bits participate, unlike `fmadd_u64`.
+    #[inline]
+    pub fn fmadd_base(&mut self, a: F192, b: F64) {
+        self.merge(Self(arithmetic::product192_base(
+            std::array::from_fn(|i| a.base_coefficient(i).to_raw()),
+            b.to_raw(),
+        )));
+    }
+
+    /// Adds `a * (b[0] + y*b[1])` without base-field reduction,
+    /// using five base products and folding `y^3 = y + 1` before accumulation.
+    #[inline]
+    pub fn fmadd_base_pair(&mut self, a: F192, b: [F64; 2]) {
+        self.merge(Self(arithmetic::product192_base_pair(
+            std::array::from_fn(|i| a.base_coefficient(i).to_raw()),
+            b.map(F64::to_raw),
+        )));
+    }
+}
+
 impl Accumulator for F192Accumulator {
     type Element = F192;
 

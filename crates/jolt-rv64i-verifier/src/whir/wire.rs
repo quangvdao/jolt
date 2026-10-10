@@ -348,6 +348,7 @@ mod tests {
         },
     };
     use jolt_field::{CanonicalEncoding, F192};
+    use std::fmt::Debug;
 
     struct Random(u64);
 
@@ -417,7 +418,7 @@ mod tests {
         }
     }
 
-    fn assert_complete_encoding<T: BitsWire + PartialEq + std::fmt::Debug>(
+    fn assert_complete_encoding<T: BitsWire + PartialEq + Debug>(
         value: &T,
         geometry: BitsGeometry,
     ) {

@@ -25,6 +25,7 @@ pub fn to_high_to_low<F: Copy>(point: &[F]) -> Vec<F> {
     point.iter().rev().copied().collect()
 }
 
+/// Equality in characteristic two, with one multiplication per coordinate.
 pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -32,7 +33,7 @@ pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    Ok(EqPolynomial::mle(x, y))
+    Ok(x.iter().zip(y).map(|(x, y)| F::one() + *x + *y).product())
 }
 
 pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsError> {

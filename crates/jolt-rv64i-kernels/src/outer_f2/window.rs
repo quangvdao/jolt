@@ -87,14 +87,14 @@ impl<const K: usize, const N: usize, const A: usize, const C: usize, const UNITS
     #[inline]
     fn add<const AT_ONE: bool>(
         &self,
-        group: usize,
+        tables: (&[[F128; N]; A], &[[F128; N]; C]),
         lanes: [u64; 3],
         sums: &mut [F128Accumulator; 2],
     ) {
         let [a, b, c] = lanes;
         let width = WindowGeometry::new(K).width;
         let index = |word: u64, unit: usize| ((word >> (width * unit)) & (N as u64 - 1)) as usize;
-        let table_group = if self.folded { group } else { 0 };
+        let (a_tables, c_tables) = tables;
         for pair in 0..C / UNITS {
             let mut av = [ZERO; 2];
             let mut bv = [ZERO; 2];
@@ -102,12 +102,11 @@ impl<const K: usize, const N: usize, const A: usize, const C: usize, const UNITS
             for byte in 0..UNITS {
                 let even = pair * 2 * UNITS + byte;
                 let odd = even + UNITS;
-                av[0] += self.a[table_group][even][index(a, even)];
-                av[1] += self.a[table_group][odd][index(a, odd)];
+                av[0] += a_tables[even][index(a, even)];
+                av[1] += a_tables[odd][index(a, odd)];
                 bv[0] += self.b[byte][index(b, even)];
                 bv[1] += self.b[byte][index(b, odd)];
-                cv += self.c[table_group][pair * UNITS + byte]
-                    [index(c, if AT_ONE { odd } else { even })];
+                cv += c_tables[pair * UNITS + byte][index(c, if AT_ONE { odd } else { even })];
             }
             let endpoint = usize::from(AT_ONE);
             sums[0].fmadd(av[endpoint], bv[endpoint]);
@@ -123,6 +122,15 @@ impl<const K: usize, const N: usize, const A: usize, const C: usize, const UNITS
         lo: &[F128],
         hi: &[F128],
     ) -> Sums {
+        let first = (&self.a[0], &self.c[0]);
+        let groups = [
+            first,
+            if self.folded {
+                (&self.a[1], &self.c[1])
+            } else {
+                first
+            },
+        ];
         let sums = (0..chunks.len() / chunks.chunk_len())
             .into_par_iter()
             .map(|chunk| {
@@ -136,15 +144,15 @@ impl<const K: usize, const N: usize, const A: usize, const C: usize, const UNITS
                         let lanes = source.lanes(start + block * chunks.block_len() + offset);
                         if self.folded {
                             let mut cycle = [F128Accumulator::default(); 2];
-                            self.add::<AT_ONE>(0, lanes[0], &mut cycle);
-                            self.add::<AT_ONE>(1, lanes[1], &mut cycle);
+                            self.add::<AT_ONE>(groups[0], lanes[0], &mut cycle);
+                            self.add::<AT_ONE>(groups[1], lanes[1], &mut cycle);
                             for (sum, value) in inner[..2].iter_mut().zip(cycle) {
                                 sum.fmadd(low, value.reduce());
                             }
                         } else {
                             for (group, lane) in lanes.into_iter().enumerate() {
                                 let mut cycle = [F128Accumulator::default(); 2];
-                                self.add::<AT_ONE>(group, lane, &mut cycle);
+                                self.add::<AT_ONE>(groups[group], lane, &mut cycle);
                                 for (sum, value) in
                                     inner[group * 2..group * 2 + 2].iter_mut().zip(cycle)
                                 {

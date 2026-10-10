@@ -14,6 +14,7 @@
 //! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
 //! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
 //! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
+//! | Bk | bucket/l1_nibble_lanes_{1,2,4,8}/{local,all_rows} | one trace word in cycle order; lane merge follows timing |
 //! | sct | sct/partitioned_emit_rows_20/all_rows | cached-slot weight emission and buffered range application |
 //! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
 //! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
@@ -77,6 +78,11 @@
 //! Bucket read-out uses those same layouts: 128 reads per byte bit, eight per
 //! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
 //! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
+//! The L1 lane family uses one sequential cycle loop and 4 KiB per lane.
+//! Cycle j writes lane j mod lanes; a separate untimed finish merges them.
+//! Its alias rate counts equal nibbles at each position in consecutive cycles,
+//! excluding the first cycle, and is prepared before timing. Run this family
+//! with --threads 1 to measure its unit floor.
 //!
 //! sct calls the library ScatterPlan: construction caches each cycle's u16 slot
 //! and each slot's u16 row offset. Timing emits weights through those slots into
@@ -114,7 +120,8 @@ use thiserror::Error;
 
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
-use jolt_rv64i_kernels::router::fold::FoldLayout;
+use jolt_rv64i_kernels::router::fold::FoldCalibration;
+use jolt_rv64i_kernels::router::shape::RouterError;
 use jolt_rv64i_kernels::source::{SourceError, ValidatedTrace};
 use support::arithmetic::HotArithmetic;
 use support::{run_probe, ProbeCase, ProbeKernel, ProbeRecord, RunnerError};
@@ -136,6 +143,8 @@ enum ProbeError {
     Pool(#[from] PoolError),
     #[error(transparent)]
     Source(#[from] SourceError),
+    #[error(transparent)]
+    Router(#[from] RouterError),
     #[error("unknown probe case {unit}/{variant}")]
     Case { unit: String, variant: String },
     #[error("probe worker count {threads} must be positive")]
@@ -733,12 +742,11 @@ enum BucketLayout {
 }
 
 impl BucketLayout {
-    fn geometry(self) -> (usize, [usize; 5]) {
+    fn calibration(self) -> Result<Option<FoldCalibration>, RouterError> {
         match self {
-            BucketLayout::Column => (32 * 256, [0; 5]),
+            BucketLayout::Column => Ok(None),
             BucketLayout::Fold { byte_selectors, .. } => {
-                let layout = FoldLayout::calibration(byte_selectors);
-                (layout.entries(), layout.offsets())
+                FoldCalibration::new(byte_selectors).map(Some)
             }
         }
     }
@@ -750,11 +758,53 @@ struct Bucket {
     scratch: Vec<Mutex<Vec<F128>>>,
     selectors: Vec<u8>,
     operations: usize,
+    calibration: Option<BucketCalibration>,
+}
+
+struct BucketCalibration {
+    bases: [Vec<usize>; 5],
+    metadata: [usize; 64],
+}
+
+impl BucketCalibration {
+    fn new(calibration: &FoldCalibration) -> Result<Self, RouterError> {
+        let mut bases: [Vec<usize>; 5] = std::array::from_fn(|_| Vec::new());
+        for (shape, (bases, selectors)) in bases.iter_mut().zip(calibration.selectors()).enumerate()
+        {
+            *bases = (0..selectors)
+                .map(|selector| calibration.shape_base(shape, selector))
+                .collect::<Result<_, _>>()?;
+        }
+        let metadata: Vec<usize> = (0..calibration.selectors()[0])
+            .map(|selector| calibration.variant_metadata_base(selector))
+            .collect::<Result<_, _>>()?;
+        let metadata =
+            metadata
+                .try_into()
+                .map_err(|metadata: Vec<usize>| RouterError::TableLength {
+                    table: "calibration metadata",
+                    expected: 64,
+                    actual: metadata.len(),
+                })?;
+        Ok(Self { bases, metadata })
+    }
+
+    #[inline]
+    fn base(&self, shape: usize, selector: usize) -> usize {
+        let bases = &self.bases[shape];
+        bases[selector.min(bases.len() - 1)]
+    }
 }
 
 impl Bucket {
-    fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
-        let entries = layout.geometry().0;
+    fn new(
+        source: Arc<SyntheticTrace>,
+        layout: BucketLayout,
+        threads: usize,
+    ) -> Result<Self, ProbeError> {
+        let fold = layout.calibration()?;
+        let entries = fold.as_ref().map_or(32 * 256, FoldCalibration::entries);
+        let calibration = fold.as_ref().map(BucketCalibration::new).transpose()?;
         let selectors: Vec<u8> = match layout {
             BucketLayout::Column => Vec::new(),
             BucketLayout::Fold { share, .. } => (0..CycleSource::cycles(source.as_ref()))
@@ -788,7 +838,7 @@ impl Bucket {
                 })
                 .sum(),
         };
-        Self {
+        Ok(Self {
             source,
             layout,
             scratch: (0..threads)
@@ -796,7 +846,8 @@ impl Bucket {
                 .collect(),
             selectors,
             operations,
-        }
+            calibration,
+        })
     }
 
     #[inline]
@@ -809,10 +860,15 @@ impl Bucket {
         }
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fold bucket cases construct calibration before timing; column cases do not use it"
+    )]
     fn run(&mut self) -> F128 {
         let source = black_box(&self.source);
         let _ = black_box(&self.scratch);
         let selectors = black_box(&self.selectors);
+        let fold = black_box(self.calibration.as_ref());
         (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
             .into_par_iter()
             .for_each(|chunk| {
@@ -836,8 +892,8 @@ impl Bucket {
                         BucketLayout::Fold { byte_selectors, .. } => {
                             let selector = usize::from(selectors[cycle]);
                             let by_byte = selector < byte_selectors;
-                            let fold = FoldLayout::calibration(byte_selectors);
-                            let variant_base = fold.variant_base(selector);
+                            let fold = fold.unwrap();
+                            let variant_base = fold.base(0, selector);
                             for (word_slot, word) in [0, 1, 2, 4, 5].into_iter().enumerate() {
                                 bucket_word(
                                     &mut buckets,
@@ -850,17 +906,17 @@ impl Bucket {
                             }
                             for (slot, column) in (5..12).enumerate() {
                                 let digit = source.digit(column, cycle).unwrap_or(0);
-                                buckets[fold.variant_metadata_base(selector) + slot * 16 + digit] +=
+                                buckets[fold.metadata[selector & 63] + slot * 16 + digit] +=
                                     weight;
                             }
                             let flags = usize::from(source.digit(18, cycle).is_some())
                                 | (usize::from(source.digit(19, cycle).is_some()) << 1)
                                 | (usize::from(source.digit(20, cycle).is_some()) << 2);
-                            buckets[fold.variant_metadata_base(selector) + 7 * 16 + flags] += weight;
+                            buckets[fold.metadata[selector & 63] + 7 * 16 + flags] += weight;
                             let low = source.digit(10, cycle).unwrap_or(0);
                             let high = source.digit(11, cycle).unwrap_or(0);
                             if let Some(kind) = source.digit(13, cycle) {
-                                let base = fold.shape_base(1, low + 8 * high + 64 * kind);
+                                let base = fold.base(1, low + 8 * high + 64 * kind);
                                 bucket_word(
                                     &mut buckets,
                                     base,
@@ -871,7 +927,7 @@ impl Bucket {
                                 );
                             }
                             if let Some(kind) = source.digit(14, cycle) {
-                                let base = fold.shape_base(2, low + 8 * kind);
+                                let base = fold.base(2, low + 8 * kind);
                                 for (slot, word) in [3, 1].into_iter().enumerate() {
                                     bucket_word(
                                         &mut buckets,
@@ -886,7 +942,7 @@ impl Bucket {
                             let row = source.bytecode_index(cycle);
                             if let Some(kind) = source.digit(15, cycle) {
                                 let base =
-                                    fold.shape_base(3, low + 8 * high + 64 * kind);
+                                    fold.base(3, low + 8 * high + 64 * kind);
                                 for slot in 0..3 {
                                     let word = if slot < 2 {
                                         source.trace_word(slot, cycle)
@@ -902,7 +958,7 @@ impl Bucket {
                                 for slot in 0..2 {
                                     bucket_word(
                                         &mut buckets,
-                                        fold.shape_base(4, 0),
+                                        fold.base(4, 0),
                                         slot,
                                         source.bytecode_word(slot + 1, row),
                                         false,
@@ -940,6 +996,85 @@ fn bucket_word(
             let value = ((word >> (position * 4)) & 15) as usize;
             buckets[base + (slot * 16 + position) * 16 + value] += weight;
         }
+    }
+}
+
+type NibbleWord = [[F128; 16]; 16];
+
+struct L1Nibble {
+    source: Arc<SyntheticTrace>,
+    tables: Vec<NibbleWord>,
+    alias_rate: f64,
+}
+
+impl L1Nibble {
+    fn new(source: Arc<SyntheticTrace>, lanes: usize) -> Self {
+        let cycles = CycleSource::cycles(source.as_ref());
+        let aliases: usize = (1..cycles)
+            .map(|cycle| {
+                let difference = source.trace_word(0, cycle - 1) ^ source.trace_word(0, cycle);
+                (0..16)
+                    .filter(|position| (difference >> (position * 4)).trailing_zeros() >= 4)
+                    .count()
+            })
+            .sum();
+        Self {
+            source,
+            tables: vec![[[F128::from_raw(0); 16]; 16]; lanes],
+            alias_rate: aliases as f64 / ((cycles - 1) * 16) as f64,
+        }
+    }
+
+    #[inline]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the dispatch selects the lane count allocated by the constructor"
+    )]
+    fn run_lanes<const LANES: usize>(&mut self) -> F128 {
+        let source = black_box(&self.source);
+        let tables: &mut [NibbleWord; LANES] = self.tables.as_mut_slice().try_into().unwrap();
+        let tables = black_box(tables);
+        for cycle in 0..CycleSource::cycles(source.as_ref()) {
+            let weight = trace_value(source, cycle);
+            let mut word = source.trace_word(0, cycle);
+            let table = &mut tables[cycle & (LANES - 1)];
+            for position in table.iter_mut() {
+                position[(word & 15) as usize] += weight;
+                word >>= 4;
+            }
+        }
+        let _ = black_box(tables);
+        F128::from_raw(0)
+    }
+
+    fn run(&mut self) -> F128 {
+        match self.tables.len() {
+            1 => self.run_lanes::<1>(),
+            2 => self.run_lanes::<2>(),
+            4 => self.run_lanes::<4>(),
+            8 => self.run_lanes::<8>(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the constructor creates at least one lane for every registered case"
+    )]
+    fn finish_run(&mut self) -> F128 {
+        let (first, rest) = self.tables.split_first_mut().unwrap();
+        for table in rest {
+            for (left, right) in first.iter_mut().zip(table) {
+                for (left, &right) in left.iter_mut().zip(right.iter()) {
+                    *left += right;
+                }
+            }
+        }
+        black_box(first)
+            .iter()
+            .flatten()
+            .copied()
+            .fold(F128::from_raw(0), |sum, entry| sum + entry)
     }
 }
 
@@ -1172,26 +1307,32 @@ impl Readout {
         }
     }
 
-    fn new(layout: BucketLayout) -> Self {
-        let (entries, offsets) = layout.geometry();
+    fn new(layout: BucketLayout) -> Result<Self, ProbeError> {
+        let calibration = layout.calibration()?;
+        let entries = calibration
+            .as_ref()
+            .map_or(32 * 256, FoldCalibration::entries);
+        let offsets = calibration
+            .as_ref()
+            .map_or([0; 5], FoldCalibration::offsets);
         let mut specs = Vec::new();
         match layout {
             BucketLayout::Column => Self::word(&mut specs, 0, 4, 8),
             BucketLayout::Fold { byte_selectors, .. } => {
-                let fold = FoldLayout::calibration(byte_selectors);
-                for selector in 0..FoldLayout::CALIBRATION_SELECTORS[0] {
+                let fold = calibration.as_ref().ok_or_else(|| ProbeError::Case {
+                    unit: "readout".to_owned(),
+                    variant: "calibration".to_owned(),
+                })?;
+                let selectors = fold.selectors();
+                let word_sets = fold.word_sets();
+                for selector in 0..selectors[0] {
                     let by_byte = selector < byte_selectors;
-                    let base = fold.variant_base(selector);
-                    Self::word(
-                        &mut specs,
-                        base,
-                        FoldLayout::CALIBRATION_WORD_SETS[0],
-                        if by_byte { 8 } else { 4 },
-                    );
+                    let base = fold.variant_base(selector)?;
+                    Self::word(&mut specs, base, word_sets[0], if by_byte { 8 } else { 4 });
                     for digit in 0..7 {
                         for value in 1..if digit < 5 { 16 } else { 8 } {
                             specs.push(ReadSpec {
-                                base: fold.variant_metadata_base(selector) + digit * 16 + value,
+                                base: fold.variant_metadata_base(selector)? + digit * 16 + value,
                                 width: 1,
                                 bit: None,
                             });
@@ -1199,7 +1340,7 @@ impl Readout {
                     }
                     for bit in 0..3 {
                         specs.push(ReadSpec {
-                            base: fold.variant_metadata_base(selector) + 7 * 16,
+                            base: fold.variant_metadata_base(selector)? + 7 * 16,
                             width: 8,
                             bit: Some(bit),
                         });
@@ -1211,17 +1352,11 @@ impl Readout {
                     });
                 }
                 for (shape, &offset) in offsets.iter().enumerate().skip(1) {
-                    Self::word(
-                        &mut specs,
-                        offset,
-                        FoldLayout::CALIBRATION_SELECTORS[shape]
-                            * FoldLayout::CALIBRATION_WORD_SETS[shape],
-                        4,
-                    );
+                    Self::word(&mut specs, offset, selectors[shape] * word_sets[shape], 4);
                 }
-                for selector in 0..FoldLayout::CALIBRATION_SELECTORS[3] {
+                for selector in 0..selectors[3] {
                     specs.push(ReadSpec {
-                        base: fold.shape_base(3, selector),
+                        base: fold.shape_base(3, selector)?,
                         width: 16,
                         bit: None,
                     });
@@ -1239,12 +1374,12 @@ impl Readout {
             })
             .sum();
         let output = vec![F128::from_raw(0); specs.len()];
-        Self {
+        Ok(Self {
             buckets: field_values(entries),
             specs,
             output,
             operations,
-        }
+        })
     }
 
     fn run(&mut self) -> F128 {
@@ -1413,7 +1548,8 @@ impl PartitionedScatter {
 
 enum Unit {
     Lookup(Box<Lookup>),
-    Bucket(Bucket),
+    Bucket(Box<Bucket>),
+    L1Nibble(L1Nibble),
     Scatter(Scatter),
     Partitioned(Box<PartitionedScatter>),
     Fmadd(Box<Fmadd>),
@@ -1457,11 +1593,21 @@ impl Unit {
                 };
                 Ok(Self::Lookup(Box::new(Lookup::new(trace()?, pattern, kib))))
             }
+            "bucket" if case.variant.starts_with("l1_nibble_lanes_") => {
+                let lanes = case
+                    .variant
+                    .strip_prefix("l1_nibble_lanes_")
+                    .and_then(|lanes| lanes.parse::<usize>().ok())
+                    .filter(|lanes| [1, 2, 4, 8].contains(lanes))
+                    .ok_or_else(invalid)?;
+                Ok(Self::L1Nibble(L1Nibble::new(trace()?, lanes)))
+            }
             "bucket" => {
-                let layout = if case.variant == "column_128kib" {
+                let variant = case.variant.as_str();
+                let layout = if variant == "column_128kib" {
                     BucketLayout::Column
                 } else {
-                    let (layout, share) = case.variant.split_once("_share_").ok_or_else(invalid)?;
+                    let (layout, share) = variant.split_once("_share_").ok_or_else(invalid)?;
                     let byte_selectors = match layout {
                         "fold_none" => 0,
                         "fold_hot8" => 8,
@@ -1478,7 +1624,11 @@ impl Unit {
                         share,
                     }
                 };
-                Ok(Self::Bucket(Bucket::new(trace()?, layout, threads)))
+                Ok(Self::Bucket(Box::new(Bucket::new(
+                    trace()?,
+                    layout,
+                    threads,
+                )?)))
             }
             "scatter" => {
                 let (method, rows) = case.variant.split_once("_rows_").ok_or_else(invalid)?;
@@ -1548,7 +1698,7 @@ impl Unit {
                     },
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Readout(Readout::new(layout)))
+                Ok(Self::Readout(Readout::new(layout)?))
             }
             "merge" => {
                 let mode = match case.variant.as_str() {
@@ -1569,6 +1719,7 @@ impl ProbeKernel for Unit {
         match self {
             Self::Lookup(unit) => CycleSource::cycles(unit.source.as_ref()) * unit.pattern.reads(),
             Self::Bucket(unit) => unit.operations,
+            Self::L1Nibble(unit) => CycleSource::cycles(unit.source.as_ref()) * 16,
             Self::Scatter(unit) => CycleSource::cycles(unit.source.as_ref()),
             Self::Partitioned(unit) => unit.cycles(),
             Self::Fmadd(unit) => CycleSource::cycles(unit.source.as_ref()),
@@ -1582,12 +1733,27 @@ impl ProbeKernel for Unit {
         match self {
             Self::Lookup(unit) => unit.run(),
             Self::Bucket(unit) => unit.run(),
+            Self::L1Nibble(unit) => unit.run(),
             Self::Scatter(unit) => unit.run(),
             Self::Partitioned(unit) => unit.run(),
             Self::Fmadd(unit) => unit.run(),
             Self::Merge(unit) => unit.run(),
             Self::Readout(unit) => unit.run(),
             Self::Hot(unit) => unit.run(),
+        }
+    }
+
+    fn finish_run(&mut self) -> F128 {
+        match self {
+            Self::L1Nibble(unit) => unit.finish_run(),
+            _ => F128::from_raw(0),
+        }
+    }
+
+    fn alias_rate(&self) -> Option<f64> {
+        match self {
+            Self::L1Nibble(unit) => Some(unit.alias_rate),
+            _ => None,
         }
     }
 
@@ -1604,6 +1770,7 @@ impl ProbeKernel for Unit {
     fn memory_layout(&self) -> Option<(usize, usize)> {
         match self {
             Self::Merge(unit) => Some(unit.layout()),
+            Self::L1Nibble(unit) => Some((size_of::<NibbleWord>(), unit.tables.len())),
             Self::Readout(unit) => Some((unit.buckets.len() * size_of::<F128>(), 1)),
             _ => None,
         }
@@ -1817,6 +1984,14 @@ fn main() -> Result<(), RunnerError> {
                 minimum_threads: 1,
             });
         }
+    }
+    for lanes in [1, 2, 4, 8] {
+        cases.push(ProbeCase {
+            unit: "bucket",
+            variant: format!("l1_nibble_lanes_{lanes}"),
+            profiles: BOTH,
+            minimum_threads: 1,
+        });
     }
     for rows in [16, 20] {
         for method in ["direct_atomic_halves", "worker_tree", "gather"] {

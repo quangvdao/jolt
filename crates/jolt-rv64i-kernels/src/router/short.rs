@@ -1,6 +1,6 @@
 //! Shared low-first slot sum-check over complete folds and sparse public routing tensors.
 
-use super::shape::{RouterError, RouterShape, SlotVariable};
+use super::shape::{RouteEntry, RouterError, RouterShape, SlotVariable};
 use crate::round::eq::eq_table;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use jolt_poly::UnivariatePoly;
@@ -143,7 +143,12 @@ impl RouterShortCore {
                 });
             }
             let mut weight = unsafe_allocate_zero_vec(shape.fold_len());
-            for &(output, source, selector) in shape.route() {
+            for &RouteEntry {
+                output,
+                source,
+                selector,
+            } in shape.route()
+            {
                 let mut index = 0;
                 for (bit, &(_, variable)) in shape.slot_map().iter().enumerate() {
                     let value = match variable {

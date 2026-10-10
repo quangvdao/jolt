@@ -19,8 +19,8 @@ use jolt_rv64i_kernels::router::cycle::{RouterCycleMember, RoutersCycleCore};
 use jolt_rv64i_kernels::router::fold::{fold_pass, FoldLayout};
 use jolt_rv64i_kernels::router::lift::{source_lift, RetainedWordLifts};
 use jolt_rv64i_kernels::router::shape::{
-    synthetic_router_shapes, BitEntry, RouterError, RouterShape, SelectorFactor, SlotVariable,
-    WordSlot,
+    synthetic_router_shapes, BitEntry, RouteEntry, RouterError, RouterShape, RouterShapeRequest,
+    SelectorFactor, SlotVariable, WordSlot,
 };
 use jolt_rv64i_kernels::router::short::RouterShortCore;
 use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
@@ -52,15 +52,22 @@ struct ShapeRequest {
 }
 
 fn shape(request: ShapeRequest) -> RouterShape {
-    RouterShape::new(
-        request.slots,
-        request.bank,
-        request.factors,
-        [0, 1, 2, 3, 4, 5],
-        request.word_slots,
-        request.log_outputs,
-        request.route,
-    )
+    RouterShape::new(RouterShapeRequest {
+        slots: request.slots,
+        bank: request.bank,
+        factors: request.factors,
+        word_slots: request.word_slots,
+        log_outputs: request.log_outputs,
+        route: request
+            .route
+            .into_iter()
+            .map(|(output, source, selector)| RouteEntry {
+                output,
+                source,
+                selector,
+            })
+            .collect(),
+    })
     .unwrap()
 }
 
@@ -313,7 +320,12 @@ impl ShortDefinition {
         let mut weights = Vec::new();
         for (shape, fold) in shapes.iter().zip(folds) {
             let mut weight = vec![ZERO; shape.fold_len()];
-            for &(output, source, selector) in shape.route() {
+            for &RouteEntry {
+                output,
+                source,
+                selector,
+            } in shape.route()
+            {
                 weight[table_index(shape, source, selector)] += equality(w, output);
             }
             let mut dense_w = Vec::with_capacity(summand.len());

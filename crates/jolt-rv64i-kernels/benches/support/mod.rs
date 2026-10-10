@@ -15,7 +15,7 @@ pub mod word;
 use std::error::Error as StdError;
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use jolt_field::{Field, F128};
 use jolt_rv64i_kernels::source::CycleSource;
@@ -210,17 +210,52 @@ fn warmed_pools(threads: &[usize]) -> Result<Vec<(usize, ThreadPool)>, RunnerErr
     Ok(pools)
 }
 
+/// Converts measured durations to nanoseconds per input cycle.
+#[derive(Clone, Copy)]
+pub struct CycleScale(usize);
+
+impl CycleScale {
+    /// Normalises durations using the measured source's cycle count.
+    pub fn durations<const N: usize>(self, values: [Duration; N]) -> [f64; N] {
+        values.map(|time| time.as_nanos() as f64 / self.0 as f64)
+    }
+}
+
 /// Measures one constructor and extraction callback over each profile and CLI size.
 /// The extraction receives the bound challenge point in low-variable-first order.
-#[expect(
-    clippy::print_stdout,
-    reason = "benchmark records are the runner's output contract"
-)]
 pub fn run_core<C, E, O>(
     bench: &str,
     profiles: &[SynthProfile],
     construct: impl Fn(Arc<SyntheticTrace>) -> Result<(C, F128), E> + Sync,
     extract: impl Fn(&C, &[F128]) -> Result<O, E> + Sync,
+) -> Result<(), RunnerError>
+where
+    C: ProveRounds<F128> + Send,
+    E: StdError,
+{
+    run_core_variants(
+        bench,
+        profiles,
+        &[("", ())],
+        |source, ()| construct(source),
+        extract,
+        |_, _, _| {},
+    )
+}
+
+/// Alternates variants forward and backward between samples, reporting diagnostics
+/// after both timing and allocation measurement end.
+#[expect(
+    clippy::print_stdout,
+    reason = "benchmark records are the runner's output contract"
+)]
+pub fn run_core_variants<C, E, O, V: Sync>(
+    bench: &str,
+    profiles: &[SynthProfile],
+    variants: &[(&str, V)],
+    construct: impl Fn(Arc<SyntheticTrace>, &V) -> Result<(C, F128), E> + Sync,
+    extract: impl Fn(&C, &[F128]) -> Result<O, E> + Sync,
+    report: impl Fn(&C, &O, CycleScale) + Sync,
 ) -> Result<(), RunnerError>
 where
     C: ProveRounds<F128> + Send,
@@ -242,59 +277,79 @@ where
                 let cycles = source.cycles();
                 let mut rng = ChaCha20Rng::seed_from_u64(0x726f_756e_6473);
                 let challenges: [F128; 256] = std::array::from_fn(|_| F128::random(&mut rng));
-                let mut samples = Vec::with_capacity(options.samples);
-                for _ in 0..options.samples {
-                    let sample = pool.install(|| {
-                        let measurement = AllocationMeasurement::begin();
-                        let start = Instant::now();
-                        let (mut core, mut claim) =
-                            construct(Arc::clone(&source)).map_err(|error| RunnerError::Core {
-                                message: error.to_string(),
-                            })?;
-                        let construct_ns = start.elapsed().as_nanos() as f64;
-                        let rounds = core.num_rounds();
-                        let point =
-                            challenges
-                                .get(..rounds)
-                                .ok_or(RunnerError::ChallengeCount {
-                                    rounds,
-                                    capacity: challenges.len(),
+                let mut samples: Vec<Vec<Sample>> = variants
+                    .iter()
+                    .map(|_| Vec::with_capacity(options.samples))
+                    .collect();
+                for sample_index in 0..options.samples {
+                    for offset in 0..variants.len() {
+                        let variant_index = if sample_index % 2 == 0 {
+                            offset
+                        } else {
+                            variants.len() - 1 - offset
+                        };
+                        let (variant_name, variant) = &variants[variant_index];
+                        let sample = pool.install(|| {
+                            let measurement = AllocationMeasurement::begin();
+                            let start = Instant::now();
+                            let (mut core, mut claim) = construct(Arc::clone(&source), variant)
+                                .map_err(|error| RunnerError::Core {
+                                    message: error.to_string(),
                                 })?;
-                        let start = Instant::now();
-                        let mut bind = None;
-                        for (round, &challenge) in point.iter().enumerate() {
-                            let message = core.prove_round(bind, round, claim)?;
-                            claim = message.evaluate(challenge);
-                            bind = Some(challenge);
-                            let _ = black_box(&message);
-                        }
-                        let rounds_ns = start.elapsed().as_nanos() as f64;
-                        let start = Instant::now();
-                        if let Some(challenge) = bind {
-                            core.finish_rounds(challenge)?;
-                        }
-                        let finish_ns = start.elapsed().as_nanos() as f64;
-                        let start = Instant::now();
-                        let values = extract(&core, point).map_err(|error| RunnerError::Core {
-                            message: error.to_string(),
+                            let construct_ns = start.elapsed().as_nanos() as f64;
+                            let rounds = core.num_rounds();
+                            let point =
+                                challenges
+                                    .get(..rounds)
+                                    .ok_or(RunnerError::ChallengeCount {
+                                        rounds,
+                                        capacity: challenges.len(),
+                                    })?;
+                            let start = Instant::now();
+                            let mut bind = None;
+                            for (round, &challenge) in point.iter().enumerate() {
+                                let message = core.prove_round(bind, round, claim)?;
+                                claim = message.evaluate(challenge);
+                                bind = Some(challenge);
+                                let _ = black_box(&message);
+                            }
+                            let rounds_ns = start.elapsed().as_nanos() as f64;
+                            let start = Instant::now();
+                            if let Some(challenge) = bind {
+                                core.finish_rounds(challenge)?;
+                            }
+                            let finish_ns = start.elapsed().as_nanos() as f64;
+                            let start = Instant::now();
+                            let values =
+                                extract(&core, point).map_err(|error| RunnerError::Core {
+                                    message: error.to_string(),
+                                })?;
+                            let _ = black_box(&values);
+                            let extract_ns = start.elapsed().as_nanos() as f64;
+                            let allocation = measurement.finish();
+                            report(&core, &values, CycleScale(cycles));
+                            Ok::<_, RunnerError>(Sample {
+                                times: [construct_ns, rounds_ns, finish_ns, extract_ns],
+                                allocation,
+                            })
                         })?;
-                        let _ = black_box(&values);
-                        let extract_ns = start.elapsed().as_nanos() as f64;
-                        let allocation = measurement.finish();
-                        Ok::<_, RunnerError>(Sample {
-                            times: [construct_ns, rounds_ns, finish_ns, extract_ns],
-                            allocation,
-                        })
-                    })?;
-                    samples.push(sample);
+                        samples[variant_index].push(sample);
+                        let _ = variant_name;
+                    }
                 }
-                let divisor = cycles as f64;
-                let phases: [Summary; 4] =
-                    std::array::from_fn(|phase| Sample::phase(&samples, phase, divisor));
-                let total = Sample::total(&samples, divisor);
-                let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
-                print!(
-                    "{bench}/{}/{log_t}/{threads} construct_ns={:.6} rounds_ns={:.6} finish_ns={:.6} extract_ns={:.6} total_ns={:.6} peak_bytes={} final_bytes={} allocs={}",
+                for ((variant_name, _), samples) in variants.iter().zip(&samples) {
+                    let record_name = if variant_name.is_empty() {
+                        bench.to_owned()
+                    } else {
+                        format!("{bench}/{variant_name}")
+                    };
+                    let divisor = cycles as f64;
+                    let phases: [Summary; 4] =
+                        std::array::from_fn(|phase| Sample::phase(samples, phase, divisor));
+                    let total = Sample::total(samples, divisor);
+                    let (peak_bytes, final_bytes, allocs) = Sample::allocations(samples);
+                    print!(
+                    "{record_name}/{}/{log_t}/{threads} construct_ns={:.6} rounds_ns={:.6} finish_ns={:.6} extract_ns={:.6} total_ns={:.6} peak_bytes={} final_bytes={} allocs={}",
                     profile.name(),
                     phases[0].median,
                     phases[1].median,
@@ -305,22 +360,23 @@ where
                     final_bytes,
                     allocs,
                 );
-                if options.samples > 1 {
-                    print!(
-                        " samples={} total_min_ns={:.6} total_max_ns={:.6}",
-                        options.samples, total.min, total.max
-                    );
-                    for (phase, summary) in ["construct", "rounds", "finish", "extract"]
-                        .iter()
-                        .zip(&phases)
-                    {
+                    if options.samples > 1 {
                         print!(
-                            " {phase}_min_ns={:.6} {phase}_max_ns={:.6}",
-                            summary.min, summary.max
+                            " samples={} total_min_ns={:.6} total_max_ns={:.6}",
+                            options.samples, total.min, total.max
                         );
+                        for (phase, summary) in ["construct", "rounds", "finish", "extract"]
+                            .iter()
+                            .zip(&phases)
+                        {
+                            print!(
+                                " {phase}_min_ns={:.6} {phase}_max_ns={:.6}",
+                                summary.min, summary.max
+                            );
+                        }
                     }
+                    println!();
                 }
-                println!();
             }
         }
     }
@@ -336,11 +392,29 @@ pub struct ProbeCase {
     pub minimum_threads: usize,
 }
 
+impl ProbeCase {
+    fn matches(&self, selection: &str) -> bool {
+        selection == self.unit
+            || selection
+                .strip_prefix(self.unit)
+                .and_then(|tail| tail.strip_prefix('/'))
+                .is_some_and(|prefix| self.variant.starts_with(prefix))
+    }
+}
+
 /// A preallocated operation stream. The runner times each pass once per sample.
 /// `operations` gives the count consumed by the one measured pass.
 pub trait ProbeKernel: Send {
     fn operations(&self) -> usize;
     fn run(&mut self) -> F128;
+    /// Consume pass results after the primary timer ends, for deferred lane merges.
+    fn finish_run(&mut self) -> F128 {
+        F128::from_raw(0)
+    }
+    /// Fraction of consecutive cycle updates addressing the same position bucket.
+    fn alias_rate(&self) -> Option<f64> {
+        None
+    }
     fn chain_terms(&self) -> Option<usize> {
         None
     }
@@ -357,6 +431,15 @@ pub struct ProbeRecord {
     pub id: String,
     pub median: f64,
     pub layout: Option<(usize, usize)>,
+    pub alias_rate: Option<f64>,
+}
+
+struct ProbeInfo {
+    operations: usize,
+    chain_terms: Option<usize>,
+    lookup_layout: Option<(usize, usize)>,
+    memory_layout: Option<(usize, usize)>,
+    alias_rate: Option<f64>,
 }
 
 /// Runs unit probes with warmed pools and resident sources excluded from timing.
@@ -366,7 +449,8 @@ pub struct ProbeRecord {
 /// fused-chain totals include their operand preparation.
 /// Allocation fields are maxima across samples and include construction; final
 /// bytes count the state still resident after its measured passes. Probe defaults
-/// are log_t=22, threads=1,12 and samples=5; `--units` selects case groups.
+/// are log_t=22, threads=1,12 and samples=5; `--units` selects units or
+/// unit/variant prefixes. Samples alternate forward and reverse case order.
 /// Fixed-size records run once per thread count under independent/fixed, without
 /// generating a trace. A source is built only when selected cases consume it.
 #[expect(
@@ -383,7 +467,7 @@ where
 {
     let options = Options::parse(true)?;
     for unit in &options.units {
-        if !cases.iter().any(|case| case.unit == unit) {
+        if !cases.iter().any(|case| case.matches(unit)) {
             return Err(RunnerError::InvalidValue {
                 option: "--units".to_owned(),
                 value: unit.clone(),
@@ -393,7 +477,7 @@ where
     let pools = warmed_pools(&options.threads)?;
     let mut records = Vec::new();
     let selected = |case: &&ProbeCase| {
-        options.units.is_empty() || options.units.iter().any(|unit| unit == case.unit)
+        options.units.is_empty() || options.units.iter().any(|unit| case.matches(unit))
     };
     for (threads, pool) in &pools {
         let mut settings = vec![None];
@@ -427,14 +511,19 @@ where
                 .transpose()?;
             let profile_name = setting.map_or("independent", |(profile, _)| profile.name());
             let log_t = setting.map_or_else(|| "fixed".to_owned(), |(_, log_t)| log_t.to_string());
-            for case in selected_cases {
-                let mut samples = Vec::with_capacity(options.samples);
-                let mut operations = 0;
-                let mut chain_terms = None;
-                let mut lookup_layout = None;
-                let mut memory_layout = None;
-                for _ in 0..options.samples {
-                    let (sample, (counts, terms, layout, memory)) = pool.install(|| {
+            let mut collected: Vec<Vec<(Sample, ProbeInfo)>> = selected_cases
+                .iter()
+                .map(|_| Vec::with_capacity(options.samples))
+                .collect();
+            for sample_index in 0..options.samples {
+                for step in 0..selected_cases.len() {
+                    let index = if sample_index % 2 == 0 {
+                        step
+                    } else {
+                        selected_cases.len() - 1 - step
+                    };
+                    let case = selected_cases[index];
+                    let sample = pool.install(|| {
                         let measurement = AllocationMeasurement::begin();
                         let start = Instant::now();
                         let mut kernel =
@@ -444,11 +533,14 @@ where
                                 }
                             })?;
                         let construct_ns = start.elapsed().as_nanos() as f64;
-                        let counts = kernel.operations();
-                        let terms = kernel.chain_terms();
-                        let layout = kernel.lookup_layout();
-                        let memory = kernel.memory_layout();
-                        if counts == 0 {
+                        let info = ProbeInfo {
+                            operations: kernel.operations(),
+                            chain_terms: kernel.chain_terms(),
+                            lookup_layout: kernel.lookup_layout(),
+                            memory_layout: kernel.memory_layout(),
+                            alias_rate: kernel.alias_rate(),
+                        };
+                        if info.operations == 0 {
                             return Err(RunnerError::WorkCount {
                                 variant: case.variant.clone(),
                             });
@@ -456,21 +548,27 @@ where
                         let start = Instant::now();
                         let _ = black_box(kernel.run());
                         let primary_ns = start.elapsed().as_nanos() as f64;
+                        let _ = black_box(kernel.finish_run());
                         let allocation = measurement.finish();
                         Ok::<_, RunnerError>((
                             Sample {
                                 times: [construct_ns, primary_ns, 0.0, 0.0],
                                 allocation,
                             },
-                            (counts, terms, layout, memory),
+                            info,
                         ))
                     })?;
-                    samples.push(sample);
-                    operations = counts;
-                    chain_terms = terms;
-                    lookup_layout = layout;
-                    memory_layout = memory;
+                    collected[index].push(sample);
                 }
+            }
+            for (case, collected) in selected_cases.iter().zip(collected) {
+                let info = &collected[collected.len() - 1].1;
+                let operations = info.operations;
+                let chain_terms = info.chain_terms;
+                let lookup_layout = info.lookup_layout;
+                let memory_layout = info.memory_layout;
+                let alias_rate = info.alias_rate;
+                let samples: Vec<_> = collected.into_iter().map(|(sample, _)| sample).collect();
                 let primary = Sample::phase(&samples, 1, operations as f64);
                 let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
                 let id = format!(
@@ -500,11 +598,15 @@ where
                         primary.median / terms as f64
                     );
                 }
+                if let Some(rate) = alias_rate {
+                    print!(" alias_rate={rate:.9}");
+                }
                 println!();
                 records.push(ProbeRecord {
                     id,
                     median: primary.median,
                     layout: memory_layout,
+                    alias_rate,
                 });
             }
         }

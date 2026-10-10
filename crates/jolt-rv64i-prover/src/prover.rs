@@ -63,10 +63,12 @@ fn prove_inner<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
         log_K_ram,
         witness.final_pc,
     )?;
-    if witness.bits.len() != 1_usize << checked.log_T() || witness.words.len() != witness.bits.len()
-    {
+    let expected = 1_usize << checked.log_T();
+    if witness.bits.len() != expected || witness.words.len() != expected {
         return Err(Rv64iProverError::RowCount {
-            rows: witness.bits.len(),
+            expected,
+            bits: witness.bits.len(),
+            words: witness.words.len(),
         });
     }
     if witness.layout.log_K_bytecode() != checked.log_K_bytecode()

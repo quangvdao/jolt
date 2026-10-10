@@ -116,9 +116,13 @@ pub fn base_word_with_lift(
     Polynomial::new(values)
 }
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let index = witness.layout.bytecode_index(bits);
     usize::try_from(index)
         .ok()

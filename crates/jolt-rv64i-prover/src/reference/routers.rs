@@ -24,9 +24,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let index = witness.layout.bytecode_index(bits);
     usize::try_from(index)
         .ok()
@@ -41,12 +45,20 @@ fn source_bank(
     cycle: usize,
     values: &mut [F128],
 ) -> Result<(), Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
-    let words = witness.words.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.words.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
+    let words = witness
+        .words
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.words.len(),
+        })?;
     let row = fetched(witness, cycle)?;
     let bank_words: &[u64] = match router {
         Router::Variant => &[
@@ -109,9 +121,13 @@ fn selector_bank(
     values: &mut [F128],
 ) -> Result<(), Rv64iProverError> {
     let row = fetched(witness, cycle)?;
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let pos = usize::from(witness.layout.pos(bits));
     let selected = row.variant.and_then(|variant| match router {
         Router::Variant => Some(variant.index()),
@@ -148,7 +164,9 @@ pub fn fold(
     let weights = equality_table(r_1)?;
     if weights.len() != witness.bits.len() {
         return Err(Rv64iProverError::RowCount {
-            rows: witness.bits.len(),
+            expected: weights.len(),
+            bits: witness.bits.len(),
+            words: witness.words.len(),
         });
     }
     let source_size = 1 << source_slots(router).len();

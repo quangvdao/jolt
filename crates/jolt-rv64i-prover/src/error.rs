@@ -40,8 +40,14 @@ pub enum Rv64iProverError {
     Bytecode(#[from] BytecodeError),
     #[error(transparent)]
     MemoryLayout(#[from] MemoryLayoutError),
-    #[error("witness row count {rows} is not a nonzero power of two")]
-    RowCount { rows: usize },
+    #[error(
+        "witness has {bits} bit rows and {words} word rows, expected {expected} rows in each table"
+    )]
+    RowCount {
+        expected: usize,
+        bits: usize,
+        words: usize,
+    },
     #[error("cycle {cycle} selects an invalid bytecode index {index}")]
     InvalidBytecode { cycle: usize, index: u64 },
     #[error("cycle {cycle} has multiple stored indicators in chunk {start}")]
@@ -102,6 +108,8 @@ pub enum Rv64iProverError {
         #[source]
         source: Box<Rv64iProverError>,
     },
+    #[error("cycle {cycle} is absent from a witness table of {rows} rows")]
+    CycleIndex { cycle: usize, rows: usize },
 }
 
 impl Rv64iProverError {

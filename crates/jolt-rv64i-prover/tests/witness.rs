@@ -17,9 +17,11 @@ use common::{
 use jolt_field::{One, Zero, F128};
 use jolt_rv64i_arith::{BitsRow, CycleFacts, Layout};
 use jolt_rv64i_prover::{
+    backend::Rv64iBackend,
     commitment::transparent::TransparentBits,
     error::{FactField, Rv64iProverError},
     plane::Rv64iWitness,
+    prover::{prove, ProverPreprocessing},
     reference::views::{base_word_with_lift, ram_val_final_with_lift, BaseWord},
 };
 use jolt_rv64i_verifier::{
@@ -350,4 +352,27 @@ fn constructors_return_a_typed_error_for_unallocatable_ram() {
         Rv64iWitness::synthetic(1, layout, bytecode, &memory, vec![], 1),
         Err(Rv64iProverError::RamAllocation { log_K_ram: 47, .. })
     ));
+}
+
+#[test]
+fn prove_admission_reports_the_required_length_and_both_witness_lengths() {
+    let (statement, verifier, witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier,
+        scheme: (),
+    };
+    let backend = Rv64iBackend::reference();
+    for (bits, words) in [(63, 63), (32, 32), (64, 63)] {
+        let mut changed = witness.clone();
+        changed.bits = witness.bits[..bits].iter().copied().collect();
+        changed.words = witness.words[..words].iter().copied().collect();
+        assert!(matches!(
+            prove(&preprocessing, &statement, &changed, &backend),
+            Err(Rv64iProverError::RowCount {
+                expected: 64,
+                bits: found_bits,
+                words: found_words,
+            }) if found_bits == bits && found_words == words
+        ));
+    }
 }

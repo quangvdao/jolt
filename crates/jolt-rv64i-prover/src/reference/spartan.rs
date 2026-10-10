@@ -21,9 +21,13 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 
 fn row(witness: &Rv64iWitness, cycle: usize) -> Result<WitnessRow, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let index = witness.layout.bytecode_index(bits);
     let fetched = usize::try_from(index)
         .ok()
@@ -32,9 +36,13 @@ fn row(witness: &Rv64iWitness, cycle: usize) -> Result<WitnessRow, Rv64iProverEr
     let variant = fetched
         .variant
         .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
-    let words = witness.words.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.words.len(),
-    })?;
+    let words = witness
+        .words
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.words.len(),
+        })?;
     let base = words.base_words(variant.is_store(), witness.layout.inc(bits));
     Ok(WitnessRow::compute(&witness.layout, fetched, &base, bits))
 }

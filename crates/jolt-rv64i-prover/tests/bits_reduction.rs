@@ -184,7 +184,11 @@ fn witness_reads_follow_the_replayed_pre_state_and_reject_noncanonical_rows() {
     };
     assert!(matches!(
         build(vec![[0; 4]; 3].into(), vec![]),
-        Err(Rv64iProverError::RowCount { rows: 3 })
+        Err(Rv64iProverError::RowCount {
+            expected: 4,
+            bits: 3,
+            words: 0
+        })
     ));
     for memory in [
         vec![(0, 0)],

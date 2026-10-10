@@ -39,7 +39,7 @@ jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true
 
 [[test]]
-name = "bits_reduction"
+name = "bytecode"
 required-features = ["test-utils"]
 
 [[test]]

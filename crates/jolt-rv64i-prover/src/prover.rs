@@ -31,17 +31,27 @@ pub fn prove<S: BitsCommitmentProver>(
     witness: &Rv64iWitness,
     backend: &Rv64iBackend<F128>,
 ) -> Result<Rv64iProof<S>, Rv64iProverError> {
-    prove_with_transcript::<S, Rv64iTranscript>(preprocessing, backend, statement, witness)
+    prove_inner::<S, Rv64iTranscript>(preprocessing, statement, witness, backend)
         .map(|(proof, _)| proof)
 }
 
 /// Proves the checked statement using the witness's RAM exponent and final PC.
 /// Checks row count, layout and initial RAM before commitment; public outputs remain protocol obligations.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn prove_with_transcript<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
     preprocessing: &ProverPreprocessing<S>,
-    backend: &Rv64iBackend,
     statement: &Statement,
     witness: &Rv64iWitness,
+    backend: &Rv64iBackend,
+) -> Result<(Rv64iProof<S>, T), Rv64iProverError> {
+    prove_inner(preprocessing, statement, witness, backend)
+}
+
+fn prove_inner<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
+    preprocessing: &ProverPreprocessing<S>,
+    statement: &Statement,
+    witness: &Rv64iWitness,
+    backend: &Rv64iBackend,
 ) -> Result<(Rv64iProof<S>, T), Rv64iProverError> {
     let log_K_ram =
         u8::try_from(witness.layout.log_K_ram()).map_err(|_| Rv64iProverError::RamDimension {

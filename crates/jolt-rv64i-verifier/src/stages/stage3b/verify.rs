@@ -173,30 +173,39 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     verify_converted(proof, transcript, inputs)
 }
 
-/// Verifies the cycle batch from converted short folds and low-variable-first points.
-/// The inputs must come from stages 1 and 3a; failed equations return a stage-3b error.
-pub fn verify_converted<T: Transcript<Challenge = F128>>(
-    proof: &BatchProof<RouterCycleValues>,
-    transcript: &mut T,
-    inputs: Inputs,
-) -> Result<Output, Rv64iVerifierError> {
-    let Inputs {
-        batch: sumchecks,
-        claims: inputs,
-        points: input_points,
-    } = inputs;
-    let challenges = sumchecks.draw_challenges(transcript)?;
-    let claims = expand(&proof.values);
-    sumchecks.validate_output_claims(&claims)?;
-    let points = sumchecks.verify_clear(
-        &inputs,
-        &input_points,
-        &challenges,
-        &claims,
-        &proof.rounds,
-        transcript,
-        3,
-    )?;
-    sumchecks.append_output_claims(transcript, &claims);
-    Ok(Output { claims, points })
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_converted;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_converted;
+
+mod converted {
+    use super::*;
+
+    /// Verifies the cycle batch from converted short folds and low-variable-first points.
+    /// The inputs must come from stages 1 and 3a; failed equations return a stage-3b error.
+    pub fn verify_converted<T: Transcript<Challenge = F128>>(
+        proof: &BatchProof<RouterCycleValues>,
+        transcript: &mut T,
+        inputs: Inputs,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let Inputs {
+            batch: sumchecks,
+            claims: inputs,
+            points: input_points,
+        } = inputs;
+        let challenges = sumchecks.draw_challenges(transcript)?;
+        let claims = expand(&proof.values);
+        sumchecks.validate_output_claims(&claims)?;
+        let points = sumchecks.verify_clear(
+            &inputs,
+            &input_points,
+            &challenges,
+            &claims,
+            &proof.rounds,
+            transcript,
+            3,
+        )?;
+        sumchecks.append_output_claims(transcript, &claims);
+        Ok(Output { claims, points })
+    }
 }

@@ -166,21 +166,30 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     )
 }
 
-/// Runs the same verification from converted low-variable-first inputs.
-/// Batch-local callers establish bounds through `Stage4Sumchecks::new` before drawing member challenges.
-pub fn verify_inputs<T: Transcript<Challenge = F128>>(
-    batch: &Stage4Sumchecks<F128>,
-    proof: &BatchProof<ReadCheckingValues>,
-    transcript: &mut T,
-    inputs: &Stage4InputClaims<F128>,
-    input_points: &Stage4InputPoints<F128>,
-) -> Result<Output, Rv64iVerifierError> {
-    let challenges = batch.draw_challenges(transcript)?;
-    let points = batch.verify(inputs, input_points, &challenges, proof, transcript)?;
-    Ok(Output {
-        claims: Stage4OutputClaims::from_wire(&proof.values),
-        points,
-    })
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_inputs;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_inputs;
+
+mod converted {
+    use super::*;
+
+    /// Runs the same verification from converted low-variable-first inputs.
+    /// Batch-local callers establish bounds through `Stage4Sumchecks::new` before drawing member challenges.
+    pub fn verify_inputs<T: Transcript<Challenge = F128>>(
+        batch: &Stage4Sumchecks<F128>,
+        proof: &BatchProof<ReadCheckingValues>,
+        transcript: &mut T,
+        inputs: &Stage4InputClaims<F128>,
+        input_points: &Stage4InputPoints<F128>,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let challenges = batch.draw_challenges(transcript)?;
+        let points = batch.verify(inputs, input_points, &challenges, proof, transcript)?;
+        Ok(Output {
+            claims: Stage4OutputClaims::from_wire(&proof.values),
+            points,
+        })
+    }
 }
 
 impl Stage4OutputClaims<F128> {

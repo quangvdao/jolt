@@ -197,9 +197,9 @@ fn commitment_lifecycle_binds_its_challenges_before_front_end_draws_and_checks_a
     };
     let (proof, prover) = prove_with_transcript::<LifecycleBits, Rv64iTranscript>(
         &preprocessing,
-        &Rv64iBackend::reference(),
         &statement,
         &witness,
+        &Rv64iBackend::reference(),
     )
     .unwrap();
     let verifier = verify_with_transcript::<LifecycleBits, Rv64iTranscript>(

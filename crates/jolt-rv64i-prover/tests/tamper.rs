@@ -39,9 +39,9 @@ fn fixture() -> (Statement, ProverPreprocessing<TransparentBits>, Proof) {
     };
     let (proof, _) = prove_with_transcript::<TransparentBits, Rv64iTranscript>(
         &preprocessing,
-        &Rv64iBackend::reference(),
         &statement,
         &witness,
+        &Rv64iBackend::reference(),
     )
     .unwrap();
     (statement, preprocessing, proof)
@@ -418,9 +418,9 @@ fn columns_must_be_absorbed_before_drawing_the_opening_point() {
     };
     let (mut proof, recorded) = prove_with_transcript::<PointBoundBits, RecordedTranscript>(
         &preprocessing,
-        &Rv64iBackend::reference(),
         &statement,
         &witness,
+        &Rv64iBackend::reference(),
     )
     .unwrap();
     let checked = CheckedInputs::new(&preprocessing.verifier, &statement, &proof).unwrap();

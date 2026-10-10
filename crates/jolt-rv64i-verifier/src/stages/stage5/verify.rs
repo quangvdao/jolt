@@ -102,28 +102,37 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     )
 }
 
-/// Verifies the same batch from already converted low-variable-first inputs.
-/// Batch-local callers establish the point bounds with `Stage5Sumchecks::new`.
-pub fn verify_inputs<T: Transcript<Challenge = F128>>(
-    batch: &Stage5Sumchecks<F128>,
-    proof: &BatchProof<ValEvaluationValues>,
-    transcript: &mut T,
-    inputs: &Stage5InputClaims<F128>,
-    input_points: &Stage5InputPoints<F128>,
-) -> Result<Output, Rv64iVerifierError> {
-    let challenges = batch.draw_challenges(transcript)?;
-    let claims = proof.values.expand();
-    let points = batch.verify_clear(
-        inputs,
-        input_points,
-        &challenges,
-        &claims,
-        &proof.rounds,
-        transcript,
-        5,
-    )?;
-    batch.append_output_claims(transcript, &claims);
-    Ok(Output { claims, points })
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_inputs;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_inputs;
+
+mod converted {
+    use super::*;
+
+    /// Verifies the same batch from already converted low-variable-first inputs.
+    /// Batch-local callers establish the point bounds with `Stage5Sumchecks::new`.
+    pub fn verify_inputs<T: Transcript<Challenge = F128>>(
+        batch: &Stage5Sumchecks<F128>,
+        proof: &BatchProof<ValEvaluationValues>,
+        transcript: &mut T,
+        inputs: &Stage5InputClaims<F128>,
+        input_points: &Stage5InputPoints<F128>,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let challenges = batch.draw_challenges(transcript)?;
+        let claims = proof.values.expand();
+        let points = batch.verify_clear(
+            inputs,
+            input_points,
+            &challenges,
+            &claims,
+            &proof.rounds,
+            transcript,
+            5,
+        )?;
+        batch.append_output_claims(transcript, &claims);
+        Ok(Output { claims, points })
+    }
 }
 
 fn term_error(error: PointsError) -> VerifierError {

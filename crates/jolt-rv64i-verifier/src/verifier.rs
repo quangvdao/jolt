@@ -18,12 +18,21 @@ pub fn verify<S: BitsCommitmentScheme>(
     statement: &Statement,
     proof: &Rv64iProof<S>,
 ) -> Result<(), Rv64iVerifierError> {
-    verify_with_transcript::<S, Rv64iTranscript>(preprocessing, statement, proof).map(|_| ())
+    verify_inner::<S, Rv64iTranscript>(preprocessing, statement, proof).map(|_| ())
 }
 
 /// Checks the statement and proof shape before starting the protocol transcript.
 /// Returns its final state on acceptance, or the first statement, batch or commitment error.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn verify_with_transcript<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
+    preprocessing: &VerifierPreprocessing<S>,
+    statement: &Statement,
+    proof: &Rv64iProof<S>,
+) -> Result<T, Rv64iVerifierError> {
+    verify_inner(preprocessing, statement, proof)
+}
+
+fn verify_inner<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     preprocessing: &VerifierPreprocessing<S>,
     statement: &Statement,
     proof: &Rv64iProof<S>,

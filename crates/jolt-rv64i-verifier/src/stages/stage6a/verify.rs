@@ -131,35 +131,44 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     )
 }
 
-/// Verifies the constructed member and consumed cells; this is the batch-local entry depth.
-pub fn verify_inputs<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
-    checked: &CheckedInputs<'_, S>,
-    proof: &BatchProof<BytecodeAddressValue>,
-    transcript: &mut T,
-    inputs: Inputs,
-) -> Result<Output, Rv64iVerifierError> {
-    let Inputs {
-        batch,
-        claims: inputs,
-        points: input_points,
-    } = inputs;
-    let challenges = batch.draw_challenges(transcript)?;
-    let output_values = Stage6aOutputClaims {
-        bytecode_read_address: BytecodeReadAddressOutputClaims {
-            address_claim: proof.values.address_claim,
-        },
-    };
-    let output_points = batch.verify_clear(
-        &inputs,
-        &input_points,
-        &challenges,
-        &output_values,
-        &proof.rounds,
-        transcript,
-        6,
-    )?;
-    batch.append_output_claims(transcript, &output_values);
-    finish(checked, &batch, output_values, output_points, &challenges)
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_inputs;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_inputs;
+
+mod converted {
+    use super::*;
+
+    /// Verifies the constructed member and consumed cells; this is the batch-local entry depth.
+    pub fn verify_inputs<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
+        checked: &CheckedInputs<'_, S>,
+        proof: &BatchProof<BytecodeAddressValue>,
+        transcript: &mut T,
+        inputs: Inputs,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let Inputs {
+            batch,
+            claims: inputs,
+            points: input_points,
+        } = inputs;
+        let challenges = batch.draw_challenges(transcript)?;
+        let output_values = Stage6aOutputClaims {
+            bytecode_read_address: BytecodeReadAddressOutputClaims {
+                address_claim: proof.values.address_claim,
+            },
+        };
+        let output_points = batch.verify_clear(
+            &inputs,
+            &input_points,
+            &challenges,
+            &output_values,
+            &proof.rounds,
+            transcript,
+            6,
+        )?;
+        batch.append_output_claims(transcript, &output_values);
+        finish(checked, &batch, output_values, output_points, &challenges)
+    }
 }
 
 /// Computes the public folds once after an accepted address batch, for both stage drivers.

@@ -39,9 +39,9 @@ fn counting_loop_end_to_end() {
     };
     let (proof, prover) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &Rv64iBackend::reference(),
         &statement,
         &witness,
+        &Rv64iBackend::reference(),
     )
     .unwrap();
     let verifier = verify_with_transcript::<TransparentBits, RecordedTranscript>(
@@ -97,9 +97,9 @@ fn run_program(program: Program, log_T: u8) -> HashSet<Variant> {
     let start = Instant::now();
     let (proof, prover) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &statement,
         &witness,
+        &backend,
     )
     .unwrap();
     let prove_time = start.elapsed();
@@ -175,18 +175,18 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
     let backend = Rv64iBackend::reference();
     let (proof, _) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &statement,
         &witness,
+        &backend,
     )
     .unwrap();
     let mut changed = statement;
     changed.device.outputs[0] ^= 1;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &changed,
         &witness,
+        &backend,
     )
     .err()
     .unwrap();
@@ -219,17 +219,17 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
     let backend = Rv64iBackend::reference();
     let (proof, _) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &changed,
         &witness,
+        &backend,
     )
     .unwrap();
     changed.device.panic = false;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &changed,
         &witness,
+        &backend,
     )
     .err()
     .unwrap();
@@ -255,17 +255,17 @@ fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
     let backend = Rv64iBackend::reference();
     let (proof, _) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &changed,
         &witness,
+        &backend,
     )
     .unwrap();
     changed.entry_pc += 4;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &backend,
         &changed,
         &witness,
+        &backend,
     )
     .err()
     .unwrap();

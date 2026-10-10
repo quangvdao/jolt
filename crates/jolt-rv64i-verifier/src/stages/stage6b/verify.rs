@@ -137,56 +137,65 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     verify_inputs(checked, proof, transcript, inputs, state, opening_proof)
 }
 
-/// Verifies the same constructed terminal members for batch-local independently evaluated inputs.
-pub fn verify_inputs<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
-    checked: &CheckedInputs<'_, S>,
-    proof: &BatchProof<BitsColumns>,
-    transcript: &mut T,
-    inputs: Inputs,
-    state: S::VerifierState,
-    opening_proof: &S::OpeningProof,
-) -> Result<Output, Rv64iVerifierError> {
-    if proof.values.0.len() != BITS_COLUMNS {
-        return Err(Rv64iVerifierError::ProofShape(ProofDecodeError::ProofShape));
-    }
-    let Inputs {
-        batch,
-        claims: inputs,
-        points: input_points,
-    } = inputs;
-    let claims = batch.expand(&proof.values.0)?;
-    let challenges = batch.draw_challenges(transcript)?;
-    let points = batch.verify_clear(
-        &inputs,
-        &input_points,
-        &challenges,
-        &claims,
-        &proof.rounds,
-        transcript,
-        6,
-    )?;
-    let point = points
-        .bits_reduction
-        .columns
-        .into_iter()
-        .next()
-        .ok_or(Rv64iVerifierError::ProofShape(ProofDecodeError::ProofShape))?;
-    batch.append_output_claims(transcript, &claims);
-    let rho = transcript.challenge_vector(8);
-    S::verify_opening(
-        checked.preprocessing().scheme(),
-        state,
-        &BitsOpening {
-            geometry: BitsGeometry {
-                log_T: checked.log_T(),
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_inputs;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_inputs;
+
+mod converted {
+    use super::*;
+
+    /// Verifies the same constructed terminal members for batch-local independently evaluated inputs.
+    pub fn verify_inputs<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
+        checked: &CheckedInputs<'_, S>,
+        proof: &BatchProof<BitsColumns>,
+        transcript: &mut T,
+        inputs: Inputs,
+        state: S::VerifierState,
+        opening_proof: &S::OpeningProof,
+    ) -> Result<Output, Rv64iVerifierError> {
+        if proof.values.0.len() != BITS_COLUMNS {
+            return Err(Rv64iVerifierError::ProofShape(ProofDecodeError::ProofShape));
+        }
+        let Inputs {
+            batch,
+            claims: inputs,
+            points: input_points,
+        } = inputs;
+        let claims = batch.expand(&proof.values.0)?;
+        let challenges = batch.draw_challenges(transcript)?;
+        let points = batch.verify_clear(
+            &inputs,
+            &input_points,
+            &challenges,
+            &claims,
+            &proof.rounds,
+            transcript,
+            6,
+        )?;
+        let point = points
+            .bits_reduction
+            .columns
+            .into_iter()
+            .next()
+            .ok_or(Rv64iVerifierError::ProofShape(ProofDecodeError::ProofShape))?;
+        batch.append_output_claims(transcript, &claims);
+        let rho = transcript.challenge_vector(8);
+        S::verify_opening(
+            checked.preprocessing().scheme(),
+            state,
+            &BitsOpening {
+                geometry: BitsGeometry {
+                    log_T: checked.log_T(),
+                },
+                column_point: &rho,
+                cycle_point: &point,
+                columns: &proof.values.0,
             },
-            column_point: &rho,
-            cycle_point: &point,
-            columns: &proof.values.0,
-        },
-        opening_proof,
-        transcript,
-    )
-    .map_err(|error| Rv64iVerifierError::Opening(Box::new(error)))?;
-    Ok(Output { point })
+            opening_proof,
+            transcript,
+        )
+        .map_err(|error| Rv64iVerifierError::Opening(Box::new(error)))?;
+        Ok(Output { point })
+    }
 }

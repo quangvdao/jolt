@@ -214,9 +214,9 @@ fn complete_transcript_has_the_prescribed_counts_and_terminal_draw_order() {
     };
     let (proof, prover) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &Rv64iBackend::reference(),
         &statement,
         &witness,
+        &Rv64iBackend::reference(),
     )
     .unwrap();
     let verified = verify_with_transcript::<TransparentBits, RecordedTranscript>(

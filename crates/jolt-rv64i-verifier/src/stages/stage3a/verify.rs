@@ -112,36 +112,45 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     verify_converted(proof, transcript, inputs)
 }
 
-/// Verifies the same short batch from already converted low-variable-first inputs.
-/// The caller must derive them from the stage-2 cell; failed equations return a stage-3a error.
-pub fn verify_converted<T: Transcript<Challenge = F128>>(
-    proof: &BatchProof<RouterFoldValues>,
-    transcript: &mut T,
-    inputs: Inputs,
-) -> Result<Output, Rv64iVerifierError> {
-    let Inputs {
-        batch,
-        claims: inputs,
-        points: input_points,
-    } = inputs;
-    let challenges = batch.draw_challenges(transcript)?;
-    let claims = expand(&proof.values);
-    batch.validate_output_claims(&claims)?;
-    let points = batch.verify_clear(
-        &inputs,
-        &input_points,
-        &challenges,
-        &claims,
-        &proof.rounds,
-        transcript,
-        3,
-    )?;
-    batch.append_output_claims(transcript, &claims);
-    Output::new(claims, points).map_err(|error| {
-        VerifierError::StageClaimSumcheckFailed {
-            stage: "Stage3a".to_owned(),
-            reason: error.to_string(),
-        }
-        .into()
-    })
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_converted;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_converted;
+
+mod converted {
+    use super::*;
+
+    /// Verifies the same short batch from already converted low-variable-first inputs.
+    /// The caller must derive them from the stage-2 cell; failed equations return a stage-3a error.
+    pub fn verify_converted<T: Transcript<Challenge = F128>>(
+        proof: &BatchProof<RouterFoldValues>,
+        transcript: &mut T,
+        inputs: Inputs,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let Inputs {
+            batch,
+            claims: inputs,
+            points: input_points,
+        } = inputs;
+        let challenges = batch.draw_challenges(transcript)?;
+        let claims = expand(&proof.values);
+        batch.validate_output_claims(&claims)?;
+        let points = batch.verify_clear(
+            &inputs,
+            &input_points,
+            &challenges,
+            &claims,
+            &proof.rounds,
+            transcript,
+            3,
+        )?;
+        batch.append_output_claims(transcript, &claims);
+        Output::new(claims, points).map_err(|error| {
+            VerifierError::StageClaimSumcheckFailed {
+                stage: "Stage3a".to_owned(),
+                reason: error.to_string(),
+            }
+            .into()
+        })
+    }
 }

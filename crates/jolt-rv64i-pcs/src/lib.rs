@@ -13,3 +13,5 @@ mod arch;
 pub mod bridge;
 #[forbid(unsafe_code)]
 pub mod merkle;
+#[forbid(unsafe_code)]
+pub mod ntt;

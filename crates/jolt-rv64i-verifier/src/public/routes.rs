@@ -347,8 +347,8 @@ impl RouteTensors {
         let restricted = restriction(router, x)?;
         let source_len = source_slots(router).len();
         let (source, selector) = restricted.split_at(source_len);
-        let sources = equality_table(source)?;
-        let selectors = equality_table(selector)?;
+        let sources = points::equality_table(source)?;
+        let selectors = points::equality_table(selector)?;
         let mut sum = F::zero();
         for entry in self.entries(router) {
             let c = columns
@@ -375,15 +375,6 @@ impl RouteTensors {
         }
         Ok(sum)
     }
-}
-pub(crate) fn equality_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    let (low, high) = point.split_at(point.len().min(6));
-    let low = points::eq_table(low)?;
-    let high = points::eq_table(high)?;
-    Ok(high
-        .into_iter()
-        .flat_map(|h| low.iter().map(move |l| *l * h))
-        .collect())
 }
 struct Builder<'a> {
     layout: &'a Layout,

@@ -4,6 +4,10 @@
     reason = "invalid fixtures fail the enclosing test"
 )]
 
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 
 use common::{
@@ -13,13 +17,18 @@ use common::{
 use jolt_field::{One, Zero, F128};
 use jolt_rv64i_arith::{BitsRow, CycleFacts, Layout};
 use jolt_rv64i_prover::{
+    backend::Rv64iBackend,
     commitment::transparent::TransparentBits,
     error::{FactField, Rv64iProverError},
     plane::Rv64iWitness,
-    reference::views::{base_word, ram_val_final, BaseWord},
+    prover::{prove, ProverPreprocessing},
+    reference::views::{base_word_with_lift, ram_val_final_with_lift, BaseWord},
 };
-use jolt_rv64i_verifier::{preprocessing::VerifierPreprocessing, statement::CheckedInputs};
+use jolt_rv64i_verifier::{
+    points::WordLift, preprocessing::VerifierPreprocessing, statement::CheckedInputs,
+};
 use std::sync::Arc;
+use support::replay::State;
 
 #[test]
 fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
@@ -32,10 +41,10 @@ fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
         witness.initial_ram.clone(),
     )
     .unwrap();
-    let initial = support::replay::State {
+    let initial = State {
         pc: RAM_START_ADDRESS,
         ram: witness.initial_ram.iter().copied().collect(),
-        ..support::replay::State::default()
+        ..State::default()
     };
     let replay = support::replay::replay(
         &rebuilt.layout,
@@ -87,36 +96,14 @@ fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
         (0, 0, 0)
     );
     assert_eq!(rebuilt.words[0].ram_read_value, 0x3412);
-    let word = base_word(&rebuilt, BaseWord::RamReadValue, &[F128::zero(); 6]).unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::zero());
-    let word = base_word(
-        &rebuilt,
-        BaseWord::RamReadValue,
-        &[
-            F128::zero(),
-            F128::one(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::zero());
-    let word = base_word(
-        &rebuilt,
-        BaseWord::RamReadValue,
-        &[
-            F128::one(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::one());
+    let read_bit = |point: [F128; 6]| {
+        let lift = WordLift::new(&point).unwrap();
+        base_word_with_lift(&rebuilt, BaseWord::RamReadValue, &lift).evaluate(&[F128::zero(); 6])
+    };
+    let (zero, one) = (F128::zero(), F128::one());
+    assert_eq!(read_bit([zero; 6]), zero);
+    assert_eq!(read_bit([zero, one, zero, zero, zero, zero]), zero);
+    assert_eq!(read_bit([one, zero, zero, zero, zero, zero]), one);
 }
 
 #[test]
@@ -184,7 +171,7 @@ fn load_facts_reject_ram_pre_values_and_register_reads_before_row_generation() {
         (RAM_START_ADDRESS + 12, support::asm::jal(0, 0)),
     ];
     let bytecode = Arc::new(support::harness::bytecode(&program, &layout));
-    let mut initial = support::replay::State::new(RAM_START_ADDRESS);
+    let mut initial = State::new(RAM_START_ADDRESS);
     initial.set_ram_word(0, 0x3412);
     let mut machine = support::harness::machine(&program, &layout, &initial);
     let facts: Vec<_> = (0..4)
@@ -292,7 +279,7 @@ fn output_check_names_the_first_public_word_and_rejects_layout_mismatch() {
         })
     ));
     assert!(matches!(
-        ram_val_final(&wrong_ram, &[F128::zero(); 6]),
+        ram_val_final_with_lift(&wrong_ram, &WordLift::new(&[F128::zero(); 6]).unwrap()),
         Err(Rv64iProverError::FinalRamLength {
             expected: 32,
             found: 31
@@ -365,4 +352,27 @@ fn constructors_return_a_typed_error_for_unallocatable_ram() {
         Rv64iWitness::synthetic(1, layout, bytecode, &memory, vec![], 1),
         Err(Rv64iProverError::RamAllocation { log_K_ram: 47, .. })
     ));
+}
+
+#[test]
+fn prove_admission_reports_the_required_length_and_both_witness_lengths() {
+    let (statement, verifier, witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier,
+        scheme: (),
+    };
+    let backend = Rv64iBackend::reference();
+    for (bits, words) in [(63, 63), (32, 32), (64, 63)] {
+        let mut changed = witness.clone();
+        changed.bits = witness.bits[..bits].iter().copied().collect();
+        changed.words = witness.words[..words].iter().copied().collect();
+        assert!(matches!(
+            prove(&preprocessing, &statement, &changed, &backend),
+            Err(Rv64iProverError::RowCount {
+                expected: 64,
+                bits: found_bits,
+                words: found_words,
+            }) if found_bits == bits && found_words == words
+        ));
+    }
 }

@@ -88,4 +88,19 @@ pub enum Rv64iVerifierError {
     CommitPhase(#[source] Box<dyn StdError + Send + Sync>),
     #[error("Bits opening failed: {0}")]
     Opening(#[source] Box<dyn StdError + Send + Sync>),
+    #[error("batch {batch} failed: {source}")]
+    Batch {
+        batch: &'static str,
+        #[source]
+        source: Box<Rv64iVerifierError>,
+    },
+}
+
+impl Rv64iVerifierError {
+    pub(crate) fn in_batch(self, batch: &'static str) -> Self {
+        Self::Batch {
+            batch,
+            source: Box::new(self),
+        }
+    }
 }

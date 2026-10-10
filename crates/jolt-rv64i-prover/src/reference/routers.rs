@@ -7,13 +7,13 @@ use jolt_claims::{Source, SymbolicSumcheck};
 use jolt_field::{One, Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
-use jolt_poly::{BindingOrder, EqPolynomial, Polynomial};
+use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow};
 use jolt_rv64i_verifier::ids::{
     CommittedPolynomial, DerivedId, OpeningId, RelationId, Router, RouterCycleDerived,
     RouterShortDerived, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, to_high_to_low, PointsError};
+use jolt_rv64i_verifier::points::{eq_index, equality_table, PointsError, WordLift};
 use jolt_rv64i_verifier::public::routes::{projected_index, selector_slots, source_slots, ROUTERS};
 use jolt_rv64i_verifier::stages::stage3a::RouterShort;
 use jolt_rv64i_verifier::stages::stage3b::{
@@ -21,21 +21,16 @@ use jolt_rv64i_verifier::stages::stage3b::{
 };
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use std::collections::{BTreeMap, BTreeSet};
-
-fn equality_table(point: &[F128]) -> Result<Vec<F128>, PointsError> {
-    if point.len() >= usize::BITS as usize {
-        return Err(PointsError::Dimension {
-            expected: usize::BITS as usize - 1,
-            actual: point.len(),
-        });
-    }
-    Ok(EqPolynomial::new(to_high_to_low(point)).evaluations())
-}
+use std::fmt::Display;
 
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let index = witness.layout.bytecode_index(bits);
     usize::try_from(index)
         .ok()
@@ -48,16 +43,25 @@ fn source_bank(
     witness: &Rv64iWitness,
     router: Router,
     cycle: usize,
-) -> Result<Vec<F128>, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
-    let words = witness.words.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.words.len(),
-    })?;
+    values: &mut [F128],
+) -> Result<(), Rv64iProverError> {
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
+    let words = witness
+        .words
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.words.len(),
+        })?;
     let row = fetched(witness, cycle)?;
-    let bank_words = match router {
-        Router::Variant => vec![
+    let bank_words: &[u64] = match router {
+        Router::Variant => &[
             words.rs1_value,
             words.rs2_value,
             words.rd_pre_value,
@@ -68,13 +72,13 @@ fn source_bank(
             words.next_pc,
             witness.layout.inc(bits),
         ],
-        Router::Shift => vec![words.rs1_value],
-        Router::Memory => vec![words.ram_read_value, words.rs2_value],
-        Router::Compare => vec![words.rs1_value, words.rs2_value, row.imm],
-        Router::Branch => vec![row.fall_through_pc, row.pc_plus_imm],
+        Router::Shift => &[words.rs1_value],
+        Router::Memory => &[words.ram_read_value, words.rs2_value],
+        Router::Compare => &[words.rs1_value, words.rs2_value, row.imm],
+        Router::Branch => &[row.fall_through_pc, row.pc_plus_imm],
     };
-    let mut values = vec![F128::zero(); 1 << source_slots(router).len()];
-    for (slot, word) in bank_words.into_iter().enumerate() {
+    values.fill(F128::zero());
+    for (slot, word) in bank_words.iter().enumerate() {
         for bit in 0..64 {
             if let Some(value) = values.get_mut(64 * slot + bit) {
                 *value = F128::from_u64((word >> bit) & 1);
@@ -107,18 +111,23 @@ fn source_bank(
         }
         Router::Shift | Router::Memory | Router::Branch => {}
     }
-    Ok(values)
+    Ok(())
 }
 
 fn selector_bank(
     witness: &Rv64iWitness,
     router: Router,
     cycle: usize,
-) -> Result<Vec<F128>, Rv64iProverError> {
+    values: &mut [F128],
+) -> Result<(), Rv64iProverError> {
     let row = fetched(witness, cycle)?;
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let pos = usize::from(witness.layout.pos(bits));
     let selected = row.variant.and_then(|variant| match router {
         Router::Variant => Some(variant.index()),
@@ -130,7 +139,7 @@ fn selector_bank(
         Router::Compare => variant.key_kind().map(|kind| pos + 64 * kind as usize),
         Router::Branch => variant.branch().map(|_| 0),
     });
-    let mut values = vec![F128::zero(); 1 << selector_slots(router).len()];
+    values.fill(F128::zero());
     if let Some(value) = selected.and_then(|index| values.get_mut(index)) {
         *value = if router == Router::Branch {
             let column = witness.layout.should_branch();
@@ -142,7 +151,7 @@ fn selector_bank(
             F128::one()
         };
     }
-    Ok(values)
+    Ok(())
 }
 
 /// Dense multilinear table in the router's source variables followed by its
@@ -155,17 +164,19 @@ pub fn fold(
     let weights = equality_table(r_1)?;
     if weights.len() != witness.bits.len() {
         return Err(Rv64iProverError::RowCount {
-            rows: witness.bits.len(),
+            expected: weights.len(),
+            bits: witness.bits.len(),
+            words: witness.words.len(),
         });
     }
     let source_size = 1 << source_slots(router).len();
     let mut values = vec![F128::zero(); source_size << selector_slots(router).len()];
+    let mut source = vec![F128::zero(); source_size];
+    let mut selectors = vec![F128::zero(); 1 << selector_slots(router).len()];
     for (cycle, weight) in weights.into_iter().enumerate() {
-        let source = source_bank(witness, router, cycle)?;
-        for (selector, select) in selector_bank(witness, router, cycle)?
-            .into_iter()
-            .enumerate()
-        {
+        source_bank(witness, router, cycle, &mut source)?;
+        selector_bank(witness, router, cycle, &mut selectors)?;
+        for (selector, select) in selectors.iter().copied().enumerate() {
             if select != F128::zero() {
                 for (index, value) in source.iter().enumerate() {
                     if let Some(target) = values.get_mut(index + source_size * selector) {
@@ -247,13 +258,17 @@ impl PrepareKernel<F128, RouterShort<F128>, Rv64iPlane> for RouterShortPrepare {
     }
 }
 
-fn geometry_error(error: impl std::fmt::Display) -> KernelError<F128> {
+fn geometry_error(error: impl Display) -> KernelError<F128> {
     KernelError::InvalidGeometry {
         reason: error.to_string(),
     }
 }
 
-fn variant_bits(witness: &Rv64iWitness, x: &[F128]) -> Result<Polynomial<F128>, Rv64iProverError> {
+fn variant_bits(
+    witness: &Rv64iWitness,
+    x: &[F128],
+    lift: &WordLift<F128>,
+) -> Result<Polynomial<F128>, Rv64iProverError> {
     let point = x.get(..10).ok_or(PointsError::Dimension {
         expected: 10,
         actual: x.len(),
@@ -265,19 +280,12 @@ fn variant_bits(witness: &Rv64iWitness, x: &[F128]) -> Result<Polynomial<F128>, 
         .first()
         .map_or(64, |chunk| usize::from(chunk.start()));
     let inc_slot = eq_index(&point[6..10], 8)?;
-    let bit_weights = equality_table(&point[..6])?;
     Ok(Polynomial::new(
         witness
             .bits
             .iter()
             .map(|row| {
-                let inc: F128 = bit_weights
-                    .iter()
-                    .enumerate()
-                    .map(|(bit, weight)| {
-                        *weight * F128::from_u64((witness.layout.inc(row) >> bit) & 1)
-                    })
-                    .sum();
+                let inc = lift.evaluate(witness.layout.inc(row));
                 inc_slot * inc
                     + (g..witness.layout.used_columns())
                         .map(|column| {
@@ -312,6 +320,7 @@ fn cycle_openings(
         expected: 6,
         actual: x.len(),
     })?;
+    let lift = WordLift::new(bit)?;
     let relation = match router {
         Router::Variant => RelationId::RouterCycleVariant,
         Router::Shift => RelationId::RouterCycleShift,
@@ -331,7 +340,7 @@ fn cycle_openings(
                 (VirtualPolynomial::RdPreValue, BaseWord::RdPreValue),
                 (VirtualPolynomial::NextPC, BaseWord::NextPC),
             ] {
-                word(id, views::base_word(witness, base, bit)?);
+                word(id, views::base_word_with_lift(witness, base, &lift));
             }
             for (id, column) in [
                 (VirtualPolynomial::Imm, BytecodeColumn::Imm),
@@ -342,7 +351,7 @@ fn cycle_openings(
                 (VirtualPolynomial::PCPlusImm, BytecodeColumn::PCPlusImm),
                 (VirtualPolynomial::PC, BytecodeColumn::PC),
             ] {
-                word(id, views::bytecode_word(witness, column, bit)?);
+                word(id, views::bytecode_word_with_lift(witness, column, &lift)?);
             }
             word(
                 VirtualPolynomial::Variant,
@@ -350,13 +359,13 @@ fn cycle_openings(
             );
             let _ = tables.insert(
                 OpeningId::committed(CommittedPolynomial::VariantBits, relation),
-                variant_bits(witness, x)?,
+                variant_bits(witness, x, &lift)?,
             );
         }
         Router::Shift => {
             word(
                 VirtualPolynomial::Rs1Value,
-                views::base_word(witness, BaseWord::Rs1Value, bit)?,
+                views::base_word_with_lift(witness, BaseWord::Rs1Value, &lift),
             );
             word(
                 VirtualPolynomial::ShiftKind,
@@ -379,11 +388,11 @@ fn cycle_openings(
         Router::Memory => {
             word(
                 VirtualPolynomial::RamReadValue,
-                views::base_word(witness, BaseWord::RamReadValue, bit)?,
+                views::base_word_with_lift(witness, BaseWord::RamReadValue, &lift),
             );
             word(
                 VirtualPolynomial::Rs2Value,
-                views::base_word(witness, BaseWord::Rs2Value, bit)?,
+                views::base_word_with_lift(witness, BaseWord::Rs2Value, &lift),
             );
             word(
                 VirtualPolynomial::AccessKind,
@@ -397,15 +406,15 @@ fn cycle_openings(
         Router::Compare => {
             word(
                 VirtualPolynomial::Rs1Value,
-                views::base_word(witness, BaseWord::Rs1Value, bit)?,
+                views::base_word_with_lift(witness, BaseWord::Rs1Value, &lift),
             );
             word(
                 VirtualPolynomial::Rs2Value,
-                views::base_word(witness, BaseWord::Rs2Value, bit)?,
+                views::base_word_with_lift(witness, BaseWord::Rs2Value, &lift),
             );
             word(
                 VirtualPolynomial::Imm,
-                views::bytecode_word(witness, BytecodeColumn::Imm, bit)?,
+                views::bytecode_word_with_lift(witness, BytecodeColumn::Imm, &lift)?,
             );
             word(
                 VirtualPolynomial::KeyKind,
@@ -428,11 +437,11 @@ fn cycle_openings(
         Router::Branch => {
             word(
                 VirtualPolynomial::FallThroughPC,
-                views::bytecode_word(witness, BytecodeColumn::FallThroughPC, bit)?,
+                views::bytecode_word_with_lift(witness, BytecodeColumn::FallThroughPC, &lift)?,
             );
             word(
                 VirtualPolynomial::PCPlusImm,
-                views::bytecode_word(witness, BytecodeColumn::PCPlusImm, bit)?,
+                views::bytecode_word_with_lift(witness, BytecodeColumn::PCPlusImm, &lift)?,
             );
             word(VirtualPolynomial::Branch, views::branch(witness)?);
             let _ = tables.insert(

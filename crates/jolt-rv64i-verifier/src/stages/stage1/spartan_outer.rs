@@ -6,9 +6,12 @@ pub use crate::claims::spartan_outer::{
 use crate::claims::spartan_outer::{SpartanOuterF128Symbolic, SpartanOuterF2Symbolic};
 use crate::ids::{DerivedId, OuterDerived, RowBlock};
 use crate::points::{eq, PointsError};
+use crate::proof::DimensionedRelation;
+use crate::public::matrices::RowMatrices;
 use crate::statement::LOG_T_MAX;
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 
@@ -49,12 +52,16 @@ impl<F: JoltField> OuterInstance<F> {
 }
 macro_rules! outer {
     ($name:ident, $symbolic:ident, $outputs:ident, $block:ident) => {
+        /// Zero-check of a row block with low-variable-first row coordinates before cycle coordinates.
+        /// `new` validates the row-block and cycle widths; the equality point is drawn by batch 1.
         #[derive(Clone)]
         pub struct $name<F: JoltField> {
             symbolic: $symbolic,
             instance: OuterInstance<F>,
         }
         impl<F: JoltField> $name<F> {
+            /// Establishes a cycle width in `1..=LOG_T_MAX` and the matching row-plus-cycle equality point.
+            /// Rejects row widths above eight, or a binary row block whose width differs from eight.
             pub fn new(
                 log_T: usize,
                 row_variables: usize,
@@ -68,22 +75,44 @@ macro_rules! outer {
                     });
                 }
                 Ok(Self {
-                    symbolic: $symbolic::new(instance.tau.len()),
+                    symbolic: Self::symbolic_with((log_T, row_variables)),
                     instance,
                 })
             }
+            /// The batch-1 equality point in row-then-cycle order, low variable first in each part.
             pub fn tau(&self) -> &[F] {
                 &self.instance.tau
             }
+            /// The validated prefix width of row coordinates; the remaining equality coordinates are cycles.
             pub fn row_variables(&self) -> usize {
                 self.instance.row_variables
             }
+            /// The row block whose symbolic zero-check this instance enforces.
             pub fn block(&self) -> RowBlock {
                 RowBlock::$block
             }
         }
+        impl<F: JoltField> DimensionedRelation<F> for $name<F> {
+            type Dimensions = (usize, usize);
+
+            fn symbolic_with((log_T, row_variables): Self::Dimensions) -> Self::Symbolic {
+                $symbolic::new(log_T + row_variables)
+            }
+
+            fn dimensions(log_T: usize, layout: &Layout) -> Self::Dimensions {
+                let row_variables = if RowBlock::$block == RowBlock::F2 {
+                    8
+                } else {
+                    RowMatrices::f128_row_variables_for(layout)
+                };
+                (log_T, row_variables)
+            }
+        }
         impl<F: JoltField> ConcreteSumcheck<F> for $name<F> {
             type Symbolic = $symbolic;
+            fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+                Self::point_offset(self.rounds(), batch_num_vars)
+            }
             fn symbolic(&self) -> &Self::Symbolic {
                 &self.symbolic
             }

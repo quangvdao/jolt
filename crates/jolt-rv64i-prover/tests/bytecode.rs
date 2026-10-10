@@ -38,7 +38,7 @@ use jolt_rv64i_verifier::stages::stage6a::{
 use jolt_rv64i_verifier::stages::stage6b::bits_reduction::BitsReduction;
 use jolt_rv64i_verifier::stages::stage6b::bytecode_read_cycle::BytecodeReadCycle;
 use jolt_rv64i_verifier::stages::stage6b::ram_ra_product::RamRaProduct;
-use jolt_rv64i_verifier::stages::stage6b::verify::{self as verify6b, Stage6bPoints};
+use jolt_rv64i_verifier::stages::stage6b::verify as verify6b;
 use jolt_rv64i_verifier::stages::stage6b::{
     Stage6bInputClaims, Stage6bInputPoints, Stage6bSumchecks as VerifierStage6b,
 };
@@ -595,10 +595,8 @@ fn bytecode_batches_match_definitions_and_terminal_opening() {
     let state =
         TransparentBits::verify_commit(&(), opening.geometry, &commitment, &mut stage_transcript)
             .unwrap();
-    let previous = verify6a::verify(
+    let previous = verify6a::verify_inputs(
         &checked,
-        f.points.clone(),
-        &f.inputs,
         &BatchProof {
             rounds: address.recorded.proof.clone(),
             values: BytecodeAddressValue {
@@ -606,26 +604,26 @@ fn bytecode_batches_match_definitions_and_terminal_opening() {
             },
         },
         &mut stage_transcript,
+        verify6a::from_points(&checked, f.points.clone(), f.inputs.clone()).unwrap(),
     )
     .unwrap();
-    let final_output = verify6b::verify(
+    assert_eq!(previous.bytecode_folds, h_values);
+    let final_output = verify6b::verify_inputs(
         &checked,
         &BatchProof {
             rounds: proof.recorded.proof.clone(),
             values: BitsColumns(columns.clone()),
         },
         &mut stage_transcript,
-        &previous,
-        Stage6bPoints {
-            r_1: f.r1.clone(),
-            r_3: f.points.r_3.clone(),
-            r_4: f.points.r_4.clone(),
-            r_5: f.points.r_5.clone(),
-            w: f.w.clone(),
-            x: f.x.clone(),
-            a_ram: f.a_ram.clone(),
+        verify6b::Inputs {
+            batch: VerifierStage6b {
+                bytecode_read_cycle: batch.bytecode_read_cycle.clone(),
+                ram_ra_product: batch.ram_ra_product.clone(),
+                bits_reduction: batch.bits_reduction.clone(),
+            },
+            claims: inputs.clone(),
+            points: input_points.clone(),
         },
-        &inputs,
         state,
         &opening_proof,
     )

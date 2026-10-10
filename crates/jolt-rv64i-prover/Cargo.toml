@@ -69,3 +69,23 @@ required-features = ["test-utils"]
 [[test]]
 name = "bytecode"
 required-features = ["test-utils"]
+
+[[test]]
+name = "e2e"
+required-features = ["test-utils"]
+
+[[test]]
+name = "tamper"
+required-features = ["test-utils"]
+
+[[test]]
+name = "claim_flow"
+required-features = ["test-utils"]
+
+[[test]]
+name = "schedule"
+required-features = ["test-utils"]
+
+[[test]]
+name = "lifecycle"
+required-features = ["test-utils"]

@@ -16,12 +16,35 @@ use jolt_transcript::Transcript;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
 
+/// Verified witness-column cells at `w ++ r_1`, consumed by batches 3a and 6b.
 pub struct Output {
-    pub point: Vec<F128>,
+    /// Routed and direct-column values consumed by batches 3a and 6b respectively.
     pub claims: Stage2OutputClaims<F128>,
+    /// Low-variable-first column and cycle points consumed by batches 3a and 6b.
     pub points: Stage2OutputPoints<F128>,
 }
 
+impl Output {
+    /// Borrows the ten low witness-column coordinates; malformed direct construction returns `PointsError`.
+    pub fn w(&self) -> Result<&[F128], PointsError> {
+        let point = &self.points.spartan_inner.witness_routed;
+        point.get(..10).ok_or(PointsError::Dimension {
+            expected: 10,
+            actual: point.len(),
+        })
+    }
+    /// Borrows the cycle suffix after the ten witness-column coordinates.
+    /// Malformed direct construction returns `PointsError`.
+    pub fn r_1(&self) -> Result<&[F128], PointsError> {
+        let point = &self.points.spartan_inner.witness_routed;
+        point.get(10..).ok_or(PointsError::Dimension {
+            expected: 10,
+            actual: point.len(),
+        })
+    }
+}
+
+/// Expands routed and direct witness-column wire values into their generated cells.
 pub fn expand(values: &InnerValues) -> Stage2OutputClaims<F128> {
     Stage2OutputClaims {
         spartan_inner: SpartanInnerOutputClaims {
@@ -38,6 +61,8 @@ pub struct Inputs {
     pub points: Stage2InputPoints<F128>,
 }
 
+/// Converts the verified stage-1 row-first, cycle-last cells into batch-2 inputs.
+/// The concrete constructor checks row widths and the shared cycle dimension.
 pub fn from_upstream(
     matrices: Arc<RowMatrices>,
     stage1: &Stage1Output,
@@ -97,6 +122,8 @@ pub fn from_upstream(
     })
 }
 
+/// Verifies batch 2 using the stage-1 outer cells and their low-variable-first points.
+/// Invalid points or a failed terminal equation return a stage-2 verifier error.
 pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     checked: &CheckedInputs<'_, S>,
     proof: &BatchProof<InnerValues>,
@@ -126,15 +153,5 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
         2,
     )?;
     batch.append_output_claims(transcript, &claims);
-    let point = points
-        .spartan_inner
-        .witness_routed
-        .get(..10)
-        .ok_or(VerifierError::StageClaimOutputMismatch { stage: 2 })?
-        .to_vec();
-    Ok(Output {
-        point,
-        claims,
-        points,
-    })
+    Ok(Output { claims, points })
 }

@@ -2,6 +2,8 @@
 //! excessive RAM or segments, misplaced image words, invalid final PCs and proof
 //! shapes. The checked initial RAM contains only nonzero inputs and image words.
 
+use std::sync::Arc;
+
 use common::jolt_device::{JoltDevice, MemoryConfig, MemoryLayout};
 use jolt_program::preprocess::{compute_max_ram_k, PublicInitialRam, PublicIoMemory};
 use jolt_rv64i_arith::{Layout, LayoutError};
@@ -32,7 +34,7 @@ pub struct CheckedInputs<'a, S: BitsCommitmentScheme> {
     preprocessing: &'a VerifierPreprocessing<S>,
     statement: &'a Statement,
     layout: Layout,
-    io: PublicIoMemory,
+    io: Arc<PublicIoMemory>,
     initial_ram: Vec<(u64, u64)>,
     final_pc: u64,
 }
@@ -138,7 +140,7 @@ impl<'a, S: BitsCommitmentScheme> CheckedInputs<'a, S> {
             preprocessing,
             statement,
             layout,
-            io,
+            io: Arc::new(io),
             initial_ram,
             final_pc,
         })
@@ -176,6 +178,11 @@ impl<'a, S: BitsCommitmentScheme> CheckedInputs<'a, S> {
 
     /// The public I/O, panic and termination words and their checked I/O mask.
     pub fn io(&self) -> &PublicIoMemory {
+        &self.io
+    }
+
+    /// Shared public I/O handle; stage construction clones the handle without copying its words.
+    pub fn shared_io(&self) -> &Arc<PublicIoMemory> {
         &self.io
     }
 

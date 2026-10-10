@@ -90,7 +90,11 @@ impl Rv64iWitness {
     ) -> Result<Self, Rv64iProverError> {
         let final_pc = facts
             .last()
-            .ok_or(Rv64iProverError::RowCount { rows: 0 })?
+            .ok_or(Rv64iProverError::RowCount {
+                expected: 1,
+                bits: 0,
+                words: 0,
+            })?
             .next_pc;
         let final_ram = Self::initial_state(&layout, &initial_ram)?;
         let bits = (0..facts.len()).map(|_| [0; 4]).collect();
@@ -146,7 +150,17 @@ impl Rv64iWitness {
         final_pc: u64,
     ) -> Result<Self, Rv64iProverError> {
         if !bits.len().is_power_of_two() {
-            return Err(Rv64iProverError::RowCount { rows: bits.len() });
+            let expected =
+                bits.len()
+                    .checked_next_power_of_two()
+                    .ok_or(Rv64iProverError::TraceDimension {
+                        log_T: usize::BITS as usize,
+                    })?;
+            return Err(Rv64iProverError::RowCount {
+                expected,
+                bits: bits.len(),
+                words: 0,
+            });
         }
         let _ = BitsBuilder::new(&layout, &bytecode)?;
         let _ = bytecode.final_pc_index(final_pc)?;
@@ -189,18 +203,15 @@ impl Rv64iWitness {
                 .variant
                 .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })?;
             let access = variant.access().is_some();
-            let ram_index = match (&rows, fact) {
-                (_, Some(fact)) => {
+            let ram_index = match &rows {
+                ReplayRows::Facts { facts, .. } => {
                     if access {
-                        fact.ram_word_index
+                        facts[cycle].ram_word_index
                     } else {
                         0
                     }
                 }
-                (ReplayRows::Bits(bits), None) => self.layout.ram_index(&bits[cycle]),
-                (ReplayRows::Facts { .. }, None) => {
-                    return Err(Rv64iProverError::RowCount { rows: cycle })
-                }
+                ReplayRows::Bits(bits) => self.layout.ram_index(&bits[cycle]),
             };
             let read = |register: u8| {
                 registers

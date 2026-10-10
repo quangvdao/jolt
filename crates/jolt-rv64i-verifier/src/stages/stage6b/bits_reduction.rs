@@ -1,5 +1,8 @@
 //! Concrete reduction of the six committed functionals to one cycle point.
 
+use crate::proof::DimensionedRelation;
+use std::sync::Arc;
+
 use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
 use jolt_rv64i_arith::{Layout, BITS_COLUMNS};
@@ -13,12 +16,14 @@ pub use crate::claims::bits_reduction::{
 use crate::ids::{BitsReductionDerived, DerivedId};
 use crate::points::{self, PointsError};
 
+/// Six committed functionals reduced over low-variable-first cycles to the 256 transmitted bit columns.
+/// Its input claims and fixed points come from batches 1, 2, 3a, 3b and 5.
 #[derive(Clone)]
 pub struct BitsReduction<F: JoltField> {
     symbolic: BitsReductionSymbolic,
     r_1: Vec<F>,
-    r_3: Vec<F>,
-    r_5: Vec<F>,
+    r_3: Arc<Vec<F>>,
+    r_5: Arc<Vec<F>>,
     w: Vec<F>,
     x: Vec<F>,
     weights: [Vec<(usize, F)>; 6],
@@ -26,11 +31,24 @@ pub struct BitsReduction<F: JoltField> {
 }
 
 impl<F: JoltField> BitsReduction<F> {
+    /// Checks equal cycle widths and the ten-column and seventeen-short-slot point widths, returning `PointsError` on mismatch.
+    /// The points must be verified upstream outputs; checked inputs establish their common trace-width bound.
     pub fn new(
         layout: &Layout,
         r_1: Vec<F>,
         r_3: Vec<F>,
         r_5: Vec<F>,
+        w: Vec<F>,
+        x: Vec<F>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(layout, r_1, Arc::new(r_3), Arc::new(r_5), w, x)
+    }
+
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Vec<F>,
+        r_3: Arc<Vec<F>>,
+        r_5: Arc<Vec<F>>,
         w: Vec<F>,
         x: Vec<F>,
     ) -> Result<Self, PointsError> {
@@ -152,7 +170,7 @@ impl<F: JoltField> BitsReduction<F> {
             branch.push((layout.should_branch(), F::one()));
         }
         Ok(Self {
-            symbolic: BitsReductionSymbolic::new(r_1.len()),
+            symbolic: Self::symbolic_for(r_1.len(), layout),
             r_1,
             r_3,
             r_5,
@@ -163,32 +181,44 @@ impl<F: JoltField> BitsReduction<F> {
         })
     }
 
+    /// The verified low-variable-first batch-1 cycle point used by the direct-column functional.
     pub fn r_1(&self) -> &[F] {
         &self.r_1
     }
+    /// The verified low-variable-first batch-3b cycle point used by the router functionals.
     pub fn r_3(&self) -> &[F] {
         &self.r_3
     }
+    /// The verified low-variable-first batch-5 cycle point used by the increment functional.
     pub fn r_5(&self) -> &[F] {
         &self.r_5
     }
+    /// Sparse column supports in Direct, Variant, Pos0, Pos1, ShouldBranch and Inc order.
     pub fn weights(&self) -> &[Vec<(usize, F)>; 6] {
         &self.weights
     }
+    /// The omitted-zero weights for the two position chunks at batch 3a's fixed short points.
     pub fn pos_zero(&self) -> [F; 2] {
         self.pos_zero
     }
 
+    /// Consumed functional points with fixed column/bit/position coordinates before their upstream cycle coordinates.
     pub fn input_points(&self) -> BitsReductionInputClaims<Vec<F>> {
         BitsReductionInputClaims {
             direct_columns: self.w.iter().chain(&self.r_1).copied().collect(),
-            variant_bits: self.x.iter().take(10).chain(&self.r_3).copied().collect(),
+            variant_bits: self
+                .x
+                .iter()
+                .take(10)
+                .chain(self.r_3.iter())
+                .copied()
+                .collect(),
             pos_ra_0: self
                 .x
                 .iter()
                 .skip(6)
                 .take(3)
-                .chain(&self.r_3)
+                .chain(self.r_3.iter())
                 .copied()
                 .collect(),
             pos_ra_1: self
@@ -196,14 +226,22 @@ impl<F: JoltField> BitsReduction<F> {
                 .iter()
                 .skip(9)
                 .take(3)
-                .chain(&self.r_3)
+                .chain(self.r_3.iter())
                 .copied()
                 .collect(),
-            should_branch: self.r_3.clone(),
-            inc: self.x.iter().take(6).chain(&self.r_5).copied().collect(),
+            should_branch: self.r_3.as_ref().clone(),
+            inc: self
+                .x
+                .iter()
+                .take(6)
+                .chain(self.r_5.iter())
+                .copied()
+                .collect(),
         }
     }
 
+    /// The terminal coefficient of one transmitted column at the low-variable-first cycle point.
+    /// Returns `PointsError` for a column outside 0–255 or a mismatched cycle width.
     pub fn column_weight(
         &self,
         column: usize,
@@ -219,7 +257,8 @@ impl<F: JoltField> BitsReduction<F> {
             .ok_or(PointsError::MissingColumn { column })
     }
 
-    /// Computes the three cycle equalities once and folds the six sparse supports.
+    /// The terminal coefficients of all 256 transmitted columns at a low-variable-first cycle point.
+    /// Returns `PointsError` unless its width matches the verified upstream cycle points.
     pub fn column_weights(
         &self,
         point: &[F],
@@ -256,6 +295,10 @@ impl<F: JoltField> BitsReduction<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = BitsReductionSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -355,5 +398,17 @@ impl<F: JoltField> ConcreteSumcheck<F> for BitsReduction<F> {
             }
             _ => Err(VerifierError::MissingStageClaimDerived { id: (*id).into() }),
         }
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for BitsReduction<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        BitsReductionSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

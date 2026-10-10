@@ -4,9 +4,16 @@
     clippy::panic,
     reason = "invalid fixtures fail the enclosing test"
 )]
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
+use blake2::{digest::consts::U32, Blake2b, Digest};
 use jolt_field::{CanonicalBytes, F128};
+use jolt_rv64i_prover::backend::Rv64iBackend;
 use jolt_rv64i_prover::commitment::{transparent::TransparentBits, BitsCommitmentProver};
+use jolt_rv64i_prover::prover::{prove, ProverPreprocessing};
 use jolt_rv64i_verifier::{
     commitment::{squeeze_bytes, BitsGeometry},
     error::ProofDecodeError,
@@ -295,5 +302,100 @@ fn larger_challenge_bytes_use_only_consecutive_scalar_draws() {
         assert_eq!(output, literal);
         assert_eq!(actual.draws, len.div_ceil(16));
         assert_eq!(actual.state(), expected.state());
+    }
+}
+
+#[test]
+fn counting_loop_proof_has_the_frozen_encoding_and_rejects_malformed_envelopes() {
+    let (statement, verifier, witness) = support::counting_loop();
+    let preprocessing = ProverPreprocessing {
+        verifier,
+        scheme: (),
+    };
+    let proof = prove::<TransparentBits>(
+        &preprocessing,
+        &statement,
+        &witness,
+        &Rv64iBackend::reference(),
+    )
+    .unwrap();
+    let encoded = proof.to_bytes();
+    let digest: [u8; 32] = Blake2b::<U32>::digest(&encoded).into();
+    assert_eq!(encoded.len(), 10_234);
+    assert_eq!(
+        digest.as_slice(),
+        bytes("b47073578be607e5578cbc512ab46d4ea326c676fbbab24937a583f0d2f8d28e")
+    );
+    let decoded = Rv64iProof::<TransparentBits>::from_bytes(&encoded, 6, 4).unwrap();
+    assert_eq!(decoded.log_K_ram, proof.log_K_ram);
+    assert_eq!(decoded.final_pc, proof.final_pc);
+    assert_eq!(decoded.bits_commitment, proof.bits_commitment);
+    assert_eq!(decoded.opening, proof.opening);
+    macro_rules! batch {
+        ($name:ident) => {
+            assert_eq!(decoded.$name.values, proof.$name.values);
+            match (&decoded.$name.rounds, &proof.$name.rounds) {
+                (
+                    SumcheckProof::Clear(ClearProof::Compressed(a)),
+                    SumcheckProof::Clear(ClearProof::Compressed(b)),
+                ) => {
+                    assert_eq!(a.round_polynomials.len(), b.round_polynomials.len());
+                    for (a, b) in a.round_polynomials.iter().zip(&b.round_polynomials) {
+                        assert_eq!(a.coeffs_except_linear_term(), b.coeffs_except_linear_term());
+                    }
+                }
+                _ => panic!("the protocol emits compressed clear rounds"),
+            }
+        };
+    }
+    batch!(stage1);
+    batch!(stage2);
+    batch!(stage3a);
+    batch!(stage3b);
+    batch!(stage4);
+    batch!(stage5);
+    batch!(stage6a);
+    batch!(stage6b);
+    assert_eq!(decoded.to_bytes(), encoded);
+    for end in 0..encoded.len() {
+        assert!(matches!(
+            Rv64iProof::<TransparentBits>::from_bytes(&encoded[..end], 6, 4),
+            Err(ProofDecodeError::Truncated | ProofDecodeError::Length)
+        ));
+    }
+    let mut changed = encoded.clone();
+    changed.push(0);
+    assert!(matches!(
+        Rv64iProof::<TransparentBits>::from_bytes(&changed, 6, 4),
+        Err(ProofDecodeError::TrailingBytes)
+    ));
+    changed = encoded.clone();
+    changed[0] = 1;
+    assert!(matches!(
+        Rv64iProof::<TransparentBits>::from_bytes(&changed, 6, 4),
+        Err(ProofDecodeError::InvalidVersion)
+    ));
+    for prefix in [10, encoded.len() - 2056] {
+        changed = encoded.clone();
+        changed[prefix..prefix + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(
+            Rv64iProof::<TransparentBits>::from_bytes(&changed, 6, 4),
+            Err(ProofDecodeError::Length)
+        ));
+    }
+    for (t, b, a) in [
+        (0, 4, 5),
+        (33, 4, 5),
+        (6, 0, 5),
+        (6, 25, 5),
+        (6, 4, 4),
+        (6, 4, 62),
+    ] {
+        changed = encoded.clone();
+        changed[1] = a;
+        assert!(matches!(
+            Rv64iProof::<TransparentBits>::from_bytes(&changed, t, b),
+            Err(ProofDecodeError::Dimensions)
+        ));
     }
 }

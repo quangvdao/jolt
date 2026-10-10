@@ -1,7 +1,6 @@
 //! Public I/O mask and word extensions for the binary-field RV64I protocol.
 
 use jolt_field::JoltField;
-use jolt_poly::EqPolynomial;
 use jolt_program::preprocess::PublicIoMemory;
 
 use crate::points::{self, PointsError, WordLift};
@@ -94,9 +93,7 @@ pub fn val_io<F: JoltField>(
     }
     let lift = WordLift::new(bit)?;
     let low_bits = address.len() / 2;
-    let (low, high) = address.split_at(low_bits);
-    let low_eq = EqPolynomial::new(low.iter().rev().copied().collect()).evaluations();
-    let high_eq = EqPolynomial::new(high.iter().rev().copied().collect()).evaluations();
+    let (low_eq, high_eq) = points::split_eq_tables(address)?;
     let low_mask = (1_usize << low_bits) - 1;
     let mut value = F::zero();
     for segment in &io.segments {

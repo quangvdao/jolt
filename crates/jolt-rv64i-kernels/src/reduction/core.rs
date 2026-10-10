@@ -21,6 +21,13 @@ pub struct ReductionLeg {
     pub claim: F128,
 }
 
+#[derive(Clone, Copy)]
+struct TableLeg<'a> {
+    slot: usize,
+    inner: &'a [F128],
+    outer: &'a [F128],
+}
+
 struct LegState {
     table: usize,
     point: Vec<F128>,
@@ -179,44 +186,58 @@ impl ReductionCore {
         let tables = self.tables.len();
         let leg_count = self.legs.len();
         let legs = &self.legs;
-        let mut views: Vec<_> = if bind.is_some() {
+        let table_legs: Vec<Vec<_>> = (0..tables)
+            .map(|table| {
+                legs.iter()
+                    .enumerate()
+                    .filter(|(_, leg)| leg.table == table)
+                    .map(|(slot, leg)| TableLeg {
+                        slot,
+                        inner: leg.eq.e_in_current(),
+                        outer: leg.eq.e_out_current(),
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut views = Vec::with_capacity(count * tables);
+        if bind.is_some() {
             for scratch in &mut self.scratch {
                 scratch.truncate(length);
             }
-            self.tables
+            let mut columns: Vec<_> = self
+                .tables
                 .iter()
                 .zip(&mut self.scratch)
-                .flat_map(|(input, output)| {
-                    input
-                        .chunks(2 * chunk)
-                        .zip(output.chunks_mut(chunk))
-                        .enumerate()
-                        .map(|(index, (input, output))| (index, input, output))
-                })
-                .collect()
+                .map(|(input, output)| input.chunks(2 * chunk).zip(output.chunks_mut(chunk)))
+                .collect();
+            for _ in 0..count {
+                for column in &mut columns {
+                    views.extend(column.next());
+                }
+            }
         } else {
-            self.tables
+            let mut columns: Vec<_> = self
+                .tables
                 .iter_mut()
-                .flat_map(|input| {
-                    input
-                        .chunks_mut(chunk)
-                        .enumerate()
-                        .map(|(index, output)| (index, &[][..], output))
-                })
-                .collect()
-        };
-        views.sort_by_key(|&(index, _, _)| index);
+                .map(|table| table.chunks_mut(chunk))
+                .collect();
+            for _ in 0..count {
+                for column in &mut columns {
+                    views.extend(column.next().map(|output| (&[][..], output)));
+                }
+            }
+        }
         if !legs.is_empty() {
             views
                 .par_chunks_mut(tables)
                 .zip(self.partials[..2 * count * leg_count].par_chunks_mut(2 * leg_count))
                 .enumerate()
                 .for_each(|(index, (views, partials))| {
-                    Self::accumulate_chunk::<8>(views, legs, partials, index, chunk, bind);
+                    Self::accumulate_chunk(views, &table_legs, partials, index, chunk, bind);
                 });
         } else if let Some(challenge) = bind {
             views.par_chunks_mut(tables).for_each(|views| {
-                for (_, input, output) in views {
+                for (input, output) in views {
                     for (dest, pair) in output.iter_mut().zip(input.chunks_exact(2)) {
                         *dest = pair[0] + challenge * (pair[0] + pair[1]);
                     }
@@ -237,79 +258,144 @@ impl ReductionCore {
         }
     }
 
-    fn accumulate_chunk<const N: usize>(
-        views: &mut [(usize, &[F128], &mut [F128])],
-        legs: &[LegState],
+    fn accumulate_chunk(
+        views: &mut [(&[F128], &mut [F128])],
+        table_legs: &[Vec<TableLeg<'_>>],
         partials: &mut [F128Accumulator],
         index: usize,
         chunk: usize,
         bind: Option<F128>,
     ) {
-        let mut total = [F128Accumulator::default(); N];
-        let mut sums = [F128Accumulator::default(); N];
-        Self::accumulate_blocks(
-            views,
-            legs,
-            (&mut total[..legs.len()], &mut sums[..legs.len()]),
-            (index, chunk),
-            bind,
-        );
-        partials[..legs.len()].copy_from_slice(&total[..legs.len()]);
-    }
-
-    fn accumulate_blocks(
-        views: &mut [(usize, &[F128], &mut [F128])],
-        legs: &[LegState],
-        (total, sums): (&mut [F128Accumulator], &mut [F128Accumulator]),
-        (index, chunk): (usize, usize),
-        bind: Option<F128>,
-    ) {
-        let inner_len = legs[0].eq.e_in_current_len();
-        let block_len = 2 * inner_len;
-        let first_block = index * (chunk / 2) / inner_len;
-        for block in 0..chunk / block_len {
-            sums.fill(F128Accumulator::default());
-            let start = block * block_len;
-            for (table, (_, input, output)) in views.iter_mut().enumerate() {
-                let output = &mut output[start..start + block_len];
+        let mut total = [F128Accumulator::default(); 8];
+        for ((input, output), legs) in views.iter_mut().zip(table_legs) {
+            let Some(first) = legs.first() else {
                 if let Some(challenge) = bind {
-                    let input = &input[2 * start..2 * (start + block_len)];
-                    for (pair_index, (dest, source)) in output
-                        .chunks_exact_mut(2)
-                        .zip(input.chunks_exact(4))
-                        .enumerate()
-                    {
-                        dest[0] = source[0] + challenge * (source[0] + source[1]);
-                        dest[1] = source[2] + challenge * (source[2] + source[3]);
-                        let delta = dest[0] + dest[1];
-                        for (slot, leg) in legs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, leg)| leg.table == table)
-                        {
-                            sums[slot].fmadd(leg.eq.e_in_current()[pair_index], delta);
-                        }
+                    for (dest, pair) in output.iter_mut().zip(input.chunks_exact(2)) {
+                        *dest = pair[0] + challenge * (pair[0] + pair[1]);
                     }
+                }
+                continue;
+            };
+            let block_len = 2 * first.inner.len();
+            let first_block = index * (chunk / block_len);
+            for (block, output) in output.chunks_exact_mut(block_len).enumerate() {
+                let input = if bind.is_some() {
+                    &input[2 * block * block_len..2 * (block + 1) * block_len]
                 } else {
-                    for (pair_index, pair) in output.chunks_exact(2).enumerate() {
-                        let delta = pair[0] + pair[1];
-                        for (slot, leg) in legs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, leg)| leg.table == table)
-                        {
-                            sums[slot].fmadd(leg.eq.e_in_current()[pair_index], delta);
+                    &[][..]
+                };
+                match legs.as_slice() {
+                    [leg] => {
+                        let sum = Self::sum_one(input, output, leg.inner, bind);
+                        total[leg.slot].fmadd(leg.outer[first_block + block], sum.reduce());
+                    }
+                    [first, second] => {
+                        let [a, b] = Self::sum_two(input, output, first.inner, second.inner, bind);
+                        total[first.slot].fmadd(first.outer[first_block + block], a.reduce());
+                        total[second.slot].fmadd(second.outer[first_block + block], b.reduce());
+                    }
+                    _ => {
+                        let sums = Self::sum_many(input, output, legs, bind);
+                        for (leg, sum) in legs.iter().zip(sums) {
+                            total[leg.slot].fmadd(leg.outer[first_block + block], sum.reduce());
                         }
                     }
                 }
             }
-            for (slot, leg) in legs.iter().enumerate() {
-                total[slot].fmadd(
-                    leg.eq.e_out_current()[first_block + block],
-                    sums[slot].reduce(),
-                );
+        }
+        let leg_count = partials.len() / 2;
+        partials[..leg_count].copy_from_slice(&total[..leg_count]);
+    }
+
+    #[inline]
+    fn sum_one(
+        input: &[F128],
+        output: &mut [F128],
+        inner: &[F128],
+        bind: Option<F128>,
+    ) -> F128Accumulator {
+        let mut sum = F128Accumulator::default();
+        if let Some(challenge) = bind {
+            for ((dest, source), &eq) in output
+                .chunks_exact_mut(2)
+                .zip(input.chunks_exact(4))
+                .zip(inner)
+            {
+                dest[0] = source[0] + challenge * (source[0] + source[1]);
+                dest[1] = source[2] + challenge * (source[2] + source[3]);
+                sum.fmadd(eq, dest[0] + dest[1]);
+            }
+        } else {
+            for (pair, &eq) in output.chunks_exact(2).zip(inner) {
+                sum.fmadd(eq, pair[0] + pair[1]);
             }
         }
+        sum
+    }
+
+    #[inline]
+    fn sum_two(
+        input: &[F128],
+        output: &mut [F128],
+        first: &[F128],
+        second: &[F128],
+        bind: Option<F128>,
+    ) -> [F128Accumulator; 2] {
+        let mut a = F128Accumulator::default();
+        let mut b = F128Accumulator::default();
+        if let Some(challenge) = bind {
+            for (((dest, source), &first), &second) in output
+                .chunks_exact_mut(2)
+                .zip(input.chunks_exact(4))
+                .zip(first)
+                .zip(second)
+            {
+                dest[0] = source[0] + challenge * (source[0] + source[1]);
+                dest[1] = source[2] + challenge * (source[2] + source[3]);
+                let delta = dest[0] + dest[1];
+                a.fmadd(first, delta);
+                b.fmadd(second, delta);
+            }
+        } else {
+            for ((pair, &first), &second) in output.chunks_exact(2).zip(first).zip(second) {
+                let delta = pair[0] + pair[1];
+                a.fmadd(first, delta);
+                b.fmadd(second, delta);
+            }
+        }
+        [a, b]
+    }
+
+    #[inline]
+    fn sum_many(
+        input: &[F128],
+        output: &mut [F128],
+        legs: &[TableLeg<'_>],
+        bind: Option<F128>,
+    ) -> [F128Accumulator; 8] {
+        let mut sums = [F128Accumulator::default(); 8];
+        if let Some(challenge) = bind {
+            for (pair, (dest, source)) in output
+                .chunks_exact_mut(2)
+                .zip(input.chunks_exact(4))
+                .enumerate()
+            {
+                dest[0] = source[0] + challenge * (source[0] + source[1]);
+                dest[1] = source[2] + challenge * (source[2] + source[3]);
+                let delta = dest[0] + dest[1];
+                for (leg, sum) in legs.iter().zip(&mut sums) {
+                    sum.fmadd(leg.inner[pair], delta);
+                }
+            }
+        } else {
+            for (pair, values) in output.chunks_exact(2).enumerate() {
+                let delta = values[0] + values[1];
+                for (leg, sum) in legs.iter().zip(&mut sums) {
+                    sum.fmadd(leg.inner[pair], delta);
+                }
+            }
+        }
+        sums
     }
 
     fn bind_legs(&mut self, challenge: F128) {

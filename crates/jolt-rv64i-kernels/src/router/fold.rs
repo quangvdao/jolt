@@ -2,7 +2,7 @@
 
 use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
 mod compiled;
-use crate::packed::buckets::NibbleBuckets;
+use crate::packed::buckets::{ByteBuckets, DigitHistogram, NibbleBuckets};
 use crate::packed::pool::ScratchPool;
 use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
@@ -20,8 +20,6 @@ mod calibration;
 pub use calibration::FoldCalibration;
 
 const ZERO: F128 = F128::from_raw(0);
-const NIBBLE_WORD: usize = 256;
-const BYTE_WORD: usize = 2048;
 
 #[derive(Debug, Clone)]
 struct ShapeLayout {
@@ -52,9 +50,9 @@ pub struct FoldLayout {
 
 const fn word_entries(bytes: bool) -> usize {
     if bytes {
-        BYTE_WORD
+        ByteBuckets::ELEMENTS_PER_WORD
     } else {
-        NIBBLE_WORD
+        NibbleBuckets::ELEMENTS_PER_WORD
     }
 }
 fn storage_add(total: &mut usize, added: usize) -> Result<(), RouterError> {
@@ -126,7 +124,11 @@ impl FoldLayout {
                                 }
                             } else if !digits.iter().any(|&(c, _)| c == column) {
                                 let _ = table_len(source.bits(column))?;
-                                digits.push((column, (1 << source.bits(column)).max(16)));
+                                digits.push((
+                                    column,
+                                    (1 << source.bits(column))
+                                        .max(NibbleBuckets::ENTRIES_PER_POSITION),
+                                ));
                             }
                         }
                     }
@@ -138,7 +140,8 @@ impl FoldLayout {
             for &h in &sorted {
                 byte_flags[h] = true;
             }
-            let mut meta_len = flags.len().div_ceil(4) * 16;
+            let mut meta_len = flags.len().div_ceil(NibbleBuckets::BITS_PER_POSITION)
+                * NibbleBuckets::ENTRIES_PER_POSITION;
             for &(_, bound) in &digits {
                 storage_add(&mut meta_len, bound)?;
             }
@@ -367,8 +370,8 @@ impl ShapeLayout {
             self.metadata
                 + h * self.meta_len()
                 + self.digits.iter().map(|&(_, n)| n).sum::<usize>()
-                + index / 4 * 16,
-            index % 4,
+                + index / NibbleBuckets::BITS_PER_POSITION * NibbleBuckets::ENTRIES_PER_POSITION,
+            index % NibbleBuckets::BITS_PER_POSITION,
         ))
     }
 }
@@ -512,9 +515,13 @@ impl<'a, S: CycleSource> Histograms<'a, S> {
                         let (offset, bit) = layout.shapes[shape]
                             .flag_base(h, column)
                             .expect("selected flag marginal");
-                        let sum = (0..16)
-                            .filter(|value| value & (1 << bit) != 0)
-                            .fold(ZERO, |sum, value| sum + buckets[offset + value]);
+                        let sum = NibbleBuckets::position_bit(
+                            buckets[offset..offset + NibbleBuckets::ENTRIES_PER_POSITION]
+                                .try_into()
+                                .expect("flag position"),
+                            bit,
+                        )
+                        .expect("checked flag bit");
                         buckets[base] += sum;
                     }
                 }
@@ -781,6 +788,10 @@ enum FoldStorage<'a> {
     Rows(&'a [F128]),
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "compiled metadata has checked power-of-two domains and valid bit indices"
+)]
 fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>]) {
     let (buckets, rows) = match storage {
         FoldStorage::Cycles(buckets) => (buckets, false),
@@ -793,20 +804,12 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
         for h in 0..sl.selectors {
             let bytes = sl.bytes(h);
             let size = word_entries(bytes);
-            let bits = if bytes { 8 } else { 4 };
-            let width = 1 << bits;
             let total = if rows {
-                buckets[sl.row_bases[h]..sl.row_bases[h] + width]
-                    .iter()
-                    .copied()
-                    .sum()
+                word_total(buckets, sl.row_bases[h], bytes)
             } else if let Some(base) = sl.totals {
                 buckets[base + h]
             } else if !sl.words.is_empty() {
-                buckets[sl.bases[h]..sl.bases[h] + width]
-                    .iter()
-                    .copied()
-                    .sum()
+                word_total(buckets, sl.bases[h], bytes)
             } else {
                 ZERO
             };
@@ -817,15 +820,13 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                     BankStorage::Cycle(index) if !rows => read_word(
                         buckets,
                         sl.bases[h] + index * size,
-                        bits,
-                        width,
+                        bytes,
                         &mut fold[destination..destination + 64],
                     ),
                     BankStorage::Row(index) if rows => read_word(
                         buckets,
                         sl.row_bases[h] + index * size,
-                        bits,
-                        width,
+                        bytes,
                         &mut fold[destination..destination + 64],
                     ),
                     BankStorage::Bits(entries) => {
@@ -842,10 +843,12 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
                                 ReadBit::Value { offset, value } => {
                                     buckets[metadata + offset + value]
                                 }
-                                ReadBit::Bit { offset, bound, bit } => bit_sum(
+                                ReadBit::Bit { offset, bound, bit } => DigitHistogram::sum_bit(
                                     &buckets[metadata + offset..metadata + offset + bound],
+                                    bound.ilog2() as usize,
                                     bit,
-                                ),
+                                )
+                                .expect("compiled bit domain"),
                                 ReadBit::Zero => ZERO,
                             };
                         }
@@ -857,22 +860,52 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
     }
 }
 
-fn read_word(buckets: &[F128], base: usize, bits: usize, width: usize, output: &mut [F128]) {
-    for (position, output) in buckets[base..base + 64 / bits * width]
-        .chunks_exact(width)
-        .zip(output.chunks_exact_mut(bits))
-    {
-        for (bit, output) in output.iter_mut().enumerate() {
-            *output = bit_sum(position, bit);
+fn read_word(buckets: &[F128], base: usize, bytes: bool, output: &mut [F128]) {
+    if bytes {
+        for (position, output) in buckets[base..base + ByteBuckets::ELEMENTS_PER_WORD]
+            .as_chunks::<{ ByteBuckets::ENTRIES_PER_POSITION }>()
+            .0
+            .iter()
+            .zip(
+                output
+                    .as_chunks_mut::<{ ByteBuckets::BITS_PER_POSITION }>()
+                    .0,
+            )
+        {
+            *output = ByteBuckets::position_bits(position);
+        }
+    } else {
+        for (position, output) in buckets[base..base + NibbleBuckets::ELEMENTS_PER_WORD]
+            .as_chunks::<{ NibbleBuckets::ENTRIES_PER_POSITION }>()
+            .0
+            .iter()
+            .zip(
+                output
+                    .as_chunks_mut::<{ NibbleBuckets::BITS_PER_POSITION }>()
+                    .0,
+            )
+        {
+            *output = NibbleBuckets::position_bits(position);
         }
     }
 }
 
-fn bit_sum(position: &[F128], bit: usize) -> F128 {
-    let half = 1 << bit;
-    position
-        .chunks_exact(half * 2)
-        .flat_map(|period| &period[half..])
-        .copied()
-        .sum()
+#[expect(
+    clippy::expect_used,
+    reason = "checked word storage contains its complete first position"
+)]
+fn word_total(buckets: &[F128], base: usize, bytes: bool) -> F128 {
+    if bytes {
+        ByteBuckets::position_total(
+            buckets[base..base + ByteBuckets::ENTRIES_PER_POSITION]
+                .try_into()
+                .expect("byte position"),
+        )
+    } else {
+        NibbleBuckets::position_total(
+            buckets[base..base + NibbleBuckets::ENTRIES_PER_POSITION]
+                .try_into()
+                .expect("nibble position"),
+        )
+    }
 }

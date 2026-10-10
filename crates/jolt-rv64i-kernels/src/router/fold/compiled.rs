@@ -1,5 +1,6 @@
 use super::super::shape::{SelectorFactor, SlotVariable};
 use super::{BitEntry, NibbleBuckets, RouterShape, ShapeLayout, WordSlot, F128, ZERO};
+use crate::packed::buckets::ByteBuckets;
 use crate::source::CycleSource;
 
 const INLINE_WORDS: usize = 16;
@@ -59,7 +60,7 @@ struct Digit {
 }
 #[derive(Debug, Clone, Copy)]
 struct Flags {
-    columns: [usize; 4],
+    columns: [usize; NibbleBuckets::BITS_PER_POSITION],
     len: usize,
     offset: usize,
 }
@@ -156,15 +157,15 @@ impl CompiledShape {
             .collect();
         let flags: Vec<_> = layout
             .flags
-            .chunks(4)
+            .chunks(NibbleBuckets::BITS_PER_POSITION)
             .map(|columns| {
                 let mut group = Flags {
-                    columns: [0; 4],
+                    columns: [0; NibbleBuckets::BITS_PER_POSITION],
                     len: columns.len(),
                     offset,
                 };
                 group.columns[..columns.len()].copy_from_slice(columns);
-                offset += 16;
+                offset += NibbleBuckets::ENTRIES_PER_POSITION;
                 group
             })
             .collect();
@@ -207,9 +208,10 @@ impl CompiledShape {
                                         .expect("checked flag storage");
                                     ReadBit::Bit {
                                         offset: layout.digits.iter().map(|(_, n)| n).sum::<usize>()
-                                            + index / 4 * 16,
-                                        bound: 16,
-                                        bit: index % 4,
+                                            + index / NibbleBuckets::BITS_PER_POSITION
+                                                * NibbleBuckets::ENTRIES_PER_POSITION,
+                                        bound: NibbleBuckets::ENTRIES_PER_POSITION,
+                                        bit: index % NibbleBuckets::BITS_PER_POSITION,
                                     }
                                 }
                             }
@@ -364,7 +366,7 @@ impl CompiledShape {
         e: F128,
         buckets: &mut ChunkBuckets<'_>,
     ) {
-        let size = if BYTES { 2048 } else { 256 };
+        let size = super::word_entries(BYTES);
         for reader in self.trace_words.as_slice() {
             buckets.word::<BYTES>(
                 base + reader.position * size,
@@ -452,7 +454,7 @@ impl CompiledShape {
             if entry.bytes {
                 for (position, &(_, word)) in words.iter().enumerate() {
                     buckets.word::<true>(
-                        entry.row_base + position * 2048,
+                        entry.row_base + position * ByteBuckets::ELEMENTS_PER_WORD,
                         source.bytecode_word(word, row),
                         e,
                     );
@@ -460,7 +462,7 @@ impl CompiledShape {
             } else {
                 for (position, &(_, word)) in words.iter().enumerate() {
                     buckets.word::<false>(
-                        entry.row_base + position * 256,
+                        entry.row_base + position * NibbleBuckets::ELEMENTS_PER_WORD,
                         source.bytecode_word(word, row),
                         e,
                     );
@@ -480,19 +482,23 @@ impl<'a> ChunkBuckets<'a> {
         reason = "the prefix is cut at a whole position boundary"
     )]
     pub(super) fn new(storage: &'a mut [F128]) -> Self {
-        let whole = storage.len() / 16 * 16;
+        let whole = storage.len() / NibbleBuckets::ENTRIES_PER_POSITION
+            * NibbleBuckets::ENTRIES_PER_POSITION;
         let (positions, tail) = storage.split_at_mut(whole);
         let positions = NibbleBuckets::new(positions).expect("whole positions");
         Self { positions, tail }
     }
     #[inline]
     pub(super) fn xor(&mut self, index: usize, e: F128) {
-        let position = index / 16;
+        let position = index / NibbleBuckets::ENTRIES_PER_POSITION;
         if position < self.positions.positions_mut().len() {
-            self.positions.positions_mut()[position][index & 15] += e;
+            self.positions.positions_mut()[position]
+                [index & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
         } else {
             let last = self.tail.len() - 1;
-            self.tail[(index - self.positions.positions_mut().len() * 16).min(last)] += e;
+            self.tail[(index
+                - self.positions.positions_mut().len() * NibbleBuckets::ENTRIES_PER_POSITION)
+                .min(last)] += e;
         }
     }
     #[inline]
@@ -501,33 +507,50 @@ impl<'a> ChunkBuckets<'a> {
         reason = "word slices have the fixed checked layout dimensions"
     )]
     fn word<const BYTES: bool>(&mut self, base: usize, mut word: u64, e: F128) {
-        if base & 15 != 0 {
-            let bits = if BYTES { 8 } else { 4 };
-            let width = 1 << bits;
-            for position in 0..64 / bits {
+        if base & (NibbleBuckets::ENTRIES_PER_POSITION - 1) != 0 {
+            let bits = if BYTES {
+                ByteBuckets::BITS_PER_POSITION
+            } else {
+                NibbleBuckets::BITS_PER_POSITION
+            };
+            let width = if BYTES {
+                ByteBuckets::ENTRIES_PER_POSITION
+            } else {
+                NibbleBuckets::ENTRIES_PER_POSITION
+            };
+            for position in 0..if BYTES {
+                ByteBuckets::POSITIONS_PER_WORD
+            } else {
+                NibbleBuckets::POSITIONS_PER_WORD
+            } {
                 self.xor(base + position * width + (word as usize & (width - 1)), e);
                 word >>= bits;
             }
             return;
         }
-        let start = base / 16;
+        let start = base / NibbleBuckets::ENTRIES_PER_POSITION;
         let positions = self.positions.positions_mut();
         if BYTES {
-            let word_positions: &mut [[F128; 16]; 128] = (&mut positions[start..start + 128])
+            let word_positions: &mut [[F128; NibbleBuckets::ENTRIES_PER_POSITION];
+                     ByteBuckets::ELEMENTS_PER_WORD
+                         / NibbleBuckets::ENTRIES_PER_POSITION] = (&mut positions[start
+                ..start + ByteBuckets::ELEMENTS_PER_WORD / NibbleBuckets::ENTRIES_PER_POSITION])
                 .try_into()
                 .expect("one byte word");
-            for position in word_positions.as_chunks_mut::<16>().0 {
-                let value = (word & 255) as usize;
-                position[value >> 4][value & 15] += e;
-                word >>= 8;
+            for position in word_positions.as_chunks_mut::<{ ByteBuckets::ENTRIES_PER_POSITION / NibbleBuckets::ENTRIES_PER_POSITION }>().0 {
+                let value = (word & (ByteBuckets::ENTRIES_PER_POSITION as u64 - 1)) as usize;
+                position[value >> NibbleBuckets::BITS_PER_POSITION][value & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
+                word >>= ByteBuckets::BITS_PER_POSITION;
             }
         } else {
-            let word_positions: &mut [[F128; 16]; 16] = (&mut positions[start..start + 16])
+            let word_positions: &mut [[F128; NibbleBuckets::ENTRIES_PER_POSITION];
+                     NibbleBuckets::POSITIONS_PER_WORD] = (&mut positions
+                [start..start + NibbleBuckets::POSITIONS_PER_WORD])
                 .try_into()
                 .expect("one nibble word");
             for position in word_positions {
-                position[(word & 15) as usize] += e;
-                word >>= 4;
+                position[(word & (NibbleBuckets::ENTRIES_PER_POSITION as u64 - 1)) as usize] += e;
+                word >>= NibbleBuckets::BITS_PER_POSITION;
             }
         }
     }

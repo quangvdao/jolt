@@ -5,7 +5,7 @@ pub mod nodes;
 pub mod product;
 
 pub use nodes::{coefficients_from_nodes, eval_at_node};
-pub use product::quadratic;
+pub use product::{linear_at_nodes, quadratic, quadratic_at_nodes};
 
 use thiserror::Error;
 

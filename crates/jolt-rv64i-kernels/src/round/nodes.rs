@@ -99,8 +99,11 @@ const fn matrix<const N: usize>(inverse_denominators: [F128; N]) -> Matrix {
 }
 
 /// Evaluate monomial coefficients at `F128::from_raw(node)`.
-/// Linear and quadratic factors use the same entry point. Every degree costs
-/// zero field multiplications: Horner's small-node products use `mul_x` and XOR.
+/// An empty coefficient slice returns zero. Every degree costs zero field
+/// multiplications: Horner's small-node products use `mul_x` and XOR. This is
+/// for a value per round; a loop over pairs uses [`super::quadratic_at_nodes`]
+/// or [`super::linear_at_nodes`] to share shifts across nodes. A node that is
+/// not a constant costs a branch per bit of the node.
 #[inline]
 pub fn eval_at_node(coefficients: &[F128], node: u8) -> F128 {
     coefficients.iter().rev().fold(ZERO, |value, &coefficient| {

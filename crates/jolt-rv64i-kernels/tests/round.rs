@@ -8,7 +8,10 @@ use jolt_field::F128;
 use jolt_poly::{BindingOrder, EqPolynomial, GruenSplitEqPolynomial};
 use jolt_rv64i_kernels::oracle::mle_at;
 use jolt_rv64i_kernels::round::eq::{eq_table, split_eq};
-use jolt_rv64i_kernels::round::{coefficients_from_nodes, eval_at_node, quadratic, RoundError};
+use jolt_rv64i_kernels::round::{
+    coefficients_from_nodes, eval_at_node, linear_at_nodes, quadratic, quadratic_at_nodes,
+    RoundError,
+};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -162,6 +165,32 @@ fn quadratic_coefficients_and_nodes_equal_coefficient_products() {
                 eval_at_node(&product, node),
                 (left[0] + x * left[1]) * (right[0] + x * right[1])
             );
+        }
+    }
+}
+
+#[test]
+fn shared_node_values_equal_multiplication_evaluation() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x621c);
+    for _ in 0..128 {
+        let [a, b, c] = std::array::from_fn(|_| {
+            F128::from_raw((u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64()))
+        });
+        for coefficients in [[a, b, c], [a, b, ZERO], [a, ZERO, c], [a, a, a]] {
+            for (i, value) in quadratic_at_nodes(coefficients).into_iter().enumerate() {
+                let x = F128::from_raw((i + 2) as u128);
+                assert_eq!(
+                    value,
+                    coefficients[0] + coefficients[1] * x + coefficients[2] * x * x
+                );
+            }
+            for (i, value) in linear_at_nodes([coefficients[0], coefficients[1]])
+                .into_iter()
+                .enumerate()
+            {
+                let x = F128::from_raw((i + 2) as u128);
+                assert_eq!(value, coefficients[0] + coefficients[1] * x);
+            }
         }
     }
 }

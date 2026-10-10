@@ -129,6 +129,12 @@ struct Job<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct RoundSums {
+    nodes: [F128; 4],
+    endpoint: Option<F128>,
+}
+
+#[derive(Clone, Copy)]
 struct ComputedRound {
     round: usize,
     bind: Option<F128>,
@@ -141,7 +147,7 @@ struct Shared {
     recipe: Recipe,
     log_t: usize,
     computed: Option<ComputedRound>,
-    sums: Vec<[F128; 4]>,
+    sums: Vec<RoundSums>,
     partials: Vec<Partial>,
     finished: Option<F128>,
     failed: bool,
@@ -344,7 +350,13 @@ impl RoutersCycleCore {
             recipe,
             log_t,
             computed: None,
-            sums: vec![[ZERO; 4]; shapes.len()],
+            sums: vec![
+                RoundSums {
+                    nodes: [ZERO; 4],
+                    endpoint: None
+                };
+                shapes.len()
+            ],
             partials: unsafe_allocate_zero_vec(partial_len),
             finished: None,
             failed: false,
@@ -491,6 +503,20 @@ impl Shared {
         bind: Option<F128>,
         round: usize,
     ) -> Result<(), SumcheckError<F128>> {
+        // With a zero Gruen endpoint, division cannot recover q(1). Its
+        // exceptional node reuses the same pair products in this pass.
+        if self.eq.current_linear_evals().1 == ZERO {
+            self.accumulate_endpoint::<BIND, CACHE, true>(bind, round)
+        } else {
+            self.accumulate_endpoint::<BIND, CACHE, false>(bind, round)
+        }
+    }
+
+    fn accumulate_endpoint<const BIND: bool, const CACHE: bool, const SINGULAR: bool>(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+    ) -> Result<(), SumcheckError<F128>> {
         let geometry = CycleChunks::new(self.log_t, round + 1)
             .map_err(|_| missing("router cycle geometry"))?;
         let pairs = geometry.len();
@@ -544,8 +570,8 @@ impl Shared {
                     .zip(partials.chunks_mut(SHAPES_PER_BATCH * 8))
                     .zip(&recipe.batches)
                 {
-                    let mut stack_totals = [[Partial::default(); 4]; SHAPES_PER_BATCH];
-                    let mut stack_inner = [[Partial::default(); 4]; SHAPES_PER_BATCH];
+                    let mut stack_totals = [[Partial::default(); 5]; SHAPES_PER_BATCH];
+                    let mut stack_inner = [[Partial::default(); 5]; SHAPES_PER_BATCH];
                     for block in (0..chunk_pairs).step_by(block_len) {
                         for sums in stack_inner.iter_mut().take(jobs.len()) {
                             sums.fill(Partial::default());
@@ -614,6 +640,11 @@ impl Shared {
                                 let sums = &mut stack_inner[member.shape];
                                 sums[0].0.fmadd(left[0] * right[0], weight);
                                 sums[1].0.fmadd(left[1] * right[1], weight);
+                                if SINGULAR {
+                                    sums[4]
+                                        .0
+                                        .fmadd((left[0] + left[1]) * (right[0] + right[1]), weight);
+                                }
                             }
                             for member in &recipe.doubles {
                                 if !supported(member.columns[0]) || !supported(member.columns[1]) {
@@ -624,9 +655,15 @@ impl Shared {
                                 let right = factor(member.columns[0]);
                                 let node = quadratic_at_nodes(left)[0] * linear_at_nodes(right)[0];
                                 let values = [left[0] * right[0], left[2] * right[1], node];
-                                let sums = &mut stack_inner[member.shape][..3];
+                                let sums = &mut stack_inner[member.shape];
                                 for (sum, value) in sums.iter_mut().zip(values) {
                                     sum.0.fmadd(value, weight);
+                                }
+                                if SINGULAR {
+                                    sums[4].0.fmadd(
+                                        (left[0] + left[1] + left[2]) * (right[0] + right[1]),
+                                        weight,
+                                    );
                                 }
                             }
                             for group in &recipe.triples {
@@ -653,6 +690,13 @@ impl Shared {
                                     for (sum, value) in sums.iter_mut().zip(values) {
                                         sum.0.fmadd(value, weight);
                                     }
+                                    if SINGULAR {
+                                        sums[4].0.fmadd(
+                                            (left[0] + left[1] + left[2])
+                                                * (right[0] + right[1] + right[2]),
+                                            weight,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -666,21 +710,35 @@ impl Shared {
                             {
                                 total.0.fmadd(inner.0.reduce(), outer);
                             }
+                            if SINGULAR {
+                                totals[4].0.fmadd(inner[4].0.reduce(), outer);
+                            }
                         }
                     }
                     for (output, totals) in partials.chunks_exact_mut(8).zip(stack_totals) {
-                        output[..4].copy_from_slice(&totals);
+                        output[..if SINGULAR { 5 } else { 4 }]
+                            .copy_from_slice(&totals[..if SINGULAR { 5 } else { 4 }]);
                     }
                 }
             });
         for shape in 0..count {
-            let mut sums = [F128Accumulator::default(); 4];
+            let mut sums = [F128Accumulator::default(); 5];
             for chunk in partials.chunks_exact(count * 8) {
-                for (sum, partial) in sums.iter_mut().zip(&chunk[shape * 8..shape * 8 + 4]) {
+                for (sum, partial) in sums[..if SINGULAR { 5 } else { 4 }]
+                    .iter_mut()
+                    .zip(&chunk[shape * 8..shape * 8 + if SINGULAR { 5 } else { 4 }])
+                {
                     sum.merge(partial.0);
                 }
             }
-            self.sums[shape] = sums.map(Accumulator::reduce);
+            self.sums[shape] = RoundSums {
+                nodes: std::array::from_fn(|node| sums[node].reduce()),
+                endpoint: if SINGULAR {
+                    Some(sums[4].reduce())
+                } else {
+                    None
+                },
+            };
         }
         drop(jobs);
         if BIND {
@@ -689,50 +747,6 @@ impl Shared {
             }
         }
         Ok(())
-    }
-
-    fn at_one(&self, shape: usize) -> F128 {
-        let geometry = CycleChunks::new(
-            self.log_t,
-            self.computed.map_or(0, |computed| computed.round) + 1,
-        );
-        let Ok(geometry) = geometry else {
-            return ZERO;
-        };
-        let block_len = self.eq.e_in_current_len();
-        let chunk_pairs = geometry.chunk_len();
-        let source = &self.sources[shape].table;
-        source
-            .par_chunks(chunk_pairs * 2)
-            .enumerate()
-            .map(|(chunk, values)| {
-                let mut total = F128Accumulator::default();
-                for (block, values) in values.chunks_exact(block_len * 2).enumerate() {
-                    let mut inner = F128Accumulator::default();
-                    for (offset, (values, &weight)) in values
-                        .chunks_exact(2)
-                        .zip(self.eq.e_in_current())
-                        .enumerate()
-                    {
-                        let mut product = values[1];
-                        let pair = chunk * chunk_pairs + block * block_len + offset;
-                        for &column in &self.recipe.columns[shape] {
-                            product *= self.columns.value(column, 2 * pair + 1);
-                        }
-                        inner.fmadd(product, weight);
-                    }
-                    total.fmadd(
-                        inner.reduce(),
-                        self.eq.e_out_current()[(chunk * chunk_pairs / block_len) + block],
-                    );
-                }
-                total
-            })
-            .reduce(F128Accumulator::default, |mut a, b| {
-                a.merge(b);
-                a
-            })
-            .reduce()
     }
 
     fn finish(&mut self, challenge: F128) -> Result<(), SumcheckError<F128>> {
@@ -801,10 +815,16 @@ impl ProveRounds<F128> for RouterCycleMember {
         #[cfg(feature = "test-utils")]
         let start = Instant::now();
         let sums = shared.sums[self.shape];
+        let endpoint = if shared.eq.current_linear_evals().1 == ZERO {
+            sums.endpoint
+                .ok_or_else(|| missing("router singular endpoint"))?
+        } else {
+            ZERO
+        };
         let degree = shared.recipe.degrees[self.shape];
         let at_one = shared
             .eq
-            .recover_q_one(sums[0], claim, || shared.at_one(self.shape))
+            .recover_q_one(sums.nodes[0], claim, || endpoint)
             .map_err(|actual| {
                 shared.failed = true;
                 SumcheckError::RoundCheckFailed {
@@ -813,9 +833,14 @@ impl ProveRounds<F128> for RouterCycleMember {
                     actual,
                 }
             })?;
-        let coefficients =
-            coefficients_from_nodes(degree, sums[0], sums[1], at_one, &sums[2..degree])
-                .map_err(|_| missing("router interpolation"))?;
+        let coefficients = coefficients_from_nodes(
+            degree,
+            sums.nodes[0],
+            sums.nodes[1],
+            at_one,
+            &sums.nodes[2..degree],
+        )
+        .map_err(|_| missing("router interpolation"))?;
         let message = shared.eq.round_poly_from_q_coeffs(&coefficients);
         #[cfg(feature = "test-utils")]
         {

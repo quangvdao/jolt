@@ -1613,3 +1613,19 @@ fn nine_cycle_members_and_repeated_word_claims_match_definitions_on_generic_path
             .sum::<F128>()]
     );
 }
+
+#[test]
+fn singular_cycle_batch_endpoints_match_definitions_for_all_factor_counts() {
+    let mut rng = ChaCha20Rng::seed_from_u64(1409);
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 8, 64, 1409).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let shapes = synthetic_router_shapes().unwrap();
+    let x = point(17, &mut rng);
+    let mut r_cycle = point(8, &mut rng);
+    r_cycle[0] = ZERO;
+    r_cycle[1] = ONE;
+    let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
+    for reverse in [false, true] {
+        prove_cycle_fixture(&trace, &shapes, &r_cycle, &x, &definition, reverse);
+    }
+}

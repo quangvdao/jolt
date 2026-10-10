@@ -44,7 +44,13 @@
 //! is the high-water live-byte increase over the interval baseline;
 //! `final_bytes` is the live-byte increase with the measured state still alive
 //! when counters stop. The resident source, prepared fixture, warmed pools and
-//! runner bookkeeping are outside the baseline increase. These figures are not
+//! runner bookkeeping are outside the baseline increase. Preparation and core
+//! are separate samples with separate baselines: the consuming input is already
+//! resident when the core interval starts. `prepared_input_bytes` reports its
+//! digit-buffer capacity (the buffers are allocated with exact capacity),
+//! excluding small column/width metadata. It is not an allocation delta or a
+//! reconstructed whole-pipeline peak; freeing input may offset later growth.
+//! These figures are not
 //! RSS, allocator retention, stack use or direct libc allocations. Measured
 //! state and fixtures are released only after their counters stop. Machinery
 //! construction and pass counters have separate intervals; probes include
@@ -54,6 +60,8 @@
 //! reductions and the first four binds, including materialisation. Compact
 //! source and family construction are outside its timer. It is a separate
 //! diagnostic, not a share of the fused product rounds or an additive split.
+//! Its per-sample input refresh copies a validated group, reported as
+//! `_input_clone` with `clone_ns`, rather than a new validation/preparation.
 
 pub mod allocator;
 pub mod arithmetic;
@@ -67,7 +75,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jolt_field::{Field, F128};
-use jolt_rv64i_kernels::source::CycleSource;
+use jolt_rv64i_kernels::source::{CycleSource, OptionalGroup, PreparedGroups, PresentGroup};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{ProveRounds, ProvedBatch, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
@@ -238,7 +246,42 @@ impl Summary {
     }
 }
 
+/// Capacity of digit buffers already resident at a consuming core's baseline.
+pub trait PreparedInput {
+    fn input_bytes(&self) -> usize;
+}
+
+impl PreparedInput for () {
+    fn input_bytes(&self) -> usize {
+        0
+    }
+}
+impl PreparedInput for PresentGroup {
+    fn input_bytes(&self) -> usize {
+        self.bytes().len()
+    }
+}
+impl PreparedInput for OptionalGroup {
+    fn input_bytes(&self) -> usize {
+        self.bytes().len()
+    }
+}
+impl PreparedInput for PreparedGroups {
+    fn input_bytes(&self) -> usize {
+        self.present
+            .iter()
+            .map(PreparedInput::input_bytes)
+            .sum::<usize>()
+            + self
+                .optional
+                .iter()
+                .map(PreparedInput::input_bytes)
+                .sum::<usize>()
+    }
+}
+
 struct Sample {
+    prepared_input_bytes: usize,
     times: Vec<f64>,
     allocation: AllocationStats,
 }
@@ -311,6 +354,7 @@ impl PhaseTimes {
 /// A case's record name, phase names, total membership and optional requirement.
 /// Supplemental phases must not also enter the total when they overlap a primary.
 pub struct Case<V> {
+    pub preparation: &'static str,
     pub name: String,
     pub variant: V,
     pub phases: Vec<String>,
@@ -322,6 +366,7 @@ impl<V> Case<V> {
     pub fn core(name: &str, variant: V, extra: &[&str]) -> Self {
         Self {
             name: name.to_owned(),
+            preparation: "preparation",
             variant,
             phases: ["construct", "rounds", "finish", "extract"]
                 .into_iter()
@@ -336,6 +381,7 @@ impl<V> Case<V> {
 
 /// Runner-computed distributions, in nanoseconds per cycle, for one case.
 pub struct Record {
+    pub prepared_input_bytes: usize,
     pub id: String,
     pub log_t: usize,
     pub threads: usize,
@@ -375,7 +421,7 @@ impl Record {
         for (name, phase) in names.iter().zip(&self.phases) {
             print!(" {name}_ns={:.6}", phase.median);
         }
-        print!(" total_ns={:.6} peak_bytes={} final_bytes={} allocs={} samples={} total_min_ns={:.6} total_max_ns={:.6}", self.total.median, self.allocation.peak_bytes, self.allocation.final_bytes, self.allocation.allocs, self.samples, self.total.min, self.total.max);
+        print!(" prepared_input_bytes={} total_ns={:.6} peak_bytes={} final_bytes={} allocs={} samples={} total_min_ns={:.6} total_max_ns={:.6}", self.prepared_input_bytes, self.total.median, self.allocation.peak_bytes, self.allocation.final_bytes, self.allocation.allocs, self.samples, self.total.min, self.total.max);
         for (name, phase) in names.iter().zip(&self.phases) {
             print!(
                 " {name}_min_ns={:.6} {name}_max_ns={:.6}",
@@ -476,6 +522,7 @@ pub fn run_prepared_cases<P, Q, R, E, V>(
 ) -> Result<Vec<Record>, RunnerError>
 where
     P: Send + Sync,
+    Q: PreparedInput,
     V: Sync,
     E: StdError,
 {
@@ -527,6 +574,7 @@ where
                                     message: error.to_string(),
                                 })?;
                             let preparation_ns = clock.elapsed().as_nanos() as f64;
+                            let prepared_input_bytes = input.input_bytes();
                             let preparation_allocation = measurement.finish();
                             let measurement = AllocationMeasurement::begin();
                             let state = measure(
@@ -544,6 +592,7 @@ where
                             drop(state);
                             Ok((
                                 Sample {
+                                    prepared_input_bytes,
                                     times: times
                                         .times
                                         .into_iter()
@@ -552,6 +601,7 @@ where
                                     allocation,
                                 },
                                 Sample {
+                                    prepared_input_bytes: 0,
                                     times: vec![preparation_ns],
                                     allocation: preparation_allocation,
                                 },
@@ -568,7 +618,12 @@ where
                     let summary = Sample::phase(&preparation, 0, cycles as f64);
                     let (peak_bytes, final_bytes, allocs) = Sample::allocations(&preparation);
                     if final_bytes != 0 || allocs != 0 {
-                        println!("{}_preparation/{}/{log_t}/{threads} prepare_ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs} loaded_machine=true", case.name, profile.name(), summary.median, summary.min, summary.max, options.samples);
+                        let metric = if case.preparation == "input_clone" {
+                            "clone_ns"
+                        } else {
+                            "prepare_ns"
+                        };
+                        println!("{}_{}/{}/{log_t}/{threads} {metric}={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs} loaded_machine=true", case.name, case.preparation, profile.name(), summary.median, summary.min, summary.max, options.samples);
                     }
                     let divisor = cycles as f64;
                     let phases = (0..case.phases.len())
@@ -588,6 +643,11 @@ where
                     );
                     let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
                     let record = Record {
+                        prepared_input_bytes: samples
+                            .iter()
+                            .map(|s| s.prepared_input_bytes)
+                            .max()
+                            .unwrap_or(0),
                         id: format!("{}/{}/{log_t}/{threads}", case.name, profile.name()),
                         log_t,
                         threads: *threads,
@@ -677,6 +737,7 @@ pub fn run_batch<P, Q, C, O, E>(
 ) -> Result<(), RunnerError>
 where
     P: Send + Sync,
+    Q: PreparedInput,
     E: StdError,
 {
     let (prepare, prepare_sample) = preparation;
@@ -897,6 +958,7 @@ where
                         let allocation = measurement.finish();
                         Ok::<_, RunnerError>((
                             Sample {
+                                prepared_input_bytes: 0,
                                 times: vec![construct_ns, primary_ns, 0.0, 0.0],
                                 allocation,
                             },
@@ -1043,10 +1105,12 @@ where
                             let pass_allocation = pass_measurement.finish();
                             Ok((
                                 Sample {
+                                    prepared_input_bytes: 0,
                                     times: vec![0.0, run_ns, 0.0, 0.0],
                                     allocation: pass_allocation,
                                 },
                                 Sample {
+                                    prepared_input_bytes: 0,
                                     times: vec![construct_ns, 0.0, 0.0, 0.0],
                                     allocation: construction_allocation,
                                 },

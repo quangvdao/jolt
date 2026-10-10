@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use jolt_field::{Field, F128};
 use jolt_rv64i_kernels::source::CycleSource;
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
-use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_sumcheck::{ProveRounds, ProvedBatch, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -327,6 +327,15 @@ impl Record {
         println!("{id} samples={} alternating=true same_source=true min_ns={:.6} median_ns={:.6} max_ns={:.6} gain_over_default_ns={gain:.6} combined_spread_ns={spread:.6} gain_exceeds_spread={} loaded_machine=true", self.samples, self.total.min, self.total.median, self.total.max, gain > spread);
     }
 
+    #[expect(
+        clippy::print_stdout,
+        reason = "pass requirements are benchmark output"
+    )]
+    pub fn print_requirement(&self, id: &str, phase: usize, threshold: f64) {
+        let summary = &self.phases[phase];
+        println!("{id} ns={:.6} min_ns={:.6} max_ns={:.6} samples={} threshold_ns={threshold:.6} meets_threshold={} loaded_machine=true", summary.median, summary.min, summary.max, self.samples, summary.meets(threshold));
+    }
+
     #[expect(clippy::print_stdout, reason = "runner records are benchmark output")]
     pub fn print(&self, id: &str, names: &[String], threshold: Option<f64>) {
         print!("{id}");
@@ -556,7 +565,7 @@ pub struct CoreRun<'a> {
 
 /// Batch challenges and disjoint round/terminal-bind wall times.
 pub struct BatchRun {
-    pub challenges: Vec<F128>,
+    pub proved: ProvedBatch<F128>,
     pub rounds: Duration,
     pub finish: Duration,
 }
@@ -587,10 +596,10 @@ where
             times.set(1, batch.rounds);
             times.set(2, batch.finish);
             let clock = Clock::start();
-            let output = extract(&core, &batch.challenges, times)?;
+            let output = extract(&core, &batch.proved.challenges, times)?;
             let _ = black_box(&output);
             times.set(3, clock.elapsed());
-            Ok::<_, E>((core, output))
+            Ok::<_, E>((core, output, batch))
         },
         |_, _, _| {},
         |record, fixture, ()| report(record, fixture),
@@ -961,10 +970,11 @@ where
                                 message: error.to_string(),
                             })?);
                             let run_ns = start.elapsed().as_nanos() as f64;
+                            let pass_allocation = pass_measurement.finish();
                             Ok((
                                 Sample {
                                     times: vec![0.0, run_ns, 0.0, 0.0],
-                                    allocation: pass_measurement.finish(),
+                                    allocation: pass_allocation,
                                 },
                                 Sample {
                                     times: vec![construct_ns, 0.0, 0.0, 0.0],

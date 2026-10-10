@@ -274,7 +274,7 @@ impl Tail {
             times.set(10 + member, duration);
         }
         Ok(BatchRun {
-            challenges: proved.challenges,
+            proved,
             rounds: batch.saturating_sub(scheduler.finish),
             finish: scheduler.finish,
         })

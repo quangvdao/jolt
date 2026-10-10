@@ -1,6 +1,7 @@
 //! Checked router banks and low-first variable maps shared by every router phase.
 
 use crate::source::{CycleSource, ValidatedTrace};
+#[cfg(feature = "test-utils")]
 use std::ops::Range;
 use thiserror::Error;
 
@@ -107,6 +108,7 @@ pub struct RouterShape {
     slots: usize,
     bank: Vec<WordSlot>,
     factors: Vec<SelectorFactor>,
+    factor_indices: [(usize, usize); 3],
     word_slots: Vec<usize>,
     slot_map: Vec<(usize, SlotVariable)>,
     idle: Vec<usize>,
@@ -214,10 +216,17 @@ impl RouterShape {
         let idle = (0..slots)
             .filter(|slot| !slot_map.iter().any(|&(used, _)| used == *slot))
             .collect();
+        let mut factor_indices = [(0, 0); 3];
+        let mut shift = 0;
+        for (index, factor) in factors.iter().enumerate() {
+            factor_indices[index] = (factor.column, shift);
+            shift += factor.slots.len();
+        }
         Ok(Self {
             slots,
             bank,
             factors,
+            factor_indices,
             word_slots,
             slot_map,
             idle,
@@ -341,24 +350,28 @@ impl RouterShape {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn selector<S: CycleSource>(
         &self,
         source: &S,
         index: usize,
         row: bool,
     ) -> Option<usize> {
-        let mut h = 0;
-        let mut shift = 0;
-        for factor in &self.factors {
-            let digit = if row {
-                source.row_digit(factor.column, index)
+        let digit = |factor: usize| {
+            let (column, shift) = self.factor_indices[factor];
+            let value = if row {
+                source.row_digit(column, index)
             } else {
-                source.digit(factor.column, index)
+                source.digit(column, index)
             }?;
-            h |= digit << shift;
-            shift += factor.slots.len();
+            Some(value << shift)
+        };
+        let first = digit(0)?;
+        match self.factors.len() {
+            1 => Some(first),
+            2 => Some(first | digit(1)?),
+            _ => Some(first | digit(1)? | digit(2)?),
         }
-        Some(h)
     }
 }
 

@@ -35,6 +35,8 @@ enum FoldBenchError {
 use std::sync::Arc;
 use support::{run_core, RunnerError};
 
+const HISTOGRAM_COLUMNS: [usize; 11] = [5, 6, 7, 8, 9, 10, 11, 12, 18, 19, 20];
+
 struct FoldBench {
     trace: Arc<ValidatedTrace<SyntheticTrace>>,
     shapes: Vec<RouterShape>,
@@ -83,7 +85,7 @@ impl FoldBench {
                 selectors.sort_unstable_by_key(|&h| (Reverse(counts[h]), h));
                 values[0] = selectors.into_iter().take(byte_count).collect();
             }
-            let words = [5, 1, 2, 3, 2][index];
+            let words = FoldLayout::CALIBRATION_WORD_SETS[index];
             for (h, count) in counts.into_iter().enumerate() {
                 let positions = if values[index].contains(&h) { 8 } else { 16 };
                 bucket_xors += count * (words * positions + if index == 0 { 8 } else { 0 });
@@ -95,9 +97,14 @@ impl FoldBench {
         let point = (0..log_t).map(|_| F128::random(&mut rng)).collect();
         let cycles = trace.source().cycles();
         let chunks = CycleChunks::new(log_t, 0)?.ranges().len();
-        let plan_bytes = 4 * cycles + chunks * 256 * 8;
+        let plan_bytes =
+            4 * cycles + chunks * 256 * 8 + std::mem::size_of::<ScatterPlan<SyntheticTrace>>();
+        let histogram_entries: usize = HISTOGRAM_COLUMNS
+            .iter()
+            .map(|&column| 1 << trace.source().bits(column))
+            .sum();
         let rho = trace.source().bytecode_rows() as f64 / cycles as f64;
-        println!("fold/scratch/{byte_count}/{log_t}/{} cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} scatter_buffer_bytes={} plan_bytes={plan_bytes} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", rayon::current_num_threads(), layout.entries()*16, layout.row_entries()*16, cycles*16, bucket_xors as f64/cycles as f64, bucket_xors as f64/cycles as f64*0.6, rho*(64.0*0.6+5.0*0.3), 2.2e6*0.3/cycles as f64);
+        println!("fold/scratch/{byte_count}/{log_t}/{} cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} scatter_buffer_bytes={} plan_bytes={plan_bytes} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", rayon::current_num_threads(), (layout.entries()+histogram_entries)*16, (layout.row_entries()+histogram_entries)*16, cycles*16, bucket_xors as f64/cycles as f64, bucket_xors as f64/cycles as f64*0.6, rho*(64.0*0.6+5.0*0.3), 2.2e6*0.3/cycles as f64);
         Ok((
             Self {
                 trace,
@@ -119,7 +126,7 @@ impl FoldBench {
             &self.shapes,
             &self.point,
             &self.plan,
-            &[5, 6, 7, 8, 9, 10, 11, 12, 18, 19, 20],
+            &HISTOGRAM_COLUMNS,
         )?;
         let times = phases.map(|time| time.as_nanos() as f64 / self.trace.source().cycles() as f64);
         println!("fold/pass_phases fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6}", times[0], times[1], times[2], times[3]);

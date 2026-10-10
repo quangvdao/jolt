@@ -24,6 +24,7 @@ mod tests {
     use rayon::ThreadPoolBuilder;
     use std::mem::size_of;
     use std::sync::Arc;
+    use std::time::Duration;
 
     const ZERO: F128 = F128::from_raw(0);
     const ONE: F128 = F128::from_raw(1);
@@ -467,6 +468,62 @@ mod tests {
     }
 
     #[test]
+    fn complete_fold_row_only_words_preserve_constant_and_cycle_digit_bits() {
+        let mut source = Trace::small(vec![Some(0); 8]);
+        source.by_row[0] = true;
+        source.row_digits[0][0] = Some(0);
+        source.bytecode[0][0] = 0x8123_4567_89ab_cdef;
+        source.widths.push(0);
+        source.by_row.push(false);
+        source.digits.push(
+            (0..8)
+                .map(|j| if j % 2 == 0 { None } else { Some(0) })
+                .collect(),
+        );
+        source.row_digits.push(vec![None]);
+        let source = Arc::new(source);
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
+        let shapes = vec![RouterShape::new(
+            7,
+            vec![
+                WordSlot::Bytecode(0),
+                WordSlot::Bits(vec![
+                    BitEntry::One,
+                    BitEntry::Indicator {
+                        column: 1,
+                        value: 0,
+                    },
+                ]),
+            ],
+            vec![SelectorFactor {
+                column: 0,
+                slots: vec![],
+            }],
+            [0, 1, 2, 3, 4, 5],
+            vec![6],
+            0,
+            vec![],
+        )
+        .unwrap()];
+        let mut rng = ChaCha20Rng::seed_from_u64(832);
+        for point in [
+            (0..3).map(|_| random_field(&mut rng)).collect::<Vec<_>>(),
+            vec![ZERO; 3],
+            vec![ONE, ZERO, ZERO],
+        ] {
+            let oracle = expected(source.as_ref(), &shapes, &point, &[0, 1]);
+            for values in [vec![], vec![0]] {
+                let layout = FoldLayout::new(&trace, &shapes, &[values]).unwrap();
+                check_output(
+                    &fold_pass(&trace, &shapes, &point, &plan, &layout, &[0, 1]).unwrap(),
+                    &oracle,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn complete_fold_two_chunks_matches_one_oracle_on_one_and_twelve_threads() {
         let source = Arc::new(Trace::synthetic(13, 828));
         let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
@@ -511,6 +568,9 @@ mod tests {
                 .num_threads(threads)
                 .build()
                 .unwrap();
+            // Contended mutexes can initialize persistent thread parking state on any worker.
+            std::thread::park_timeout(Duration::from_nanos(1));
+            drop(pool.broadcast(|_| std::thread::park_timeout(Duration::from_nanos(1))));
             pool.install(|| {
                 let trace =
                     Arc::new(ValidatedTrace::new(Arc::new(Trace::synthetic(log_t, 830))).unwrap());

@@ -279,6 +279,10 @@ impl MachineryKernel for Machinery {
             _ => None,
         }
     }
+    #[expect(
+        clippy::print_stdout,
+        reason = "scatter output is accounted separately from pass scratch"
+    )]
     fn memory_bytes(&self) -> Option<(usize, usize)> {
         match self {
             Self::Scatter {
@@ -286,10 +290,16 @@ impl MachineryKernel for Machinery {
                 weights,
                 output,
                 ..
-            } => Some((
-                *plan_bytes,
-                (weights.capacity() + output.capacity()) * std::mem::size_of::<F128>(),
-            )),
+            } => {
+                println!(
+                    "machinery/scatter_output output_bytes={}",
+                    output.capacity() * std::mem::size_of::<F128>()
+                );
+                Some((
+                    *plan_bytes,
+                    weights.capacity() * std::mem::size_of::<F128>(),
+                ))
+            }
             Self::Bucket { .. } | Self::Merge { .. } => Some((
                 0,
                 rayon::current_num_threads() * LAYOUT * std::mem::size_of::<F128>(),

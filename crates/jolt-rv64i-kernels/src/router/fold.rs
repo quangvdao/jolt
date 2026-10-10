@@ -23,6 +23,7 @@ struct ShapeLayout {
     flags: Vec<usize>,
     selectors: usize,
     byte_values: Vec<usize>,
+    byte_flags: Vec<bool>,
     bases: Vec<usize>,
     row_bases: Vec<usize>,
     metadata: usize,
@@ -130,6 +131,10 @@ impl FoldLayout {
                 }
             }
             let selectors = shape.selectors();
+            let mut byte_flags = vec![false; selectors];
+            for &h in &sorted {
+                byte_flags[h] = true;
+            }
             let mut meta_len = flags.len().div_ceil(4) * 16;
             for &(_, bound) in &digits {
                 storage_add(&mut meta_len, bound)?;
@@ -190,6 +195,7 @@ impl FoldLayout {
                 flags,
                 selectors,
                 byte_values: sorted,
+                byte_flags,
                 bases,
                 row_bases,
                 metadata,
@@ -291,7 +297,7 @@ impl FoldLayout {
 
 impl ShapeLayout {
     fn bytes(&self, h: usize) -> bool {
-        self.byte_values.binary_search(&h).is_ok()
+        self.byte_flags[h]
     }
     fn meta_len(&self) -> usize {
         self.meta_len
@@ -462,6 +468,20 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
             marginal.unwrap_or(HistogramPlan::Cycle)
         });
     }
+    let mut fallbacks = vec![Vec::new(); shapes.len()];
+    let mut direct_histograms = Vec::new();
+    let mut row_histograms = Vec::new();
+    let mut row_hist_base = layout.row_entries;
+    for ((&column, &hp), &base) in histogram_columns.iter().zip(&hist_plans).zip(&hist_offsets) {
+        match hp {
+            HistogramPlan::Digit { shape } | HistogramPlan::Flag { shape } => {
+                fallbacks[shape].push((column, base));
+            }
+            HistogramPlan::Cycle => direct_histograms.push((column, base)),
+            HistogramPlan::Row => row_histograms.push((column, row_hist_base)),
+        }
+        row_hist_base += 1 << source.bits(column);
+    }
     let geometry = CycleChunks::new(log_t, 0).expect("validated cycles");
     let (low, high) = geometry.split_point(r_cycle).expect("checked cycle point");
     let low = eq_table(low, None);
@@ -474,21 +494,22 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         times[3] += clock.elapsed();
         start = Some(Instant::now());
     }
-    weights
-        .par_chunks_mut(geometry.chunk_len())
-        .zip(plan.slots().par_chunks(geometry.chunk_len()))
-        .enumerate()
-        .for_each(|(chunk, (weights, slots))| {
+    plan.emission_chunks(&mut weights)
+        .expect("freshly sized weight buffer")
+        .for_each(|(interval, slots, weights)| {
+            let Some(last) = weights.len().checked_sub(1) else {
+                return;
+            };
             let mut scratch = pool.take().expect("sequential chunk body");
             for (block, slots) in slots.chunks_exact(low.len()).enumerate() {
-                let start = chunk * geometry.chunk_len() + block * low.len();
+                let start = interval.start + block * low.len();
                 let hi = high[start / low.len()];
                 for (offset, (&lo, &slot)) in low.iter().zip(slots).enumerate() {
                     let cycle = start + offset;
                     let e = hi * lo;
                     // Scatter slots are relative to the whole chunk, not its equality block.
-                    weights[usize::from(slot)] = e;
-                    for (shape, sl) in shapes.iter().zip(&layout.shapes) {
+                    weights[usize::from(slot).min(last)] = e;
+                    for (index, (shape, sl)) in shapes.iter().zip(&layout.shapes).enumerate() {
                         if let Some(h) = shape.selector(source, cycle, false) {
                             let bytes = sl.bytes(h);
                             let size = word_entries(bytes);
@@ -508,7 +529,14 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
                             let mut base = sl.metadata + h * sl.meta_len();
                             for &(column, bound) in &sl.digits {
                                 if let Some(digit) = source.digit(column, cycle) {
-                                    scratch[base + digit] += e;
+                                    let storage = &mut scratch[base..base + bound];
+                                    if bound == 16 {
+                                        let mut buckets = NibbleBuckets::new(storage)
+                                            .expect("one padded digit position");
+                                        buckets.positions_mut()[0][digit & 15] += e;
+                                    } else if let Some(last) = storage.len().checked_sub(1) {
+                                        storage[digit.min(last)] += e;
+                                    }
                                 }
                                 base += bound;
                             }
@@ -518,28 +546,25 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
                                     value |=
                                         usize::from(source.digit(column, cycle).is_some()) << bit;
                                 }
-                                scratch[base + value] += e;
+                                let mut buckets = NibbleBuckets::new(&mut scratch[base..base + 16])
+                                    .expect("one packed flag position");
+                                buckets.positions_mut()[0][value & 15] += e;
                                 base += 16;
                             }
                             if let Some(base) = sl.totals {
                                 scratch[base + h] += e;
                             }
+                        } else {
+                            for &(column, base) in &fallbacks[index] {
+                                if let Some(digit) = source.digit(column, cycle) {
+                                    scratch[base + digit] += e;
+                                }
+                            }
                         }
                     }
-                    for ((&column, &hp), &base) in
-                        histogram_columns.iter().zip(&hist_plans).zip(&hist_offsets)
-                    {
-                        let direct = match hp {
-                            HistogramPlan::Cycle => true,
-                            HistogramPlan::Row => false,
-                            HistogramPlan::Digit { shape } | HistogramPlan::Flag { shape } => {
-                                shapes[shape].selector(source, cycle, false).is_none()
-                            }
-                        };
-                        if direct {
-                            if let Some(digit) = source.digit(column, cycle) {
-                                scratch[base + digit] += e;
-                            }
+                    for &(column, base) in &direct_histograms {
+                        if let Some(digit) = source.digit(column, cycle) {
+                            scratch[base + digit] += e;
                         }
                     }
                 }
@@ -551,6 +576,8 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
     }
     drop(low);
     drop(high);
+    drop(fallbacks);
+    drop(direct_histograms);
     let mut ra_fold = vec![ZERO; source.bytecode_rows()];
     plan.apply_buffer(&weights, &mut ra_fold)
         .expect("freshly sized scatter buffers");
@@ -608,6 +635,11 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         times[3] += clock.elapsed();
         start = Some(Instant::now());
     }
+    let row_shapes: Vec<_> = shapes
+        .iter()
+        .zip(&layout.shapes)
+        .filter(|(_, sl)| !sl.row_words.is_empty())
+        .collect();
     ra_fold
         .par_chunks(geometry.chunk_len())
         .enumerate()
@@ -618,10 +650,7 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
                     continue;
                 }
                 let row = chunk * geometry.chunk_len() + offset;
-                for (shape, sl) in shapes.iter().zip(&layout.shapes) {
-                    if sl.row_words.is_empty() {
-                        continue;
-                    }
+                for &(shape, sl) in &row_shapes {
                     if let Some(h) = shape.selector(source, row, true) {
                         let bytes = sl.bytes(h);
                         let size = word_entries(bytes);
@@ -633,14 +662,10 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
                         }
                     }
                 }
-                let mut base = layout.row_entries;
-                for (&column, &hp) in histogram_columns.iter().zip(&hist_plans) {
-                    if matches!(hp, HistogramPlan::Row) {
-                        if let Some(digit) = source.row_digit(column, row) {
-                            scratch[base + digit] += e;
-                        }
+                for &(column, base) in &row_histograms {
+                    if let Some(digit) = source.row_digit(column, row) {
+                        scratch[base + digit] += e;
                     }
-                    base += 1 << source.bits(column);
                 }
             }
         });
@@ -648,6 +673,8 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         times[2] = clock.elapsed();
         start = Some(Instant::now());
     }
+    drop(row_shapes);
+    drop(row_histograms);
     let row_buckets = row_pool.merge().expect("all row loans returned");
     readout(shapes, layout, &[], &row_buckets, true, &mut folds);
     let mut row_base = layout.row_entries;

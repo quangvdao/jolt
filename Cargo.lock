@@ -3758,6 +3758,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-rv64i-arith"
+version = "0.1.0"
+dependencies = [
+ "jolt-field",
+ "jolt-program",
+ "jolt-r1cs",
+ "jolt-riscv",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "jolt-sdk"
 version = "0.1.0"
 dependencies = [

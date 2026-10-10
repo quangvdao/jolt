@@ -7,6 +7,7 @@ use jolt_rv64i_arith::{BaseWords, BitsBuilder, CycleFacts, Layout, RowSystem, Wi
 
 use super::common::{
     asm, harness,
+    interp::Error,
     replay::{self, State},
 };
 
@@ -121,7 +122,7 @@ fn successor_membership_rejects_inner_and_final_escape() {
     assert_eq!(oracle.step().unwrap().next_pc, 4);
     assert!(matches!(
         oracle.step(),
-        Err(super::common::interp::Error::InvalidTarget { target: 16, .. })
+        Err(Error::InvalidTarget { target: 16, .. })
     ));
     let builder = BitsBuilder::new(&layout, &bytecode).unwrap();
     let first = builder
@@ -162,7 +163,7 @@ fn successor_membership_rejects_inner_and_final_escape() {
     let mut oracle = harness::machine(&program, &layout, &initial);
     assert!(matches!(
         oracle.run(1),
-        Err(super::common::interp::Error::MissingInstruction { pc: 4 })
+        Err(Error::MissingInstruction { pc: 4 })
     ));
     let bits = BitsBuilder::new(&layout, &bytecode)
         .unwrap()
@@ -189,7 +190,7 @@ fn successor_membership_rejects_inner_and_final_escape() {
 
 #[test]
 fn oracle_rejects_wrapping_ram_statement() {
-    use super::common::interp::{Error, Machine};
+    use super::common::interp::Machine;
     let lowest_address = u64::MAX - (1 << 22) + 1;
     assert!(Layout::new(1, 20, lowest_address).is_err());
     assert_eq!(

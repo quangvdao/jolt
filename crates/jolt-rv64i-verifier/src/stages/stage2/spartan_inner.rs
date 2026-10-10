@@ -6,14 +6,18 @@ pub use crate::claims::spartan_inner::{
 };
 use crate::ids::{DerivedId, InnerDerived};
 use crate::points::PointsError;
+use crate::proof::DimensionedRelation;
 use crate::public::matrices::RowMatrices;
 use crate::statement::LOG_T_MAX;
 use jolt_claims::{OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
 use std::sync::Arc;
 
+/// Reduction over ten low-variable-first witness-column coordinates, fixed at the verified batch-1 row and cycle points.
+/// The matrices must be those of the checked layout; `new` validates the supplied point widths.
 #[derive(Clone)]
 pub struct SpartanInner<F: JoltField> {
     symbolic: SpartanInnerSymbolic,
@@ -42,6 +46,8 @@ impl<F: Copy> InnerTerms<F> {
 }
 
 impl<F: JoltField> SpartanInner<F> {
+    /// Establishes eight binary row coordinates, the matrices' field-row width, and a cycle width in `1..=LOG_T_MAX`.
+    /// The row and cycle points must come from batch 1; inconsistent dimensions return `PointsError`.
     pub fn new(
         matrices: Arc<RowMatrices>,
         rho_f2: Vec<F>,
@@ -63,16 +69,19 @@ impl<F: JoltField> SpartanInner<F> {
             });
         }
         Ok(Self {
-            symbolic: SpartanInnerSymbolic,
+            symbolic: Self::symbolic_with(()),
             matrices,
             rho_f2,
             rho_f128,
             r_1,
         })
     }
+    /// The verified batch-1 cycle point, with low variables first.
     pub fn r_1(&self) -> &[F] {
         &self.r_1
     }
+    /// The folded public matrix evaluation at ten low-variable-first column coordinates.
+    /// Rejects a column point of the wrong width; coefficients come from this batch's challenge draw.
     pub fn matrix_weight(
         &self,
         w: &[F],
@@ -136,6 +145,10 @@ impl<F: JoltField> SpartanInner<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for SpartanInner<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = SpartanInnerSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -188,4 +201,14 @@ impl<F: JoltField> ConcreteSumcheck<F> for SpartanInner<F> {
     ) -> Result<F, VerifierError> {
         self.output_terms(outputs, challenges)?.resolve(id)
     }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for SpartanInner<F> {
+    type Dimensions = ();
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        SpartanInnerSymbolic::new(dimensions)
+    }
+
+    fn dimensions(_log_T: usize, _layout: &Layout) -> Self::Dimensions {}
 }

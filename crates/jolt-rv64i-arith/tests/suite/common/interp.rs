@@ -1,7 +1,8 @@
 //! RV64I semantics from the unprivileged ISA, with separate instruction and data memory.
 
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::error::Error as StdError;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A failed setup or execution; execution errors leave the failing step unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,12 +21,12 @@ pub enum Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "RV64I oracle: {self:?}")
     }
 }
 
-impl std::error::Error for Error {}
+impl StdError for Error {}
 
 /// One naturally aligned data access; word values include every preserved byte.
 /// The index is relative to the RAM base.

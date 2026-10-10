@@ -2,14 +2,14 @@
 
 use crate::plane::{Rv64iPlane, Rv64iWitness};
 use crate::reference::views::{self, RegisterSelector};
-use jolt_field::{Ring, F128};
+use jolt_field::{Ring, Zero, F128};
 use jolt_kernels::reference::naive::NaiveSumcheckProver;
 use jolt_kernels::{KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel};
 use jolt_poly::{BindingOrder, Polynomial};
 use jolt_rv64i_verifier::ids::{
     DerivedId, OpeningId, OutputCheckDerived, ReadCheckingDerived, RelationId, VirtualPolynomial,
 };
-use jolt_rv64i_verifier::points::{eq_index, lift};
+use jolt_rv64i_verifier::points::{equality_table, WordLift};
 use jolt_rv64i_verifier::public::io::word_at;
 use jolt_rv64i_verifier::stages::stage4::{
     ram_output_check::RamOutputCheck, ram_read_checking::RamReadChecking,
@@ -62,13 +62,14 @@ impl PrepareKernel<F128, RegistersReadChecking<F128>, Rv64iPlane> for RegistersR
             )
         })
         .collect();
-        let weights = (0..witness.bits.len())
-            .map(|j| eq_index(inputs.relation.r_3(), j).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let table = weights
-            .into_iter()
-            .flat_map(|value| std::iter::repeat_n(value, 32))
-            .collect();
+        let weights = equality_table(inputs.relation.r_3()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
+        let mut table = vec![F128::zero(); 32 * witness.bits.len()];
+        for (row, weight) in table.chunks_exact_mut(32).zip(weights) {
+            row.fill(weight);
+        }
         let derived = [(
             DerivedId::RegistersReadChecking(ReadCheckingDerived::EqCycle),
             Polynomial::new(table),
@@ -115,13 +116,14 @@ impl PrepareKernel<F128, RamReadChecking<F128>, Rv64iPlane> for RamReadCheckingP
             )
         })
         .collect();
-        let weights = (0..witness.bits.len())
-            .map(|j| eq_index(inputs.relation.r_3(), j).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let table = weights
-            .into_iter()
-            .flat_map(|value| std::iter::repeat_n(value, count))
-            .collect();
+        let weights = equality_table(inputs.relation.r_3()).map_err(geometry)?;
+        if weights.len() != witness.bits.len() {
+            return Err(geometry("cycle point does not match the witness length"));
+        }
+        let mut table = vec![F128::zero(); count * witness.bits.len()];
+        for (row, weight) in table.chunks_exact_mut(count).zip(weights) {
+            row.fill(weight);
+        }
         let derived = [(
             DerivedId::RamReadChecking(ReadCheckingDerived::EqCycle),
             Polynomial::new(table),
@@ -147,7 +149,8 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
         inputs: ProverInputs<'_, F128, RamOutputCheck<F128>>,
     ) -> Result<Box<dyn SumcheckKernel<F128, Relation = RamOutputCheck<F128>>>, KernelError<F128>>
     {
-        let final_ram = views::ram_val_final(witness, inputs.relation.r_bit()).map_err(geometry)?;
+        let lift = WordLift::new(inputs.relation.r_bit()).map_err(geometry)?;
+        let final_ram = views::ram_val_final_with_lift(witness, &lift).map_err(geometry)?;
         let count = final_ram.len();
         let openings = [(
             OpeningId::virtual_polynomial(
@@ -159,9 +162,7 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
         .into_iter()
         .collect();
         let io = inputs.relation.io();
-        let weights = (0..count)
-            .map(|k| eq_index(inputs.relation.tau(), k).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
+        let weights = equality_table(inputs.relation.tau()).map_err(geometry)?;
         let mask = (0..count)
             .map(|k| {
                 F128::from_u64(u64::from(
@@ -169,9 +170,7 @@ impl PrepareKernel<F128, RamOutputCheck<F128>, Rv64iPlane> for RamOutputCheckPre
                 ))
             })
             .collect();
-        let values = (0..count)
-            .map(|k| lift(word_at(io, k), inputs.relation.r_bit()).map_err(geometry))
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = (0..count).map(|k| lift.evaluate(word_at(io, k))).collect();
         let derived: BTreeMap<_, _> = [
             (
                 DerivedId::RamOutputCheck(OutputCheckDerived::EqTau),

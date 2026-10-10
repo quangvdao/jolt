@@ -9,8 +9,10 @@ use crate::ids::{
     CommittedPolynomial, DerivedId, OpeningId, RelationId, ValEvaluationDerived, VirtualPolynomial,
 };
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::{stages::relations::ConcreteSumcheck, VerifierError};
 
 fn term_error(error: PointsError) -> VerifierError {
@@ -20,6 +22,8 @@ fn term_error(error: PointsError) -> VerifierError {
     }
 }
 
+/// Register-state evaluation reduced over low-variable-first cycles at the verified batch-4 address and bit points.
+/// `new` checks the five register and six bit coordinates; the batch constructor checks their shared cycle geometry.
 #[derive(Clone)]
 pub struct RegistersValEvaluation<F: JoltField> {
     symbolic: RegistersValEvaluationSymbolic,
@@ -28,6 +32,8 @@ pub struct RegistersValEvaluation<F: JoltField> {
     r_4: Vec<F>,
 }
 impl<F: JoltField> RegistersValEvaluation<F> {
+    /// Checks five register and six bit coordinates, returning `PointsError` on mismatch.
+    /// The caller supplies batch 4's cycle point; `Stage5Sumchecks::new` checks its trace width and shared geometry.
     pub fn new(a_reg: Vec<F>, r_bit: Vec<F>, r_4: Vec<F>) -> Result<Self, PointsError> {
         for (point, expected) in [(&a_reg, 5), (&r_bit, 6)] {
             if point.len() != expected {
@@ -38,21 +44,25 @@ impl<F: JoltField> RegistersValEvaluation<F> {
             }
         }
         Ok(Self {
-            symbolic: RegistersValEvaluationSymbolic::new(r_4.len()),
+            symbolic: Self::symbolic_with(r_4.len()),
             a_reg,
             r_bit,
             r_4,
         })
     }
+    /// The final five low-variable-first address coordinates of the RAM point verified by batch 4.
     pub fn a_reg(&self) -> &[F] {
         &self.a_reg
     }
+    /// The six low-variable-first bit coordinates shared with batches 3a and 4.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle point verified by batch 4.
     pub fn r_4(&self) -> &[F] {
         &self.r_4
     }
+    /// The consumed register-value point in address-then-bit-then-cycle order, low variable first.
     pub fn input_points(&self) -> RegistersValEvaluationInputClaims<Vec<F>> {
         RegistersValEvaluationInputClaims {
             registers_val: self
@@ -66,6 +76,10 @@ impl<F: JoltField> RegistersValEvaluation<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RegistersValEvaluation<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RegistersValEvaluationSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -138,6 +152,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RegistersValEvaluation<F> {
     }
 }
 
+/// RAM-state and final-state evaluations reduced over low-variable-first cycles at verified batch-4 address and bit points.
+/// The initial evaluation must be computed from checked initial RAM at those same points.
 #[derive(Clone)]
 pub struct RamValEvaluation<F: JoltField> {
     symbolic: RamValEvaluationSymbolic,
@@ -147,6 +163,8 @@ pub struct RamValEvaluation<F: JoltField> {
     init_eval: F,
 }
 impl<F: JoltField> RamValEvaluation<F> {
+    /// Checks at least five RAM address coordinates and six bit coordinates, returning `PointsError` on mismatch.
+    /// The caller supplies batch 4's cycle point and checked initial-RAM evaluation; the batch constructor validates shared geometry.
     pub fn new(
         a_ram: Vec<F>,
         r_bit: Vec<F>,
@@ -166,22 +184,26 @@ impl<F: JoltField> RamValEvaluation<F> {
             });
         }
         Ok(Self {
-            symbolic: RamValEvaluationSymbolic::new(r_4.len()),
+            symbolic: Self::symbolic_with(r_4.len()),
             a_ram,
             r_bit,
             r_4,
             init_eval,
         })
     }
+    /// The low-variable-first RAM address point verified by batch 4.
     pub fn a_ram(&self) -> &[F] {
         &self.a_ram
     }
+    /// The six low-variable-first bit coordinates shared with batches 3a and 4.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// The low-variable-first cycle point verified by batch 4.
     pub fn r_4(&self) -> &[F] {
         &self.r_4
     }
+    /// Consumed RAM-value points in address-then-bit-then-cycle order; final RAM omits the cycle coordinates.
     pub fn input_points(&self) -> RamValEvaluationInputClaims<Vec<F>> {
         let final_point: Vec<_> = self.a_ram.iter().chain(&self.r_bit).copied().collect();
         RamValEvaluationInputClaims {
@@ -191,6 +213,10 @@ impl<F: JoltField> RamValEvaluation<F> {
     }
 }
 impl<F: JoltField> ConcreteSumcheck<F> for RamValEvaluation<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     type Symbolic = RamValEvaluationSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
@@ -261,5 +287,29 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamValEvaluation<F> {
                 OpeningId::committed(CommittedPolynomial::Inc, RelationId::RegistersValEvaluation),
             ),
         ]
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RegistersValEvaluation<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RegistersValEvaluationSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RamValEvaluation<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamValEvaluationSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

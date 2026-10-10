@@ -1,5 +1,9 @@
-//! Stand-in commitment and replay contracts retained after replacement of the reduction fixture.
+//! Packed bit commitments reject altered tables, columns and invalid opening geometry.
 #![expect(clippy::unwrap_used, reason = "tests fail on invalid fixtures")]
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 use jolt_field::{One, Ring, F128};
 use jolt_poly::Polynomial;
@@ -13,6 +17,7 @@ use jolt_rv64i_verifier::commitment::{BitsCommitmentScheme, BitsGeometry, BitsOp
 use jolt_rv64i_verifier::points::to_high_to_low;
 use jolt_transcript::{Blake2bTranscript, Transcript};
 use std::sync::Arc;
+use support::replay::State;
 type BinaryTranscript = Blake2bTranscript<F128>;
 fn witness() -> Rv64iWitness {
     let (statement, _, source) = support::counting_loop();
@@ -134,10 +139,10 @@ fn witness_reads_follow_the_replayed_pre_state_and_reject_noncanonical_rows() {
         honest.initial_ram.clone(),
     )
     .unwrap();
-    let initial = support::replay::State {
+    let initial = State {
         pc: honest.bytecode.rows()[honest.layout.bytecode_index(&honest.bits[0]) as usize].pc,
         ram: honest.initial_ram.iter().copied().collect(),
-        ..support::replay::State::default()
+        ..State::default()
     };
     let replay = support::replay::replay(
         &honest.layout,
@@ -179,7 +184,11 @@ fn witness_reads_follow_the_replayed_pre_state_and_reject_noncanonical_rows() {
     };
     assert!(matches!(
         build(vec![[0; 4]; 3].into(), vec![]),
-        Err(Rv64iProverError::RowCount { rows: 3 })
+        Err(Rv64iProverError::RowCount {
+            expected: 4,
+            bits: 3,
+            words: 0
+        })
     ));
     for memory in [
         vec![(0, 0)],

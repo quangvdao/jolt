@@ -6,22 +6,43 @@ pub use crate::claims::ram_output_check::{
 };
 use crate::ids::{DerivedId, OutputCheckDerived};
 use crate::points::{self, PointsError};
+use crate::proof::DimensionedRelation;
 use crate::public::io::{io_mask, val_io, validate_io};
 use jolt_claims::SymbolicSumcheck;
 use jolt_field::JoltField;
 use jolt_program::preprocess::PublicIoMemory;
+use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
+use std::sync::Arc;
 
+/// Final-RAM agreement over low-variable-first addresses, at one fixed six-coordinate bit point.
+/// `new` checks the point bounds and public I/O interval while sharing its words.
 #[derive(Clone)]
 pub struct RamOutputCheck<F: JoltField> {
     symbolic: RamOutputCheckSymbolic,
     tau: Vec<F>,
-    r_bit: Vec<F>,
-    io: PublicIoMemory,
+    r_bit: Arc<Vec<F>>,
+    io: Arc<PublicIoMemory>,
 }
 impl<F: JoltField> RamOutputCheck<F> {
-    pub fn new(tau: Vec<F>, r_bit: Vec<F>, io: PublicIoMemory) -> Result<Self, PointsError> {
+    /// Establishes six low-variable-first bit coordinates from batch 3a and at least five address coordinates drawn by batch 4.
+    /// Returns `PointsError` for malformed dimensions or a checked public I/O interval outside that address cube.
+    pub fn new(
+        tau: Vec<F>,
+        r_bit: Vec<F>,
+        io: impl Into<Arc<PublicIoMemory>>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(tau, Arc::new(r_bit), io)
+    }
+
+    /// Enforces `new`'s point bounds while sharing coordinates with the other batch-4 members.
+    pub(crate) fn new_shared(
+        tau: Vec<F>,
+        r_bit: Arc<Vec<F>>,
+        io: impl Into<Arc<PublicIoMemory>>,
+    ) -> Result<Self, PointsError> {
+        let io = io.into();
         if r_bit.len() != 6 {
             return Err(PointsError::Dimension {
                 expected: 6,
@@ -36,18 +57,21 @@ impl<F: JoltField> RamOutputCheck<F> {
         }
         validate_io(&io, tau.len())?;
         Ok(Self {
-            symbolic: RamOutputCheckSymbolic::new(tau.len()),
+            symbolic: Self::symbolic_with(tau.len()),
             tau,
             r_bit,
             io,
         })
     }
+    /// Low-variable-first output-check address challenge.
     pub fn tau(&self) -> &[F] {
         &self.tau
     }
+    /// Six bit coordinates, low variable first, shared by public and final words.
     pub fn r_bit(&self) -> &[F] {
         &self.r_bit
     }
+    /// Public I/O words and mask validated by `new`, borrowed from the shared allocation.
     pub fn io(&self) -> &PublicIoMemory {
         &self.io
     }
@@ -57,14 +81,9 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
     fn symbolic(&self) -> &Self::Symbolic {
         &self.symbolic
     }
+
     fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
-        if batch_num_vars < self.rounds() {
-            return Err(term_error(PointsError::Dimension {
-                expected: self.rounds(),
-                actual: batch_num_vars,
-            }));
-        }
-        Ok(0)
+        Self::point_offset(self.rounds(), batch_num_vars)
     }
     fn derive_opening_points(
         &self,
@@ -78,7 +97,7 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
             }));
         }
         Ok(RamOutputCheckOutputClaims {
-            ram_val_final: point.iter().chain(&self.r_bit).copied().collect(),
+            ram_val_final: point.iter().chain(self.r_bit.iter()).copied().collect(),
         })
     }
     #[expect(
@@ -124,5 +143,27 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
             challenges,
             |id| self.derive_output_term(id, inputs, outputs, challenges),
         )
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RamOutputCheck<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RamOutputCheckSymbolic::new(dimensions)
+    }
+
+    fn dimensions(_log_T: usize, layout: &Layout) -> Self::Dimensions {
+        layout.log_K_ram()
+    }
+
+    fn point_offset(rounds: usize, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        if batch_num_vars < rounds {
+            return Err(term_error(PointsError::Dimension {
+                expected: rounds,
+                actual: batch_num_vars,
+            }));
+        }
+        Ok(0)
     }
 }

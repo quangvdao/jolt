@@ -349,19 +349,25 @@ fn batch4_accepts_replayed_ram_and_shares_address_and_cycle_points() {
     )
     .unwrap();
     let mut transcript = BinaryTranscript::new(b"rv64i-stage4-fixture");
-    let output = stage4_verify::verify(
-        &checked,
+    let replay_batch = VerifierStage4Sumchecks::new(
+        checked.layout(),
+        fixture.bit.clone(),
+        fixture.r3.clone(),
+        Arc::clone(checked.shared_io()),
+        &mut transcript,
+    )
+    .unwrap();
+    let output = stage4_verify::verify_inputs(
+        &replay_batch,
         &wire,
         &mut transcript,
         &fixture.inputs(&fixture.witness),
         &Fixture::input_points(&batch),
     )
     .unwrap();
-    assert_eq!(output.batch_point, output.points.ram_read_checking.ram_ra);
-    assert_eq!(output.tau, batch.ram_output_check.tau());
     let tables = Tables::replay(&fixture.witness, &fixture.bit, batch.ram_output_check.io());
     let reg_point = &output.points.registers_read_checking.rs1_ra;
-    let ram_point = &output.batch_point;
+    let ram_point = &output.points.ram_read_checking.ram_ra;
     assert_eq!(
         wire.values.rs1_ra,
         evaluate(&tables.selectors[0], reg_point)

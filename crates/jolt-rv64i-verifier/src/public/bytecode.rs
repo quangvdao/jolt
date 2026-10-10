@@ -1,11 +1,11 @@
 //! Public bytecode folds use split equality tables and one pass over valid rows.
 
 use jolt_field::JoltField;
-use jolt_poly::EqPolynomial;
 use jolt_rv64i_arith::{Bytecode, BytecodeColumn, BytecodeRow};
 
 use crate::claims::bytecode_read::{BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims};
-use crate::points::{self, PointsError};
+use crate::points::{self, PointsError, WordLift};
+use std::sync::Arc;
 
 /// Earlier points needed by both phases. `new` validates their dimensions and
 /// derives the overlapping kind points from the short point of batch 3a.
@@ -106,8 +106,8 @@ impl<F: JoltField> BytecodeReadPoints<F> {
 
 /// Prepared public weights. Kind and register coefficients are folded into
 /// their small equality tables before a row is read.
-pub struct BytecodeWeights<F> {
-    lift: Vec<F>,
+pub struct BytecodeWeights<F: JoltField> {
+    lift: Arc<WordLift<F>>,
     variant: Vec<F>,
     shift: Vec<F>,
     access: Vec<F>,
@@ -123,6 +123,18 @@ impl<F: JoltField> BytecodeWeights<F> {
     pub fn new(
         points: &BytecodeReadPoints<F>,
         coefficients: &BytecodeReadAddressChallenges<F>,
+    ) -> Result<Self, PointsError> {
+        Self::with_lift(
+            points,
+            coefficients,
+            Arc::new(WordLift::new(&points.r_bit)?),
+        )
+    }
+
+    pub(crate) fn with_lift(
+        points: &BytecodeReadPoints<F>,
+        coefficients: &BytecodeReadAddressChallenges<F>,
+        lift: Arc<WordLift<F>>,
     ) -> Result<Self, PointsError> {
         points.validate()?;
         let weighted = |point: &[F], coefficient| {
@@ -141,7 +153,7 @@ impl<F: JoltField> BytecodeWeights<F> {
                 .collect()
         };
         Ok(Self {
-            lift: points::eq_table(&points.r_bit)?,
+            lift,
             variant: weighted(&points.q_variant, coefficients.variant)?,
             shift: weighted(&points.q_shift, coefficients.shift_kind)?,
             access: weighted(&points.q_access, coefficients.access_kind)?,
@@ -155,12 +167,7 @@ impl<F: JoltField> BytecodeWeights<F> {
     }
 
     pub fn lift(&self, word: u64) -> F {
-        self.lift
-            .iter()
-            .enumerate()
-            .filter(|(bit, _)| word & (1_u64 << bit) != 0)
-            .map(|(_, weight)| *weight)
-            .sum()
+        self.lift.evaluate(word)
     }
 
     fn selector(table: &[F], index: usize) -> Result<F, PointsError> {
@@ -232,24 +239,10 @@ impl<F: JoltField> BytecodeWeights<F> {
             });
         }
         let split = a_bc.len() / 2;
-        let low = a_bc.get(..split).ok_or(PointsError::Dimension {
-            expected: split,
-            actual: a_bc.len(),
-        })?;
-        let high = a_bc.get(split..).ok_or(PointsError::Dimension {
-            expected: split,
-            actual: a_bc.len(),
-        })?;
-        let low_table = EqPolynomial::new(points::to_high_to_low(low)).evaluations();
-        let high_table = EqPolynomial::new(points::to_high_to_low(high)).evaluations();
+        let (low_table, high_table) = points::split_eq_tables(a_bc)?;
         let mask = (1_usize << split) - 1;
         let mut sums = [F::zero(); 4];
-        for (index, row) in bytecode
-            .rows()
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.variant.is_some())
-        {
+        for (index, row) in bytecode.valid_rows() {
             let weight = Self::selector(&low_table, index & mask)?
                 * Self::selector(&high_table, index >> split)?;
             for (sum, value) in sums.iter_mut().zip(self.row_values(row)?) {

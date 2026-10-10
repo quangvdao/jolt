@@ -3,107 +3,193 @@
 use crate::ids::{ChallengeId, DerivedId, FamilyExpr, OpeningId};
 use jolt_claims::{OutputClaims, SumcheckChallenges};
 use jolt_field::{JoltField, F128};
-use jolt_program::preprocess::PublicIoMemory;
-use jolt_rv64i_arith::Layout;
 use jolt_transcript::Transcript;
-use jolt_verifier::{stages::relations::SumcheckBatch, VerifierError};
+use jolt_verifier::VerifierError;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use super::ram_output_check::{RamOutputCheck, RamOutputCheckOutputClaims};
-use super::ram_read_checking::{RamReadChecking, RamReadCheckingOutputClaims};
-use super::registers_read_checking::{RegistersReadChecking, RegistersReadCheckingOutputClaims};
+use super::ram_output_check::RamOutputCheckOutputClaims;
+use super::ram_read_checking::RamReadCheckingInputClaims;
+use super::ram_read_checking::RamReadCheckingOutputClaims;
+use super::registers_read_checking::{
+    RegistersReadCheckingInputClaims, RegistersReadCheckingOutputClaims,
+};
+pub use super::{
+    Stage4Challenges, Stage4InputClaims, Stage4InputPoints, Stage4OutputClaims, Stage4OutputPoints,
+    Stage4Sumchecks,
+};
 use crate::commitment::BitsCommitmentScheme;
 use crate::error::Rv64iVerifierError;
 use crate::points::PointsError;
 use crate::proof::{BatchProof, ReadCheckingValues};
+use crate::stages::stage3a::Output as Stage3aOutput;
+use crate::stages::stage3b::Output as Stage3bOutput;
 use crate::statement::{CheckedInputs, LOG_T_MAX};
 
-#[derive(SumcheckBatch)]
-pub struct Stage4Sumchecks<F: JoltField> {
-    pub registers_read_checking: RegistersReadChecking<F>,
-    pub ram_read_checking: RamReadChecking<F>,
-    pub ram_output_check: RamOutputCheck<F>,
+/// Read-checking cells and their low-variable-first points, consumed by batches 5, 6a and 6b.
+pub struct Output {
+    /// Register selectors and state values read by batches 5 and 6a; RAM selector read by 6b.
+    pub claims: Stage4OutputClaims<F128>,
+    /// Address-first points, followed by bit and/or cycle coordinates, read by batches 5, 6a and 6b.
+    pub points: Stage4OutputPoints<F128>,
 }
-
-impl<F: JoltField> Stage4Sumchecks<F> {
-    /// Draws the address vector before the three register-read coefficients.
-    /// The caller draws the member coefficients with `draw_challenges` next.
-    pub fn new<T: Transcript<Challenge = F>>(
-        layout: &Layout,
-        r_bit: Vec<F>,
-        r_3: Vec<F>,
-        io: PublicIoMemory,
-        transcript: &mut T,
-    ) -> Result<Self, PointsError> {
-        let registers_read_checking = RegistersReadChecking::new(r_bit.clone(), r_3.clone())?;
-        let ram_read_checking = RamReadChecking::new(layout, r_bit.clone(), r_3)?;
-        let tau = transcript.challenge_vector(layout.log_K_ram());
-        let ram_output_check = RamOutputCheck::new(tau, r_bit, io)?;
-        Ok(Self {
-            registers_read_checking,
-            ram_read_checking,
-            ram_output_check,
+impl Output {
+    /// The low-variable-first RAM address point consumed by batches 5, 6a and 6b.
+    pub fn a_ram(&self) -> Result<&[F128], PointsError> {
+        let point = &self.points.ram_output_check.ram_val_final;
+        let a = point.len().checked_sub(6).ok_or(PointsError::Dimension {
+            expected: 6,
+            actual: point.len(),
+        })?;
+        point.get(..a).ok_or(PointsError::Dimension {
+            expected: a,
+            actual: point.len(),
+        })
+    }
+    /// The final five RAM address coordinates, consumed by batch 6a as the register address point.
+    pub fn a_reg(&self) -> Result<&[F128], PointsError> {
+        let address = self.a_ram()?;
+        let start = address.len().checked_sub(5).ok_or(PointsError::Dimension {
+            expected: 5,
+            actual: address.len(),
+        })?;
+        address.get(start..).ok_or(PointsError::Dimension {
+            expected: 5,
+            actual: address.len(),
+        })
+    }
+    /// The low-variable-first cycle point consumed by batches 5, 6a and 6b.
+    pub fn r_4(&self) -> Result<&[F128], PointsError> {
+        let a = self.a_ram()?.len();
+        let point = &self.points.ram_read_checking.ram_ra;
+        point.get(a..).ok_or(PointsError::Dimension {
+            expected: a,
+            actual: point.len(),
         })
     }
 }
 
-/// Batch 4's point, opening cells and points, and its address challenge.
-pub struct Output {
-    pub batch_point: Vec<F128>,
-    pub claims: Stage4OutputClaims<F128>,
-    pub points: Stage4OutputPoints<F128>,
-    pub tau: Vec<F128>,
+/// The batch and consumed cells established by `from_upstream` from verified router outputs.
+pub struct Inputs {
+    pub batch: Stage4Sumchecks<F128>,
+    pub claims: Stage4InputClaims<F128>,
+    pub points: Stage4InputPoints<F128>,
 }
 
-/// Runs batch 4 from checked public data and the four earlier read claims.
-/// The integration caller assembles these generated input aggregates from the
-/// outputs of batches 3a and 3b; their points must share `r_bit ++ r_3`.
-pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
+/// Converts batches 3a and 3b at their verified bit-first, cycle-second points.
+/// Rejects inconsistent read points before drawing the public output-check challenge.
+pub fn from_upstream<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     checked: &CheckedInputs<'_, S>,
-    proof: &BatchProof<ReadCheckingValues>,
     transcript: &mut T,
-    inputs: &Stage4InputClaims<F128>,
-    input_points: &Stage4InputPoints<F128>,
-) -> Result<Output, Rv64iVerifierError> {
-    let point = &input_points.ram_read_checking.ram_read_value;
+    stage3a: &Stage3aOutput,
+    stage3b: &Stage3bOutput,
+) -> Result<Inputs, VerifierError> {
+    let bit = stage3a.x.get(..6).ok_or_else(|| {
+        term_error(PointsError::Dimension {
+            expected: 6,
+            actual: stage3a.x.len(),
+        })
+    })?;
+    let point = &stage3b.points.memory.ram_read_value;
     let expected = 6 + checked.log_T();
     if point.len() != expected {
         return Err(term_error(PointsError::Dimension {
             expected,
             actual: point.len(),
-        })
-        .into());
+        }));
     }
     for other in [
-        &input_points.registers_read_checking.rs1_value,
-        &input_points.registers_read_checking.rs2_value,
-        &input_points.registers_read_checking.rd_pre_value,
+        &stage3b.points.variant.rs1_value,
+        &stage3b.points.variant.rs2_value,
+        &stage3b.points.variant.rd_pre_value,
     ] {
         if other != point {
             return Err(VerifierError::StageClaimSumcheckFailed {
                 stage: "Stage4".to_owned(),
                 reason: "read claims do not share a bit and cycle point".to_owned(),
-            }
-            .into());
+            });
         }
     }
-    let (bit, cycle) = point.split_at(6);
+    if point.get(..6) != Some(bit) {
+        return Err(VerifierError::StageClaimSumcheckFailed {
+            stage: "Stage4".to_owned(),
+            reason: "read points differ from the verified router bit point".to_owned(),
+        });
+    }
+    let (_, cycle) = point.split_at(6);
     let batch = Stage4Sumchecks::new(
         checked.layout(),
         bit.to_vec(),
         cycle.to_vec(),
-        checked.io().clone(),
+        Arc::clone(checked.shared_io()),
         transcript,
     )
     .map_err(term_error)?;
-    let challenges = batch.draw_challenges(transcript)?;
-    let points = batch.verify(inputs, input_points, &challenges, proof, transcript)?;
-    Ok(Output {
-        batch_point: points.ram_read_checking.ram_ra.clone(),
-        claims: Stage4OutputClaims::from_wire(&proof.values),
+    let points = Stage4InputPoints {
+        registers_read_checking: batch.registers_read_checking.input_points(),
+        ram_read_checking: batch.ram_read_checking.input_points(),
+        ram_output_check: Default::default(),
+    };
+    let claims = Stage4InputClaims {
+        registers_read_checking: RegistersReadCheckingInputClaims {
+            rs1_value: stage3b.claims.variant.rs1_value,
+            rs2_value: stage3b.claims.variant.rs2_value,
+            rd_pre_value: stage3b.claims.variant.rd_pre_value,
+        },
+        ram_read_checking: RamReadCheckingInputClaims {
+            ram_read_value: stage3b.claims.memory.ram_read_value,
+        },
+        ram_output_check: Default::default(),
+    };
+    Ok(Inputs {
+        batch,
+        claims,
         points,
-        tau: batch.ram_output_check.tau().to_vec(),
     })
+}
+
+/// Verifies the read and public output checks from batches 3a and 3b at their verified points.
+pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
+    checked: &CheckedInputs<'_, S>,
+    proof: &BatchProof<ReadCheckingValues>,
+    transcript: &mut T,
+    stage3a: &Stage3aOutput,
+    stage3b: &Stage3bOutput,
+) -> Result<Output, Rv64iVerifierError> {
+    let inputs = from_upstream(checked, transcript, stage3a, stage3b)?;
+    verify_inputs(
+        &inputs.batch,
+        proof,
+        transcript,
+        &inputs.claims,
+        &inputs.points,
+    )
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use converted::verify_inputs;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) use converted::verify_inputs;
+
+mod converted {
+    use super::*;
+
+    /// Runs the same verification from converted low-variable-first inputs.
+    /// Batch-local callers establish bounds through `Stage4Sumchecks::new` before drawing member challenges.
+    pub fn verify_inputs<T: Transcript<Challenge = F128>>(
+        batch: &Stage4Sumchecks<F128>,
+        proof: &BatchProof<ReadCheckingValues>,
+        transcript: &mut T,
+        inputs: &Stage4InputClaims<F128>,
+        input_points: &Stage4InputPoints<F128>,
+    ) -> Result<Output, Rv64iVerifierError> {
+        let challenges = batch.draw_challenges(transcript)?;
+        let points = batch.verify(inputs, input_points, &challenges, proof, transcript)?;
+        Ok(Output {
+            claims: Stage4OutputClaims::from_wire(&proof.values),
+            points,
+        })
+    }
 }
 
 impl Stage4OutputClaims<F128> {

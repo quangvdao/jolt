@@ -2,11 +2,10 @@
 //! replay the witness's XOR update contract, except final RAM, which reads its retained state.
 
 use crate::{error::Rv64iProverError, plane::Rv64iWitness};
-use jolt_field::{One, Zero, F128};
+use jolt_field::{JoltField, One, Zero, F128};
 use jolt_poly::Polynomial;
-use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk, BITS_COLUMNS};
-use jolt_rv64i_verifier::points::{chunk as evaluate_chunk, eq_index, lift};
-use std::collections::BTreeMap;
+use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk};
+use jolt_rv64i_verifier::points::{eq_index, equality_table, ChunkWeights, PointsError, WordLift};
 
 /// One of the five replayed cycle words, extended over its 64 bit indices.
 #[derive(Clone, Copy, Debug)]
@@ -66,13 +65,15 @@ pub fn bits_column(witness: &Rv64iWitness, column: usize) -> Polynomial<F128> {
 /// Extends the increment at a six-coordinate low-variable-first bit point over cycle variables.
 /// Returns a point-dimension error unless the bit point has six coordinates.
 pub fn inc(witness: &Rv64iWitness, point: &[F128]) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        witness
-            .bits
-            .iter()
-            .map(|r| lift(witness.layout.inc(r), point))
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    Ok(inc_with_lift(witness, &WordLift::new(point)?))
+}
+/// Extends every cycle increment using weights prepared once for its bit point.
+pub fn inc_with_lift(witness: &Rv64iWitness, lift: &WordLift<F128>) -> Polynomial<F128> {
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for bits in witness.bits.iter() {
+        values.push(lift.evaluate(witness.layout.inc(bits)));
+    }
+    Polynomial::new(values)
 }
 /// Extends a chunk at its low-variable-first digit point over cycle variables.
 /// Returns a point-dimension or missing-column error from the canonical chunk evaluator.
@@ -81,54 +82,47 @@ pub fn chunk(
     chunk: Chunk,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    let mut columns = [F128::zero(); BITS_COLUMNS];
-    Ok(Polynomial::new(
-        witness
-            .bits
-            .iter()
-            .map(|r| {
-                for (y, value) in columns.iter_mut().enumerate() {
-                    *value = if r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0) {
-                        F128::one()
-                    } else {
-                        F128::zero()
-                    };
-                }
-                evaluate_chunk(chunk, point, &columns)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    chunk_in_field(witness, chunk, point)
 }
-/// Extends a replayed word at a six-coordinate low-variable-first bit point over cycle variables.
-/// Returns a point-dimension error unless the bit point has six coordinates.
-pub fn base_word(
+/// Extends stored chunk indicators directly in the requested field, with one prepared digit table.
+pub fn chunk_in_field<F: JoltField>(
+    witness: &Rv64iWitness,
+    chunk: Chunk,
+    point: &[F],
+) -> Result<Polynomial<F>, Rv64iProverError> {
+    let weights = ChunkWeights::new(chunk, point)?;
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for bits in witness.bits.iter() {
+        values.push(weights.evaluate_packed(bits));
+    }
+    Ok(Polynomial::new(values))
+}
+/// Extends a replayed word using weights prepared once for its bit point.
+pub fn base_word_with_lift(
     witness: &Rv64iWitness,
     word: BaseWord,
-    point: &[F128],
-) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        witness
-            .words
-            .iter()
-            .map(|w| {
-                lift(
-                    match word {
-                        BaseWord::Rs1Value => w.rs1_value,
-                        BaseWord::Rs2Value => w.rs2_value,
-                        BaseWord::RdPreValue => w.rd_pre_value,
-                        BaseWord::RamReadValue => w.ram_read_value,
-                        BaseWord::NextPC => w.next_pc,
-                    },
-                    point,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    lift: &WordLift<F128>,
+) -> Polynomial<F128> {
+    let mut values = Vec::with_capacity(witness.words.len());
+    for words in witness.words.iter() {
+        values.push(lift.evaluate(match word {
+            BaseWord::Rs1Value => words.rs1_value,
+            BaseWord::Rs2Value => words.rs2_value,
+            BaseWord::RdPreValue => words.rd_pre_value,
+            BaseWord::RamReadValue => words.ram_read_value,
+            BaseWord::NextPC => words.next_pc,
+        }));
+    }
+    Polynomial::new(values)
 }
 fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iProverError> {
-    let bits = witness.bits.get(cycle).ok_or(Rv64iProverError::RowCount {
-        rows: witness.bits.len(),
-    })?;
+    let bits = witness
+        .bits
+        .get(cycle)
+        .ok_or(Rv64iProverError::CycleIndex {
+            cycle,
+            rows: witness.bits.len(),
+        })?;
     let index = witness.layout.bytecode_index(bits);
     usize::try_from(index)
         .ok()
@@ -136,18 +130,17 @@ fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iPr
         .filter(|r| r.variant.is_some())
         .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })
 }
-/// Extends a fetched row's 64-bit column at a six-coordinate low-variable-first bit point over cycles.
-/// The caller selects one of its four word columns; invalid fetches and bit dimensions return errors.
-pub fn bytecode_word(
+/// Extends a fetched word using prepared bit weights; invalid fetches return an error.
+pub fn bytecode_word_with_lift(
     witness: &Rv64iWitness,
     column: BytecodeColumn,
-    point: &[F128],
+    lift: &WordLift<F128>,
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        (0..witness.bits.len())
-            .map(|j| Ok(lift(fetched(witness, j)?.column(column), point)?))
-            .collect::<Result<Vec<_>, Rv64iProverError>>()?,
-    ))
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for cycle in 0..witness.bits.len() {
+        values.push(lift.evaluate(fetched(witness, cycle)?.column(column)));
+    }
+    Ok(Polynomial::new(values))
 }
 /// Extends a kind selector at a low-variable-first kind point over cycle variables.
 /// Returns an error for an invalid fetch or an index outside the point's domain.
@@ -156,60 +149,64 @@ pub fn selector(
     selector: Selector,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        (0..witness.bits.len())
-            .map(|j| {
-                let row = fetched(witness, j)?;
-                let value = row.variant.and_then(|v| match selector {
-                    Selector::Variant => Some(v.index()),
-                    Selector::ShiftKind => v.shift().map(|s| s.kind as usize),
-                    Selector::AccessKind => v.access().and_then(|a| a.kind).map(|k| k as usize),
-                    Selector::KeyKind => v.key_kind().map(|k| k as usize),
-                });
-                Ok(match value {
-                    Some(index) => eq_index(point, index)?,
-                    None => F128::zero(),
-                })
-            })
-            .collect::<Result<Vec<_>, Rv64iProverError>>()?,
-    ))
+    let weights = equality_table(point)?;
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for cycle in 0..witness.bits.len() {
+        let row = fetched(witness, cycle)?;
+        let value = row.variant.and_then(|variant| match selector {
+            Selector::Variant => Some(variant.index()),
+            Selector::ShiftKind => variant.shift().map(|shift| shift.kind as usize),
+            Selector::AccessKind => variant
+                .access()
+                .and_then(|access| access.kind)
+                .map(|kind| kind as usize),
+            Selector::KeyKind => variant.key_kind().map(|kind| kind as usize),
+        });
+        values.push(match value {
+            Some(index) => *weights.get(index).ok_or(PointsError::Index {
+                index,
+                variables: point.len(),
+            })?,
+            None => F128::zero(),
+        });
+    }
+    Ok(Polynomial::new(values))
 }
 /// Extends the fetched instruction's branch flag over low-variable-first cycle variables.
 /// Returns an error when a cycle fetches an invalid bytecode row.
 pub fn branch(witness: &Rv64iWitness) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        (0..witness.bits.len())
-            .map(|j| {
-                Ok(
-                    if fetched(witness, j)?
-                        .variant
-                        .is_some_and(|v| v.branch().is_some())
-                    {
-                        F128::one()
-                    } else {
-                        F128::zero()
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>, Rv64iProverError>>()?,
-    ))
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for cycle in 0..witness.bits.len() {
+        values.push(
+            if fetched(witness, cycle)?
+                .variant
+                .is_some_and(|variant| variant.branch().is_some())
+            {
+                F128::one()
+            } else {
+                F128::zero()
+            },
+        );
+    }
+    Ok(Polynomial::new(values))
 }
 /// Extends the fetched instruction's store flag over low-variable-first cycle variables.
 /// Returns an error when a cycle fetches an invalid bytecode row.
 pub fn store(witness: &Rv64iWitness) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        (0..witness.bits.len())
-            .map(|j| {
-                Ok(
-                    if fetched(witness, j)?.variant.is_some_and(|v| v.is_store()) {
-                        F128::one()
-                    } else {
-                        F128::zero()
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>, Rv64iProverError>>()?,
-    ))
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for cycle in 0..witness.bits.len() {
+        values.push(
+            if fetched(witness, cycle)?
+                .variant
+                .is_some_and(|variant| variant.is_store())
+            {
+                F128::one()
+            } else {
+                F128::zero()
+            },
+        );
+    }
+    Ok(Polynomial::new(values))
 }
 fn register(row: &BytecodeRow, selector: RegisterSelector) -> u8 {
     match selector {
@@ -244,16 +241,16 @@ pub fn register_selector_at(
     selector: RegisterSelector,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        (0..witness.bits.len())
-            .map(|j| {
-                Ok(eq_index(
-                    point,
-                    usize::from(register(fetched(witness, j)?, selector)),
-                )?)
-            })
-            .collect::<Result<Vec<_>, Rv64iProverError>>()?,
-    ))
+    let weights = equality_table(point)?;
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for cycle in 0..witness.bits.len() {
+        let index = usize::from(register(fetched(witness, cycle)?, selector));
+        values.push(*weights.get(index).ok_or(PointsError::Index {
+            index,
+            variables: point.len(),
+        })?);
+    }
+    Ok(Polynomial::new(values))
 }
 /// Builds the RAM selector table with low-variable-first address variables before cycle variables.
 /// Returns an error if the RAM domain cannot be represented on this host.
@@ -278,13 +275,11 @@ pub fn ram_ra_at(
     witness: &Rv64iWitness,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(Polynomial::new(
-        witness
-            .bits
-            .iter()
-            .map(|r| eq_index(point, witness.layout.ram_index(r) as usize))
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    let mut values = Vec::with_capacity(witness.bits.len());
+    for bits in witness.bits.iter() {
+        values.push(eq_index(point, witness.layout.ram_index(bits) as usize)?);
+    }
+    Ok(Polynomial::new(values))
 }
 fn domain(witness: &Rv64iWitness) -> Result<usize, Rv64iProverError> {
     Rv64iWitness::ram_words(&witness.layout)
@@ -295,11 +290,18 @@ pub fn registers_val(
     witness: &Rv64iWitness,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    registers_val_with_lift(witness, &WordLift::new(point)?)
+}
+/// Replays register pre-state using prepared bit weights; invalid fetches or register selectors return errors.
+pub fn registers_val_with_lift(
+    witness: &Rv64iWitness,
+    lift: &WordLift<F128>,
+) -> Result<Polynomial<F128>, Rv64iProverError> {
     let mut registers = [0_u64; 32];
     let mut values = Vec::with_capacity(32 * witness.bits.len());
     for (j, bits) in witness.bits.iter().enumerate() {
         for word in registers {
-            values.push(lift(word, point)?);
+            values.push(lift.evaluate(word));
         }
         let row = fetched(witness, j)?;
         if !row.variant.is_some_and(|v| v.is_store()) {
@@ -317,25 +319,66 @@ pub fn ram_val(
     witness: &Rv64iWitness,
     point: &[F128],
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
+    ram_val_with_lift(witness, &WordLift::new(point)?)
+}
+/// Replays RAM pre-state using prepared bit weights and one dense state buffer.
+/// Invalid addresses, fetches or RAM allocations return errors.
+pub fn ram_val_with_lift(
+    witness: &Rv64iWitness,
+    lift: &WordLift<F128>,
+) -> Result<Polynomial<F128>, Rv64iProverError> {
     let count = domain(witness)?;
-    let mut ram: BTreeMap<_, _> = witness.initial_ram.iter().copied().collect();
-    let mut values = Vec::with_capacity(count * witness.bits.len());
+    let mut ram = Vec::new();
+    ram.try_reserve_exact(count)
+        .map_err(|source| Rv64iProverError::RamAllocation {
+            log_K_ram: witness.layout.log_K_ram(),
+            source,
+        })?;
+    ram.resize(count, 0_u64);
+    for &(index, value) in &witness.initial_ram {
+        let address = usize::try_from(index).map_err(|_| Rv64iProverError::InitialRam { index })?;
+        *ram.get_mut(address)
+            .ok_or(Rv64iProverError::InitialRam { index })? = value;
+    }
+    let cycles = witness.bits.len();
+    let size_error = || Rv64iProverError::RamViewSize {
+        words: count,
+        cycles,
+    };
+    let elements = count.checked_mul(cycles).ok_or_else(size_error)?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<F128>())
+        .ok_or_else(size_error)?;
+    let maximum_bytes = usize::try_from(isize::MAX).map_err(|_| size_error())?;
+    if bytes > maximum_bytes {
+        return Err(size_error());
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(elements)
+        .map_err(|source| Rv64iProverError::RamViewAllocation {
+            words: count,
+            cycles,
+            source,
+        })?;
     for (j, bits) in witness.bits.iter().enumerate() {
-        for k in 0..count {
-            values.push(lift(ram.get(&(k as u64)).copied().unwrap_or(0), point)?);
+        for &word in &ram {
+            values.push(lift.evaluate(word));
         }
         if fetched(witness, j)?.variant.is_some_and(|v| v.is_store()) {
             let index = witness.layout.ram_index(bits);
-            *ram.entry(index).or_default() ^= witness.layout.inc(bits);
+            let address = usize::try_from(index)
+                .map_err(|_| Rv64iProverError::StoreRam { cycle: j, index })?;
+            *ram.get_mut(address)
+                .ok_or(Rv64iProverError::StoreRam { cycle: j, index })? ^= witness.layout.inc(bits);
         }
     }
     Ok(Polynomial::new(values))
 }
-/// Extends retained final RAM over low-variable-first address variables at a fixed bit point.
-/// Returns an error for a final-RAM length inconsistent with the layout or a bit point without six coordinates.
-pub fn ram_val_final(
+/// Extends retained final RAM using prepared bit weights; inconsistent final-RAM lengths return an error.
+pub fn ram_val_final_with_lift(
     witness: &Rv64iWitness,
-    point: &[F128],
+    lift: &WordLift<F128>,
 ) -> Result<Polynomial<F128>, Rv64iProverError> {
     let expected = domain(witness)?;
     if witness.final_ram.len() != expected {
@@ -344,11 +387,9 @@ pub fn ram_val_final(
             found: witness.final_ram.len(),
         });
     }
-    Ok(Polynomial::new(
-        witness
-            .final_ram
-            .iter()
-            .map(|word| lift(*word, point))
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    let mut values = Vec::with_capacity(expected);
+    for &word in &witness.final_ram {
+        values.push(lift.evaluate(word));
+    }
+    Ok(Polynomial::new(values))
 }

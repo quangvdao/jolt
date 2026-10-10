@@ -2,7 +2,12 @@
 //! the same lane and polynomial forms.
 
 use crate::layout::Layout;
-use crate::words::{column, Lane, WitnessRow, WITNESS_COLUMNS};
+use crate::words::column::{
+    BITS as COLUMN_BITS, CONTROL_RESIDUAL as COLUMN_CONTROL_RESIDUAL,
+    LEFT_KEY_BIT as COLUMN_LEFT_KEY_BIT, LESS_THAN as COLUMN_LESS_THAN, ONE as COLUMN_ONE,
+    RIGHT_KEY_BIT as COLUMN_RIGHT_KEY_BIT,
+};
+use crate::words::{Lane, WitnessRow, WITNESS_COLUMNS};
 use jolt_field::F128;
 use jolt_r1cs::{ConstraintMatrices, SparseRow};
 use thiserror::Error;
@@ -21,6 +26,14 @@ pub enum RowGroup {
     NextPCResidual,
     ControlResidual,
     OneHot,
+}
+
+#[derive(Clone, Copy)]
+enum FixedExtensionRow {
+    KeysAgreeAbove,
+    KeysEqual,
+    WordResidual(Lane),
+    ControlResidual,
 }
 
 /// Sixty-four rows whose A and B columns are masked bit lanes and whose C
@@ -185,7 +198,7 @@ impl PackedForm {
     /// Constants read `z[ONE]` even on a noncanonical witness.
     #[inline]
     pub fn values(&self, z: &WitnessRow) -> F128 {
-        let constant = self.one && z.bit(column::ONE).unwrap_or(false);
+        let constant = self.one && z.bit(COLUMN_ONE).unwrap_or(false);
         let raw = self
             .terms
             .iter()
@@ -196,7 +209,7 @@ impl PackedForm {
     fn coefficients(&self) -> SparseRow<F128> {
         let mut out = Vec::new();
         if self.one {
-            out.push((column::ONE, F128::from_raw(1)));
+            out.push((COLUMN_ONE, F128::from_raw(1)));
         }
         for &term in &self.terms {
             term.append_coefficients(&mut out);
@@ -303,8 +316,37 @@ pub struct RowSystem {
 }
 
 impl RowSystem {
+    const FIXED_EXTENSION_ROWS: &[(FixedExtensionRow, RowGroup)] = &[
+        (FixedExtensionRow::KeysAgreeAbove, RowGroup::KeysAgreeAbove),
+        (FixedExtensionRow::KeysEqual, RowGroup::KeysEqual),
+        (
+            FixedExtensionRow::WordResidual(Lane::RdResidual),
+            RowGroup::RdResidual,
+        ),
+        (
+            FixedExtensionRow::WordResidual(Lane::RamResidual),
+            RowGroup::RamResidual,
+        ),
+        (
+            FixedExtensionRow::WordResidual(Lane::NextPCResidual),
+            RowGroup::NextPCResidual,
+        ),
+        (
+            FixedExtensionRow::ControlResidual,
+            RowGroup::ControlResidual,
+        ),
+    ];
+
     /// Rows 0–129 have coefficients and evaluations in `F_2`.
     pub const F2_ROWS: usize = 130;
+
+    /// Dimension of the padded extension-field row block, without constructing
+    /// the fixed extension equations or one equation per layout chunk.
+    pub fn f128_row_variables_for(layout: &Layout) -> usize {
+        (Self::FIXED_EXTENSION_ROWS.len() + layout.chunks().count())
+            .next_power_of_two()
+            .ilog2() as usize
+    }
 
     /// Constructs `136 + ceil(log_K_bytecode/4) + ceil(log_K_ram/4) + 2`
     /// equations; stored digits k use coefficients `1 + x^(m·k)`, m=1,2,3.
@@ -322,12 +364,12 @@ impl RowSystem {
             terms: vec![],
         };
         let empty = PackedForm::default();
-        let keys_differ = bit(column::BITS + layout.keys_differ());
+        let keys_differ = bit(COLUMN_BITS + layout.keys_differ());
         let mut not_keys_differ = keys_differ.clone();
         not_keys_differ.one = true;
         let mut key_bits = keys_differ.clone();
         key_bits.terms.push(PackedTerm::table(
-            column::LEFT_KEY_BIT as u16,
+            COLUMN_LEFT_KEY_BIT as u16,
             2,
             0,
             0,
@@ -336,8 +378,8 @@ impl RowSystem {
         let mut packed = vec![
             PackedRow {
                 a: keys_differ.clone(),
-                b: bit(column::RIGHT_KEY_BIT),
-                c: bit(column::LESS_THAN),
+                b: bit(COLUMN_RIGHT_KEY_BIT),
+                c: bit(COLUMN_LESS_THAN),
                 group: RowGroup::LessThan,
             },
             PackedRow {
@@ -346,51 +388,40 @@ impl RowSystem {
                 c: empty.clone(),
                 group: RowGroup::KeyBits,
             },
-            PackedRow {
-                a: keys_differ,
-                b: block(Lane::KeyDiffAbove),
-                c: empty.clone(),
-                group: RowGroup::KeysAgreeAbove,
-            },
-            PackedRow {
-                a: not_keys_differ,
-                b: block(Lane::KeyDiff),
-                c: empty.clone(),
-                group: RowGroup::KeysEqual,
-            },
         ];
-        for (lane, group) in [
-            (Lane::RdResidual, RowGroup::RdResidual),
-            (Lane::RamResidual, RowGroup::RamResidual),
-            (Lane::NextPCResidual, RowGroup::NextPCResidual),
-        ] {
+        for &(row, group) in Self::FIXED_EXTENSION_ROWS {
+            let (a, b) = match row {
+                FixedExtensionRow::KeysAgreeAbove => {
+                    (keys_differ.clone(), block(Lane::KeyDiffAbove))
+                }
+                FixedExtensionRow::KeysEqual => (not_keys_differ.clone(), block(Lane::KeyDiff)),
+                FixedExtensionRow::WordResidual(lane) => (block(lane), one.clone()),
+                FixedExtensionRow::ControlResidual => (
+                    PackedForm {
+                        one: false,
+                        terms: vec![PackedTerm::table(
+                            COLUMN_CONTROL_RESIDUAL as u16,
+                            11,
+                            1,
+                            0,
+                            false,
+                        )],
+                    },
+                    one.clone(),
+                ),
+            };
             packed.push(PackedRow {
-                a: block(lane),
-                b: one.clone(),
+                a,
+                b,
                 c: empty.clone(),
                 group,
             });
         }
-        packed.push(PackedRow {
-            a: PackedForm {
-                one: false,
-                terms: vec![PackedTerm::table(
-                    column::CONTROL_RESIDUAL as u16,
-                    11,
-                    1,
-                    0,
-                    false,
-                )],
-            },
-            b: one,
-            c: empty,
-            group: RowGroup::ControlResidual,
-        });
         for chunk in layout.chunks() {
             let form = |m| PackedForm {
                 one: true,
                 terms: vec![PackedTerm::table(
-                    column::BITS as u16 + chunk.start(),
+                    COLUMN_BITS as u16 + chunk.start(),
                     chunk.indicators() as u8,
                     m,
                     m,
@@ -528,7 +559,8 @@ mod tests {
     use super::{PackedForm, PackedTerm, PackedTermError, RowGroup, RowSystem};
     use crate::layout::Layout;
     use crate::layout::MAX_LOG_K_BYTECODE;
-    use crate::words::{column, WitnessRow, WITNESS_COLUMNS};
+    use crate::words::column::ONE as COLUMN_ONE;
+    use crate::words::{WitnessRow, WITNESS_COLUMNS};
     use jolt_field::F128;
     use jolt_r1cs::{ConstraintMatrices, SparseRow};
     use rand::{Rng, SeedableRng};
@@ -735,7 +767,7 @@ mod tests {
             }
             let mut z = WitnessRow(rng.gen());
             z.0[0] &= !1;
-            assert!(!z.bit(column::ONE).unwrap());
+            assert!(!z.bit(COLUMN_ONE).unwrap());
             assert_matrix_values(&system, &matrices, &z, &mut dense);
         }
     }

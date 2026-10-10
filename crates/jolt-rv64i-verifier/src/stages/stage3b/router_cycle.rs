@@ -1,7 +1,9 @@
 //! Concrete cycle reductions with shared bit and position opening points.
 
+use crate::proof::DimensionedRelation;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
@@ -28,14 +30,21 @@ use crate::public::routes;
 
 #[derive(Clone)]
 struct CycleGeometry<F: JoltField> {
-    r_1: Vec<F>,
-    x: Vec<F>,
+    r_1: Arc<Vec<F>>,
+    x: Arc<Vec<F>>,
     word_slots: [F; 8],
     one_slot: F,
 }
 
 impl<F: JoltField> CycleGeometry<F> {
-    fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>, router: Router) -> Result<Self, PointsError> {
+    /// Checks the seventeen short slots, returning `Dimension` for another width; no trace width is supplied here.
+    /// `verify::from_upstream` and `Stage3bSumchecks::for_geometry` establish the cycle width before construction.
+    fn new(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+        router: Router,
+    ) -> Result<Self, PointsError> {
         if x.len() != 17 {
             return Err(PointsError::Dimension {
                 expected: 17,
@@ -171,6 +180,8 @@ macro_rules! cached_expected_output {
     };
 }
 
+/// Cycle reduction of the variant router, binding low-variable-first cycle coordinates after its fixed short slots.
+/// `new` validates those slots; input values and their restricted points come from batch 3a.
 #[derive(Clone)]
 pub struct RouterCycleVariant<F: JoltField> {
     symbolic: RouterCycleVariantSymbolic,
@@ -178,19 +189,32 @@ pub struct RouterCycleVariant<F: JoltField> {
 }
 
 impl<F: JoltField> RouterCycleVariant<F> {
+    /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
+    /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleVariantSymbolic::new(r_1.len());
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Variant)?,
         })
     }
+    /// The verified batch-1 cycle point, low variable first.
     pub fn r_1(&self) -> &[F] {
         &self.geometry.r_1
     }
+    /// The seventeen low-variable-first short coordinates verified by batch 3a.
     pub fn x(&self) -> &[F] {
         &self.geometry.x
     }
+    /// The router's restriction of the verified batch-3a short point.
+    /// Returns `PointsError` when that restriction cannot be represented with the required slot geometry.
     pub fn input_points(&self) -> Result<RouterCycleVariantInputClaims<Vec<F>>, PointsError> {
         Ok(RouterCycleVariantInputClaims {
             fold: routes::restriction(Router::Variant, &self.geometry.x)?,
@@ -199,6 +223,10 @@ impl<F: JoltField> RouterCycleVariant<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleVariant<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(
         RouterCycleVariantInputClaims,
         RouterCycleVariantOutputClaims
@@ -246,6 +274,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleVariant<F> {
     }
 }
 
+/// Cycle reduction of the shift router, binding low-variable-first cycle coordinates after its fixed short slots.
+/// `new` validates those slots; input values and their restricted points come from batch 3a.
 #[derive(Clone)]
 pub struct RouterCycleShift<F: JoltField> {
     symbolic: RouterCycleShiftSymbolic,
@@ -253,19 +283,32 @@ pub struct RouterCycleShift<F: JoltField> {
 }
 
 impl<F: JoltField> RouterCycleShift<F> {
+    /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
+    /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleShiftSymbolic::new(r_1.len());
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Shift)?,
         })
     }
+    /// The verified batch-1 cycle point, low variable first.
     pub fn r_1(&self) -> &[F] {
         &self.geometry.r_1
     }
+    /// The seventeen low-variable-first short coordinates verified by batch 3a.
     pub fn x(&self) -> &[F] {
         &self.geometry.x
     }
+    /// The router's restriction of the verified batch-3a short point.
+    /// Returns `PointsError` when that restriction cannot be represented with the required slot geometry.
     pub fn input_points(&self) -> Result<RouterCycleShiftInputClaims<Vec<F>>, PointsError> {
         Ok(RouterCycleShiftInputClaims {
             fold: routes::restriction(Router::Shift, &self.geometry.x)?,
@@ -274,6 +317,10 @@ impl<F: JoltField> RouterCycleShift<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleShift<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleShiftInputClaims, RouterCycleShiftOutputClaims);
     type Symbolic = RouterCycleShiftSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -324,6 +371,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleShift<F> {
     }
 }
 
+/// Cycle reduction of the memory router, binding low-variable-first cycle coordinates after its fixed short slots.
+/// `new` validates those slots; input values and their restricted points come from batch 3a.
 #[derive(Clone)]
 pub struct RouterCycleMemory<F: JoltField> {
     symbolic: RouterCycleMemorySymbolic,
@@ -331,19 +380,32 @@ pub struct RouterCycleMemory<F: JoltField> {
 }
 
 impl<F: JoltField> RouterCycleMemory<F> {
+    /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
+    /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleMemorySymbolic::new(r_1.len());
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Memory)?,
         })
     }
+    /// The verified batch-1 cycle point, low variable first.
     pub fn r_1(&self) -> &[F] {
         &self.geometry.r_1
     }
+    /// The seventeen low-variable-first short coordinates verified by batch 3a.
     pub fn x(&self) -> &[F] {
         &self.geometry.x
     }
+    /// The router's restriction of the verified batch-3a short point.
+    /// Returns `PointsError` when that restriction cannot be represented with the required slot geometry.
     pub fn input_points(&self) -> Result<RouterCycleMemoryInputClaims<Vec<F>>, PointsError> {
         Ok(RouterCycleMemoryInputClaims {
             fold: routes::restriction(Router::Memory, &self.geometry.x)?,
@@ -352,6 +414,10 @@ impl<F: JoltField> RouterCycleMemory<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleMemory<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleMemoryInputClaims, RouterCycleMemoryOutputClaims);
     type Symbolic = RouterCycleMemorySymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -408,6 +474,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleMemory<F> {
     }
 }
 
+/// Cycle reduction of the compare router, binding low-variable-first cycle coordinates after its fixed short slots.
+/// `new` validates those slots; input values and their restricted points come from batch 3a.
 #[derive(Clone)]
 pub struct RouterCycleCompare<F: JoltField> {
     symbolic: RouterCycleCompareSymbolic,
@@ -415,19 +483,32 @@ pub struct RouterCycleCompare<F: JoltField> {
 }
 
 impl<F: JoltField> RouterCycleCompare<F> {
+    /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
+    /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleCompareSymbolic::new(r_1.len());
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Compare)?,
         })
     }
+    /// The verified batch-1 cycle point, low variable first.
     pub fn r_1(&self) -> &[F] {
         &self.geometry.r_1
     }
+    /// The seventeen low-variable-first short coordinates verified by batch 3a.
     pub fn x(&self) -> &[F] {
         &self.geometry.x
     }
+    /// The router's restriction of the verified batch-3a short point.
+    /// Returns `PointsError` when that restriction cannot be represented with the required slot geometry.
     pub fn input_points(&self) -> Result<RouterCycleCompareInputClaims<Vec<F>>, PointsError> {
         Ok(RouterCycleCompareInputClaims {
             fold: routes::restriction(Router::Compare, &self.geometry.x)?,
@@ -436,6 +517,10 @@ impl<F: JoltField> RouterCycleCompare<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleCompare<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(
         RouterCycleCompareInputClaims,
         RouterCycleCompareOutputClaims
@@ -521,6 +606,8 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleCompare<F> {
     }
 }
 
+/// Cycle reduction of the branch router, binding low-variable-first cycle coordinates after its fixed short slots.
+/// `new` validates those slots; input values and their restricted points come from batch 3a.
 #[derive(Clone)]
 pub struct RouterCycleBranch<F: JoltField> {
     symbolic: RouterCycleBranchSymbolic,
@@ -528,19 +615,32 @@ pub struct RouterCycleBranch<F: JoltField> {
 }
 
 impl<F: JoltField> RouterCycleBranch<F> {
+    /// Checks the seventeen low-variable-first short slots from batch 3a and returns `PointsError` for malformed geometry.
+    /// The caller supplies the checked layout and verified batch-1 cycle point, whose width checked inputs establish.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
-        let symbolic = RouterCycleBranchSymbolic::new(r_1.len());
+        Self::new_shared(layout, Arc::new(r_1), Arc::new(x))
+    }
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_1: Arc<Vec<F>>,
+        x: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
+        let symbolic = Self::symbolic_for(r_1.len(), layout);
         Ok(Self {
             symbolic,
             geometry: CycleGeometry::new(layout, r_1, x, Router::Branch)?,
         })
     }
+    /// The verified batch-1 cycle point, low variable first.
     pub fn r_1(&self) -> &[F] {
         &self.geometry.r_1
     }
+    /// The seventeen low-variable-first short coordinates verified by batch 3a.
     pub fn x(&self) -> &[F] {
         &self.geometry.x
     }
+    /// The router's restriction of the verified batch-3a short point.
+    /// Returns `PointsError` when that restriction cannot be represented with the required slot geometry.
     pub fn input_points(&self) -> Result<RouterCycleBranchInputClaims<Vec<F>>, PointsError> {
         Ok(RouterCycleBranchInputClaims {
             fold: routes::restriction(Router::Branch, &self.geometry.x)?,
@@ -549,6 +649,10 @@ impl<F: JoltField> RouterCycleBranch<F> {
 }
 
 impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleBranch<F> {
+    fn instance_point_offset(&self, batch_num_vars: usize) -> Result<usize, VerifierError> {
+        Self::point_offset(self.rounds(), batch_num_vars)
+    }
+
     cached_expected_output!(RouterCycleBranchInputClaims, RouterCycleBranchOutputClaims);
     type Symbolic = RouterCycleBranchSymbolic;
     fn symbolic(&self) -> &Self::Symbolic {
@@ -608,5 +712,65 @@ impl<F: JoltField> ConcreteSumcheck<F> for RouterCycleBranch<F> {
                 ),
             ),
         ]
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleVariant<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleVariantSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleShift<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleShiftSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleMemory<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleMemorySymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleCompare<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleCompareSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
+    }
+}
+
+impl<F: JoltField> DimensionedRelation<F> for RouterCycleBranch<F> {
+    type Dimensions = usize;
+
+    fn symbolic_with(dimensions: Self::Dimensions) -> Self::Symbolic {
+        RouterCycleBranchSymbolic::new(dimensions)
+    }
+
+    fn dimensions(log_T: usize, _layout: &Layout) -> Self::Dimensions {
+        log_T
     }
 }

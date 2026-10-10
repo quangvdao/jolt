@@ -4,6 +4,10 @@
     reason = "invalid test fixtures fail the enclosing test"
 )]
 
+#[expect(
+    dead_code,
+    reason = "shared machine helpers serve the complete protocol corpus"
+)]
 mod support;
 
 use jolt_claims::NoChallenges;
@@ -35,6 +39,7 @@ use jolt_rv64i_verifier::public::matrices::RowMatrices;
 use jolt_rv64i_verifier::stages::stage1::{
     Stage1InputClaims, Stage1OutputClaims, Stage1Sumchecks as VerifierStage1Sumchecks,
 };
+use jolt_rv64i_verifier::stages::stage2::verify::Inputs;
 use jolt_rv64i_verifier::stages::stage2::Stage2Sumchecks as VerifierStage2Sumchecks;
 use jolt_rv64i_verifier::stages::{stage1, stage2};
 use jolt_rv64i_verifier::statement::CheckedInputs;
@@ -572,7 +577,7 @@ fn counting_loop_batches_one_and_two_reject_each_wire_value() {
     let mut verifier_transcript = start_verifier();
     let verified1 = stage1::verify::verify(&checked, &proof1, &mut verifier_transcript).unwrap();
     assert_eq!(verifier_transcript.state(), transcript.state());
-    let stage2::verify::Inputs {
+    let Inputs {
         batch: batch2,
         claims: inputs2,
         points: points2,
@@ -604,8 +609,8 @@ fn counting_loop_batches_one_and_two_reject_each_wire_value() {
         stage2::verify::verify(&checked, &proof2, &mut verifier_transcript, &verified1).unwrap();
     assert_eq!(verifier_transcript.state(), transcript.state());
     let rows = witness_rows(&witness);
-    let r_1 = &verified1.point[8..];
-    let w = &verified2.point;
+    let r_1 = verified1.r_1().unwrap();
+    let w = verified2.w().unwrap();
     let expected_routed: F128 = (1..4)
         .chain(16..27)
         .chain(64..768)

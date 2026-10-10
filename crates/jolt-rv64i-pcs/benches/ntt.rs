@@ -1,28 +1,29 @@
-//! Reference-geometry transform benchmark. Run with target-cpu=native:
-//! `cargo bench -p jolt-rv64i-pcs --bench ntt -- --samples 5`.
-//! Fixtures and warmed 1/12-thread pools precede timing. Every sample includes
-//! output allocation, first touch and the call-scoped domain table. Later levels
-//! share one table, matching an opening's lifecycle. Reports median phase times
-//! and median-of-sums totals; source measurements were on a loaded host.
+//! Transform measurements at `t=20,22`, with fixtures and warm pools outside timing.
+//! `cargo bench -p jolt-rv64i-pcs --bench ntt -- --samples 5` reports CSV rows.
+//! Preserve that executable, rebuild after a change, then run the new executable
+//! with `--compare <baseline-executable> --log-t 20,22 --threads 1,12 --samples 5`.
+//! Each batch runs one sample in each executable, alternating baseline/current
+//! order. Comparison CSV reports medians, minima, maxima, and paired ratios.
+//! Samples include output allocation, first touch and the call-scoped domain;
+//! later levels share one table. `--load` reports uptime outside measurement.
 
 use jolt_field::{ExtField, Zero};
 use jolt_field::{F192, F64};
 use jolt_rv64i_pcs::ntt::Encoder;
+use jolt_rv64i_verifier::commitment::BitsGeometry;
 use jolt_rv64i_verifier::whir::code::DomainTable;
 use jolt_rv64i_verifier::whir::error::{try_vec, WhirError, WhirPart};
+use jolt_rv64i_verifier::whir::params::{Level, Schedule};
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::hint::black_box;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
-
-const LATER: [(usize, usize); 4] = [(14, 18), (10, 17), (6, 16), (2, 15)];
-const COUNTS: [usize; 5] = [301_989_888, 29_360_128, 10_485_760, 3_145_728, 524_288];
 
 struct Words(u64);
 impl Words {
-    fn seed_from_u64(seed: u64) -> Self {
-        Self(seed)
-    }
     fn gen(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut x = self.0;
@@ -34,63 +35,86 @@ impl Words {
 
 struct Fixture {
     rows: Vec<[u64; 4]>,
-    later: [Vec<F192>; 4],
+    later: Vec<Vec<F192>>,
+    levels: Vec<Level>,
+}
+struct Sample {
+    phases: Vec<Duration>,
+    setup: Duration,
+    later: Duration,
 }
 impl Fixture {
-    fn new() -> Result<Self, Box<dyn Error>> {
-        let mut rng = Words::seed_from_u64(0x004e_5454);
-        let mut rows = try_vec(WhirPart::Rows, 1 << 22)?;
-        rows.extend((0..1 << 22).map(|_| std::array::from_fn(|_| rng.gen())));
-        let mut later = std::array::from_fn(|_| Vec::new());
-        for (f, &(c, _)) in later.iter_mut().zip(&LATER) {
-            *f = try_vec(WhirPart::FinalValues, 16 * (1 << c))?;
-            f.extend((0..16 * (1 << c)).map(|_| F192::from_base_fn(|_| F64::from_raw(rng.gen()))));
+    fn new(log_t: usize) -> Result<Self, Box<dyn Error>> {
+        let levels = Schedule::new(BitsGeometry { log_T: log_t })?
+            .levels()
+            .to_vec();
+        let mut rng = Words(0x004e_5454);
+        let mut rows = try_vec(WhirPart::Rows, 1 << log_t)?;
+        rows.extend((0..1 << log_t).map(|_| std::array::from_fn(|_| rng.gen())));
+        let mut later = Vec::new();
+        for level in levels.iter().skip(1) {
+            let len = level.lanes()? * (1 << level.c);
+            let mut message = try_vec(WhirPart::FinalValues, len)?;
+            message.extend((0..len).map(|_| F192::from_base_fn(|_| F64::from_raw(rng.gen()))));
+            later.push(message);
         }
-        Ok(Self { rows, later })
+        Ok(Self {
+            rows,
+            later,
+            levels,
+        })
     }
 
-    fn sample(
-        &self,
-        pool: &ThreadPool,
-    ) -> Result<([Duration; 5], Duration, Duration), Box<dyn Error>> {
+    fn sample(&self, pool: &ThreadPool) -> Result<Sample, Box<dyn Error>> {
         pool.install(|| {
+            let level0 = self.levels.first().ok_or(WhirError::Shape {
+                part: WhirPart::Levels,
+                expected: 1,
+                actual: 0,
+            })?;
             let start = Instant::now();
-            let table = DomainTable::new(18, 19)?;
+            let table = DomainTable::new(level0.c, level0.d)?;
             let setup_commit = start.elapsed();
-            let code = Encoder::new(&table, 18, 19, 32)?.encode_rows(&self.rows)?;
+            let code = Encoder::new(&table, level0.c, level0.d, level0.lanes()?)?
+                .encode_rows(&self.rows)?;
             let _code = black_box(&code);
-            let level0 = start.elapsed();
+            let level0_time = start.elapsed();
             drop(code);
             let start = Instant::now();
-            let table = DomainTable::new(18, 19)?;
+            let table = DomainTable::new(level0.c, level0.d)?;
             let setup_open = start.elapsed();
-            let mut durations = [Duration::ZERO; 5];
-            durations[0] = level0;
-            for (i, ((c, d), message)) in LATER.iter().zip(&self.later).enumerate() {
+            let mut phases = vec![level0_time];
+            for (level, message) in self.levels.iter().skip(1).zip(&self.later) {
                 let phase = Instant::now();
-                let code = Encoder::new(&table, *c, *d, 16)?.encode_extension(message)?;
+                let code = Encoder::new(&table, level.c, level.d, level.lanes()?)?
+                    .encode_extension(message)?;
                 let _code = black_box(&code);
-                durations[i + 1] = phase.elapsed();
+                phases.push(phase.elapsed());
                 drop(code);
             }
-            Ok::<_, WhirError>((
-                durations,
-                setup_commit + setup_open,
-                setup_open + durations[1..].iter().sum::<Duration>(),
-            ))
+            let later = setup_open + phases.iter().skip(1).sum::<Duration>();
+            Ok::<_, WhirError>(Sample {
+                phases,
+                setup: setup_commit + setup_open,
+                later,
+            })
         })
         .map_err(Into::into)
     }
 
-    // A first-touch/copy baseline separates memory provisioning from arithmetic
-    // without instrumentation in the production transform. Subtraction is an
-    // estimate, since cache traffic overlaps arithmetic in the full encoding.
-    fn copy_baseline(&self, pool: &ThreadPool) -> Result<[Duration; 5], Box<dyn Error>> {
+    // Provisioning overlaps transform traffic, so subtraction is only an estimate.
+    fn copy_baseline(&self, pool: &ThreadPool) -> Result<Vec<Duration>, Box<dyn Error>> {
         pool.install(|| {
             let start = Instant::now();
-            let mut code = try_vec(WhirPart::Leaves, 1 << 25)?;
-            code.resize(1 << 25, F64::zero());
-            code.par_chunks_mut(1 << 24).for_each(|coset| {
+            let level0 = self.levels.first().ok_or(WhirError::Shape {
+                part: WhirPart::Levels,
+                expected: 1,
+                actual: 0,
+            })?;
+            let len = 2 * level0.lanes()? * (1 << level0.d);
+            let mut code = try_vec(WhirPart::Leaves, len)?;
+            code.resize(len, F64::zero());
+            code.par_chunks_mut(self.rows.len() * 4).for_each(|coset| {
                 for (r, out) in self.rows.iter().zip(coset.chunks_exact_mut(4)) {
                     for (word, slot) in r.iter().zip(out) {
                         *slot = F64::from_raw(*word);
@@ -100,17 +124,16 @@ impl Fixture {
             let _code = black_box(&code);
             let time = start.elapsed();
             drop(code);
-            let mut times = [Duration::ZERO; 5];
-            times[0] = time;
-            for (i, (&(_, d), message)) in LATER.iter().zip(&self.later).enumerate() {
+            let mut times = vec![time];
+            for (level, message) in self.levels.iter().skip(1).zip(&self.later) {
                 let start = Instant::now();
-                let len = 16 * (1usize << d);
+                let len = level.lanes()? * (1usize << level.d);
                 let mut code = try_vec(WhirPart::Leaves, len)?;
                 code.resize(len, F192::zero());
                 code.par_chunks_mut(message.len())
                     .for_each(|block| block.copy_from_slice(message));
                 let _code = black_box(&code);
-                times[i + 1] = start.elapsed();
+                times.push(start.elapsed());
                 drop(code);
             }
             Ok::<_, WhirError>(times)
@@ -119,105 +142,265 @@ impl Fixture {
     }
 }
 
-fn median(values: &mut [Duration]) -> Duration {
-    values.sort_unstable();
-    values[values.len() / 2]
+struct Options {
+    samples: usize,
+    sizes: Vec<usize>,
+    threads: Vec<usize>,
+    compare: Option<PathBuf>,
+    load: bool,
+    copy: bool,
+}
+impl Options {
+    fn parse() -> Result<Self, Box<dyn Error>> {
+        let mut options = Self {
+            samples: 5,
+            sizes: vec![20, 22],
+            threads: vec![1, 12],
+            compare: None,
+            load: false,
+            copy: true,
+        };
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--bench" => {}
+                "--samples" => options.samples = args.next().ok_or("missing samples")?.parse()?,
+                "--log-t" => options.sizes = parse_list(&args.next().ok_or("missing log-t")?)?,
+                "--threads" => {
+                    options.threads = parse_list(&args.next().ok_or("missing threads")?)?;
+                }
+                "--compare" => {
+                    options.compare = Some(args.next().ok_or("missing baseline")?.into());
+                }
+                "--load" => options.load = true,
+                "--no-copy" => options.copy = false,
+                _ => return Err(format!("unknown argument {arg}").into()),
+            }
+        }
+        if options.samples == 0 || options.threads.contains(&0) {
+            return Err("samples and threads must be positive".into());
+        }
+        if options.sizes.iter().any(|t| ![20, 22].contains(t)) {
+            return Err("log-t must select 20 or 22".into());
+        }
+        Ok(options)
+    }
+}
+
+fn parse_list(text: &str) -> Result<Vec<usize>, Box<dyn Error>> {
+    Ok(text.split(',').map(str::parse).collect::<Result<_, _>>()?)
+}
+
+fn stats(values: &mut [f64]) -> (f64, f64, f64) {
+    values.sort_by(f64::total_cmp);
+    (
+        values[values.len() / 2],
+        values[0],
+        values[values.len() - 1],
+    )
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1e3
 }
 
 #[expect(
     clippy::print_stdout,
     reason = "benchmark measurements are stdout output"
 )]
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut samples = 5usize;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--bench" => {}
-            "--samples" => {
-                samples = args.next().ok_or("missing samples")?.parse()?;
-                if samples == 0 {
-                    return Err("samples must be positive".into());
+fn report(options: &Options) -> Result<(), Box<dyn Error>> {
+    println!("t,threads,level,c,d,butterflies,ms,Gbutterflies/s,ns/butterfly,1t_model_ms,1t_model_x1.25_ms,source_ms,min_ms,max_ms");
+    for &log_t in &options.sizes {
+        let fixture = Fixture::new(log_t)?;
+        for &threads in &options.threads {
+            let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
+            let _warm = pool.install(|| rayon::broadcast(|_| black_box(0)));
+            let _warm = black_box(fixture.sample(&pool)?);
+            let mut phases: Vec<Vec<f64>> = fixture.levels.iter().map(|_| Vec::new()).collect();
+            let mut setup = Vec::new();
+            let mut sums = Vec::new();
+            let mut copies = phases.clone();
+            for _ in 0..options.samples {
+                let sample = fixture.sample(&pool)?;
+                for (times, duration) in phases.iter_mut().zip(sample.phases) {
+                    times.push(milliseconds(duration));
+                }
+                setup.push(milliseconds(sample.setup));
+                sums.push(milliseconds(sample.later));
+                if options.copy {
+                    for (times, duration) in copies.iter_mut().zip(fixture.copy_baseline(&pool)?) {
+                        times.push(milliseconds(duration));
+                    }
                 }
             }
-            _ => return Err(format!("unknown argument {arg}").into()),
+            let mut later_count = 0usize;
+            for (i, (times, level)) in phases.iter_mut().zip(&fixture.levels).enumerate() {
+                let (ms, min, max) = stats(times);
+                let count =
+                    level.lanes()? * (1usize << level.d) * level.c / 2 * if i == 0 { 2 } else { 1 };
+                if i != 0 {
+                    later_count += count;
+                }
+                let price = if i == 0 { 0.535 } else { 1.50 };
+                let model = count as f64 * price / 1e6;
+                let source = if log_t == 22 && i == 0 {
+                    if threads == 1 {
+                        "161.58"
+                    } else if threads == 12 {
+                        "37.71"
+                    } else {
+                        "unmeasured"
+                    }
+                } else {
+                    "aggregate-only"
+                };
+                println!("{log_t},{threads},{i},{},{},{count},{ms:.6},{:.6},{:.6},{model:.6},{:.6},{source},{min:.6},{max:.6}",
+                    level.c, level.d, count as f64 / ms / 1e6, ms * 1e6 / count as f64, model * 1.25);
+            }
+            let (ms, min, max) = stats(&mut sums);
+            let model = later_count as f64 * 1.50 / 1e6;
+            let source = match (log_t, threads) {
+                (22, 1) => "65.37",
+                (22, 12) => "11.74",
+                _ => "unmeasured",
+            };
+            println!("{log_t},{threads},later-total,-,-,{later_count},{ms:.6},{:.6},{:.6},{model:.6},{:.6},{source},{min:.6},{max:.6}",
+                later_count as f64 / ms / 1e6, ms * 1e6 / later_count as f64, model * 1.25);
+            println!(
+                "# t={log_t},threads={threads},constants_ms={:.6}",
+                stats(&mut setup).0
+            );
+            if options.copy {
+                for (i, times) in copies.iter_mut().enumerate() {
+                    println!(
+                        "# t={log_t},threads={threads},level={i},copy_ms={:.6}",
+                        stats(times).0
+                    );
+                }
+            }
         }
     }
-    let fixture = Fixture::new()?;
-    println!("t=22; seeded random fixtures; samples={samples}; medians; allocation and constants included");
-    println!("threads,level,c,d,butterflies,ms,Gbutterflies/s,ns/butterfly,1t_model_ms,1t_model_x1.25_ms,source_ms,min_ms,max_ms");
-    for threads in [1, 12] {
-        let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
-        let _warm = pool.install(|| rayon::broadcast(|_| black_box(0)));
-        let _warm = black_box(fixture.sample(&pool)?);
-        let mut phases: [Vec<Duration>; 5] = std::array::from_fn(|_| Vec::new());
-        let mut setup = Vec::new();
-        let mut sums = Vec::new();
-        let mut copies: [Vec<Duration>; 5] = std::array::from_fn(|_| Vec::new());
-        for _ in 0..samples {
-            let (durations, constants, later_sum) = fixture.sample(&pool)?;
-            for (times, duration) in phases.iter_mut().zip(durations) {
-                times.push(duration);
-            }
-            setup.push(constants);
-            sums.push(later_sum);
-            for (times, duration) in copies.iter_mut().zip(fixture.copy_baseline(&pool)?) {
-                times.push(duration);
-            }
+    Ok(())
+}
+
+fn child_sample(
+    executable: &Path,
+    log_t: usize,
+    threads: usize,
+) -> Result<BTreeMap<String, f64>, Box<dyn Error>> {
+    let output = Command::new(executable)
+        .args([
+            "--samples",
+            "1",
+            "--log-t",
+            &log_t.to_string(),
+            "--threads",
+            &threads.to_string(),
+            "--no-copy",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "benchmark child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let mut rows = BTreeMap::new();
+    for line in String::from_utf8(output.stdout)?.lines() {
+        let fields: Vec<_> = line.split(',').collect();
+        if fields.len() == 15 && fields.first() == Some(&log_t.to_string().as_str()) {
+            let _previous = rows.insert(fields[2].to_owned(), fields[6].parse()?);
         }
-        for (level, times) in phases.iter_mut().enumerate() {
-            let duration = median(times);
-            let seconds = duration.as_secs_f64();
-            let count = COUNTS[level] as f64;
-            let model = count * if level == 0 { 0.535 } else { 1.50 } / 1e6;
-            let (c, d) = if level == 0 {
-                (18, 19)
-            } else {
-                LATER[level - 1]
-            };
-            let source = if level == 0 {
-                if threads == 1 {
-                    "161.58"
-                } else {
-                    "37.71"
+    }
+    if rows.is_empty() {
+        return Err("benchmark child emitted no measurement rows".into());
+    }
+    Ok(rows)
+}
+
+#[derive(Default)]
+struct Comparison {
+    baseline: Vec<f64>,
+    current: Vec<f64>,
+    ratios: Vec<f64>,
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "benchmark comparison CSV is stdout output"
+)]
+fn compare(options: &Options, baseline: &Path) -> Result<(), Box<dyn Error>> {
+    let current = std::env::current_exe()?;
+    println!("# paired_ratio=current_ms/baseline_ms; values below 1 favor current");
+    println!("t,threads,batch,order,level,baseline_ms,current_ms,paired_ratio");
+    for &log_t in &options.sizes {
+        for &threads in &options.threads {
+            let mut rows: BTreeMap<String, Comparison> = BTreeMap::new();
+            for batch in 0..options.samples {
+                if options.load {
+                    report_load()?;
                 }
-            } else {
-                "aggregate-only"
-            };
-            println!(
-                "{threads},{level},{c},{d},{},{:.3},{:.3},{:.3},{model:.3},{:.3},{source},{:.3},{:.3}",
-                COUNTS[level],
-                seconds * 1e3,
-                count / seconds / 1e9,
-                seconds * 1e9 / count,
-                model * 1.25,
-                times[0].as_secs_f64() * 1e3,
-                times[times.len() - 1].as_secs_f64() * 1e3
-            );
+                let (old, new, order) = if batch % 2 == 0 {
+                    (
+                        child_sample(baseline, log_t, threads)?,
+                        child_sample(&current, log_t, threads)?,
+                        "AB",
+                    )
+                } else {
+                    let new = child_sample(&current, log_t, threads)?;
+                    (child_sample(baseline, log_t, threads)?, new, "BA")
+                };
+                if old.keys().ne(new.keys()) {
+                    return Err("benchmark child row sets differ".into());
+                }
+                for (level, baseline_ms) in old {
+                    let current_ms = *new.get(&level).ok_or("missing current row")?;
+                    let ratio = current_ms / baseline_ms;
+                    println!("{log_t},{threads},{batch},{order},{level},{baseline_ms:.6},{current_ms:.6},{ratio:.6}");
+                    let entry = rows.entry(level).or_default();
+                    entry.baseline.push(baseline_ms);
+                    entry.current.push(current_ms);
+                    entry.ratios.push(ratio);
+                }
+            }
+            println!("# summary: t,threads,level,baseline_median_ms,current_median_ms,median_ratio,baseline_min_ms,current_min_ms,min_ratio,baseline_max_ms,current_max_ms,max_ratio,paired_median_ratio,paired_min_ratio,paired_max_ratio");
+            for (level, mut measurements) in rows {
+                let (om, on, ox) = stats(&mut measurements.baseline);
+                let (nm, nn, nx) = stats(&mut measurements.current);
+                let (rm, rn, rx) = stats(&mut measurements.ratios);
+                println!("summary,{log_t},{threads},{level},{om:.6},{nm:.6},{:.6},{on:.6},{nn:.6},{:.6},{ox:.6},{nx:.6},{:.6},{rm:.6},{rn:.6},{rx:.6}", nm/om, nn/on, nx/ox);
+            }
         }
-        let seconds = median(&mut sums).as_secs_f64();
-        let count = COUNTS[1..].iter().sum::<usize>() as f64;
-        let model = count * 1.50 / 1e6;
-        println!(
-            "{threads},later-total,-,-,{count:.0},{:.3},{:.3},{:.3},{model:.3},{:.3},{:.2},{:.3},{:.3}",
-            seconds * 1e3,
-            count / seconds / 1e9,
-            seconds * 1e9 / count,
-            model * 1.25,
-            if threads == 1 { 65.37 } else { 11.74 },
-            sums[0].as_secs_f64() * 1e3,
-            sums[sums.len() - 1].as_secs_f64() * 1e3
-        );
-        println!(
-            "{threads}: constants for both calls {:.3} ms",
-            median(&mut setup).as_secs_f64() * 1e3
-        );
-        for (level, times) in copies.iter_mut().enumerate() {
-            println!(
-                "{threads}: level-{level} allocation/first-touch/copy baseline {:.3} ms",
-                median(times).as_secs_f64() * 1e3
-            );
-        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "load snapshots accompany benchmark output"
+)]
+fn report_load() -> Result<(), Box<dyn Error>> {
+    let output = Command::new("uptime").output()?;
+    if !output.status.success() {
+        return Err("uptime failed".into());
+    }
+    println!("# load: {}", String::from_utf8(output.stdout)?.trim());
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let options = Options::parse()?;
+    if options.load {
+        report_load()?;
+    }
+    if let Some(baseline) = &options.compare {
+        compare(&options, baseline)?;
+    } else {
+        report(&options)?;
+    }
+    if options.load {
+        report_load()?;
     }
     Ok(())
 }

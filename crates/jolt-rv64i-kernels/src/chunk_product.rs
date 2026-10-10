@@ -328,6 +328,12 @@ impl ChunkProductCore {
     /// Validates column/point counts, point dimensions, weight lengths and term
     /// dimensions before constructing the lazy family. Use `combined_weight`
     /// to build a dense weight from equality and successor terms.
+    ///
+    /// A column has at most 8 bits (`ColumnWidth` otherwise): the core copies
+    /// the selected digits into one byte per column and cycle, which is what
+    /// the first four rounds read. `columns` is not retained. The copy is
+    /// released at the fourth bind, when the columns become dense, and with
+    /// the core when `log_t < 4`.
     pub fn new<S: CycleSource>(
         columns: DigitColumns<S>,
         points: Vec<Vec<F128>>,

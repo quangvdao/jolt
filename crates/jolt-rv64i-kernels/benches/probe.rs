@@ -31,12 +31,13 @@
 //! keep fractions zero and one while the share changes locality. The separate
 //! pass over four bytecode words per visited row is excluded from this unit.
 //!
-//! `scatter` reports time per input cycle, including a worker-table tree merge.
-//! Local and all-rows traces supply the actual 2^16 and 2^20 destinations. Direct
-//! scatter uses two relaxed atomic u64 XORs per F128. Partitioned scatter gathers
-//! weights in a precomputed destination order, then gives each row range to one
-//! worker: the cycle-id and weight arrays occupy 20 bytes per cycle. This safe
-//! read reordering substitutes for writing pairs through a ScatterPlan.
+//! `sct/partitioned_emit` measures counted, range-partitioned scatter: each
+//! chunk emits (row, weight) in cycle order into disjoint portions of one
+//! range-contiguous buffer, then each range applies those pairs without source
+//! reads. Counts and storage are prepared outside timing. The `scatter` group
+//! contains alternatives, not sct unit prices: two atomic halves, worker tables
+//! including their merge, and destination-ordered gather. Default local/all_rows
+//! streams visit 2^16/2^20 rows respectively in the 2^20-row output.
 //!
 //! `fmadd` prepares the same twenty masked operand pairs at every chain length,
 //! accumulates zero, one, two, four, eight or twenty terms on the chunk stack,
@@ -52,7 +53,7 @@
 //! |---|---|---|
 //! | lookup ns | L per lookup | index decoding and XOR |
 //! | bucket ns | Bk per F128 update | byte/nibble decoding |
-//! | scatter ns | sct per cycle | updates and worker merge; setup excluded |
+//! | sct/partitioned_emit ns | sct per cycle | cycle-order pair emission and range application |
 //! | fmadd fit slope_ns | A per term | fused stack chains, fixed preparation removed by fit |
 //! | fmadd fit reduction_ns | R per chain | fit intercept minus zero-length baseline |
 //! | merge ns | mrg per element | zero-fill, or zero-fill plus tree merge |
@@ -112,6 +113,7 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use support::scatter::{PartitionedScatter, ScatterError};
 use support::{run_probe, ProbeCase, ProbeKernel, RunnerError};
 
 type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
@@ -125,6 +127,8 @@ const ALL_ROWS: &[SynthProfile] = &[SynthProfile::AllRows];
 
 #[derive(Debug, Error)]
 enum ProbeError {
+    #[error(transparent)]
+    Scatter(#[from] ScatterError),
     #[error("unknown probe case {unit}/{variant}")]
     Case { unit: String, variant: String },
     #[error("probe worker count {threads} must be positive")]
@@ -575,13 +579,13 @@ fn bucket_word(
 enum ScatterMethod {
     Direct,
     Worker,
-    Partitioned,
+    Gather,
 }
 
 enum ScatterStorage {
     Direct(Vec<[AtomicU64; 2]>),
     Worker(Vec<Mutex<Vec<F128>>>),
-    Partitioned {
+    Gather {
         order: Vec<u32>,
         weights: Vec<F128>,
         offsets: Vec<usize>,
@@ -617,7 +621,7 @@ impl Scatter {
                     .map(|_| Mutex::new(vec![F128::from_raw(0); ROWS]))
                     .collect(),
             ),
-            ScatterMethod::Partitioned => {
+            ScatterMethod::Gather => {
                 let mut offsets = vec![0; ROW_RANGES + 1];
                 for cycle in 0..CycleSource::cycles(source.as_ref()) {
                     offsets[source.bytecode_index(cycle) / (ROWS / ROW_RANGES) + 1] += 1;
@@ -632,7 +636,7 @@ impl Scatter {
                     order[cursor[range]] = cycle as u32;
                     cursor[range] += 1;
                 }
-                ScatterStorage::Partitioned {
+                ScatterStorage::Gather {
                     order,
                     weights: vec![F128::from_raw(0); CycleSource::cycles(source.as_ref())],
                     offsets,
@@ -703,7 +707,7 @@ impl Scatter {
                 let _ = black_box(&*table);
                 table[0]
             }
-            ScatterStorage::Partitioned {
+            ScatterStorage::Gather {
                 order,
                 weights,
                 offsets,
@@ -1033,6 +1037,7 @@ enum Unit {
     Lookup(Box<Lookup>),
     Bucket(Bucket),
     Scatter(Scatter),
+    Partitioned(Box<PartitionedScatter>),
     Fmadd(Box<Fmadd>),
     Merge(Merge),
     Arithmetic(Arithmetic),
@@ -1100,11 +1105,14 @@ impl Unit {
                 let method = match method {
                     "direct_atomic_halves" => ScatterMethod::Direct,
                     "worker_tree" => ScatterMethod::Worker,
-                    "partitioned_gather" => ScatterMethod::Partitioned,
+                    "gather" => ScatterMethod::Gather,
                     _ => return Err(invalid()),
                 };
                 Ok(Self::Scatter(Scatter::new(source, method, threads)?))
             }
+            "sct" => Ok(Self::Partitioned(Box::new(PartitionedScatter::new(
+                source,
+            )?))),
             "fmadd" => {
                 let terms = case
                     .variant
@@ -1164,6 +1172,7 @@ impl ProbeKernel for Unit {
             ],
             Self::Bucket(unit) => [unit.operations, 0],
             Self::Scatter(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
+            Self::Partitioned(unit) => [unit.cycles(), 0],
             Self::Fmadd(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
             Self::Merge(unit) => [unit.operations(), 0],
             Self::Arithmetic(unit) => [
@@ -1184,6 +1193,7 @@ impl ProbeKernel for Unit {
             Self::Lookup(unit) => unit.run(),
             Self::Bucket(unit) => unit.run(),
             Self::Scatter(unit) => unit.run(),
+            Self::Partitioned(unit) => unit.run(),
             Self::Fmadd(unit) => unit.run(),
             Self::Merge(unit) => unit.run(),
             Self::Arithmetic(unit) => unit.run(),
@@ -1237,13 +1247,20 @@ fn main() -> Result<(), RunnerError> {
         }
     }
     for rows in [16, 20] {
-        for method in ["direct_atomic_halves", "worker_tree", "partitioned_gather"] {
+        for method in ["direct_atomic_halves", "worker_tree", "gather"] {
             cases.push(ProbeCase {
                 unit: "scatter",
                 variant: format!("{method}_rows_{rows}"),
                 profiles: if rows == 16 { LOCAL } else { ALL_ROWS },
             });
         }
+    }
+    for rows in [16, 20] {
+        cases.push(ProbeCase {
+            unit: "sct",
+            variant: format!("partitioned_emit_rows_{rows}"),
+            profiles: if rows == 16 { LOCAL } else { ALL_ROWS },
+        });
     }
     for terms in [0, 1, 2, 4, 8, 20] {
         cases.push(ProbeCase {

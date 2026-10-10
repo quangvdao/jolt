@@ -9,6 +9,7 @@
 
 mod allocator;
 pub mod example;
+pub mod scatter;
 
 use std::error::Error as StdError;
 use std::hint::black_box;

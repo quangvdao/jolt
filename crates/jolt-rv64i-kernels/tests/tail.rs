@@ -635,3 +635,84 @@ fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
             .unwrap();
     }
 }
+
+#[test]
+fn tail_first_multichunk_pair_round_matches_the_oracle_on_each_pool() {
+    acceptance(14, &[1, 12], false);
+}
+
+#[test]
+fn tail_zero_coefficients_and_later_zero_scalar_preserve_final_values() {
+    let mut fixture = Fixture::new(8);
+    let ChunkWeightTerm::Eq {
+        coefficient,
+        point: term_point,
+    } = &mut fixture.terms[1][0]
+    else {
+        panic!("first RAM weight term is an equality")
+    };
+    for (j, value) in fixture.definition.leaves[6].iter_mut().enumerate() {
+        *value += *coefficient * eq(term_point, j);
+    }
+    *coefficient = ZERO;
+    fixture.definition.legs[1].coefficient = ZERO;
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_2e20);
+    let mut challenges = point(8, &mut rng);
+    challenges[0] = ONE + fixture.definition.legs[0].point[0];
+    let leaves: Vec<_> = fixture
+        .definition
+        .leaves
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let expected: [Vec<_>; 3] = std::array::from_fn(|member| {
+        (0..8)
+            .map(|round| {
+                round_polynomial(
+                    &leaves,
+                    &challenges[..round],
+                    if member < 2 { 6 } else { 2 },
+                    |v| fixture.definition.sum(member, v),
+                )
+                .unwrap()
+            })
+            .collect()
+    });
+    let claims = fixture.definition.claims();
+    let finals: Vec<_> = fixture
+        .definition
+        .leaves
+        .iter()
+        .map(|leaf| mle_at(leaf, &challenges).unwrap())
+        .collect();
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let (mut a, mut b, mut g) = fixture.cores();
+                for (member, core) in [&mut a as &mut dyn ProveRounds<F128>, &mut b, &mut g]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut claim = claims[member];
+                    for (round, message) in expected[member].iter().enumerate() {
+                        let actual = core
+                            .prove_round(round.checked_sub(1).map(|i| challenges[i]), round, claim)
+                            .unwrap();
+                        assert_eq!(actual, *message);
+                        claim = message.evaluate(challenges[round]);
+                    }
+                    core.finish_rounds(challenges[7]).unwrap();
+                }
+                let first = a.final_values().unwrap();
+                let second = b.final_values().unwrap();
+                assert_eq!(first.0, finals[0]);
+                assert_eq!(first.1, finals[1..6]);
+                assert_eq!(second.0, finals[6]);
+                assert_eq!(second.1, finals[7..12]);
+                assert_eq!(g.final_values().unwrap(), &finals[12..15]);
+            });
+    }
+}

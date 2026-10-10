@@ -1,5 +1,9 @@
 //! Run with `RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-prover
 //! --features test-utils --bench adapters -- adapters/session/20/1`.
+//! Inventory: `RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-prover
+//! --features test-utils --bench adapters -- inventory`.
+//! Exact size laws are in support/inventory.rs; warm preparation is recorded
+//! before the timer. Overflow or unmatched sizes fail the process.
 //! With no id filter, sizes 20,22 and pools 1,12 run in sample rotation.
 //! Options: `--log-t 20,22 --threads 1,12 --samples 3`.
 //! Kernel hooks time preparation, rounds, terminal binds, validation/extraction,

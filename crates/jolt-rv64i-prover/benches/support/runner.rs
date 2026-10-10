@@ -3,6 +3,7 @@
 //! Samples retain its rotation, warmed pools, baseline and median-of-sums rules.
 
 use super::allocator::{AllocationMeasurement, AllocationRecorder, CountingAllocator};
+use super::inventory::Inventory;
 use super::pipelines::{BenchResult, Fixture, Kernels};
 use super::timing::{Timing, PHASES};
 use super::witness::WitnessFixture;
@@ -157,6 +158,7 @@ fn print_samples(
 )]
 pub fn run(options: Options) -> BenchResult<()> {
     println!("adapters_note phases=kernel_hooks driver_bookkeeping=extract driver_allocations=driver finish=terminal_bind extract=validation_and_claims park=dispatch_and_drop background_drop=feature_selected decoded=resident_apart loaded_machine=true");
+    let mut inventory_failed = false;
     // One executed witness per size, shared by both thread configurations.
     for &log_t in &options.log_t {
         if !options.threads.iter().any(|&threads| {
@@ -192,6 +194,10 @@ pub fn run(options: Options) -> BenchResult<()> {
                 start.elapsed().as_nanos() as f64 / witness.witness.bits.len() as f64,
                 witness.mix
             );
+            let inventory = Inventory::new(&witness.witness, &fixture.geometry);
+            if options.inventory {
+                inventory.print_laws(log_t, threads);
+            }
             let mut collected: Vec<Vec<Sample>> = names
                 .iter()
                 .map(|_| Vec::with_capacity(options.samples))
@@ -205,6 +211,8 @@ pub fn run(options: Options) -> BenchResult<()> {
                             pool.install(|| {
                                 let timing = Arc::new(Timing::default());
                                 let kernels = Kernels::new(&timing);
+                                CountingAllocator::begin(witness.witness.bits.len());
+                                CountingAllocator::phase(6);
                                 let before = CountingAllocator::live_bytes();
                                 let mut session = fixture
                                     .warm_session(&witness.witness, name)
@@ -212,7 +220,6 @@ pub fn run(options: Options) -> BenchResult<()> {
                                 let resident =
                                     CountingAllocator::live_bytes().saturating_sub(before);
                                 let measurement = AllocationMeasurement::begin();
-                                CountingAllocator::begin(witness.witness.bits.len());
                                 CountingAllocator::phase(5);
                                 let start = Instant::now();
                                 let lanes = if name == "lanes" {
@@ -258,6 +265,10 @@ pub fn run(options: Options) -> BenchResult<()> {
                     if CountingAllocator::overflow() != 0 {
                         return Err("allocation recorder overflow".into());
                     }
+                    if options.inventory {
+                        inventory_failed |=
+                            inventory.print(&format!("adapters/{name}/{log_t}/{threads}"));
+                    }
                     collected[index].push(sample);
                 }
             }
@@ -272,6 +283,9 @@ pub fn run(options: Options) -> BenchResult<()> {
                 );
             }
         }
+    }
+    if inventory_failed {
+        return Err("allocation inventory contains unmatched allocations".into());
     }
     Ok(())
 }

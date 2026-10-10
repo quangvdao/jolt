@@ -1,5 +1,6 @@
 //! Driver-level pipelines with setup claims summed from the executed witness.
 
+use super::inventory::Geometry;
 use super::timing::{timed, Timing};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -110,6 +111,7 @@ impl Kernels {
 }
 
 pub struct Fixture {
+    pub geometry: Geometry,
     short: Stage3aSumchecks<F128>,
     short_claims: Stage3aInputClaims<F128>,
     terminal: Stage6bSumchecks<F128>,
@@ -144,6 +146,12 @@ impl Fixture {
             FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT,
         );
         let layout = FoldLayout::new(&trace, &shapes, &values)?;
+        let geometry = Geometry {
+            fold_entries: layout.entries(),
+            row_entries: layout.row_entries(),
+            fold_lengths: shapes.iter().map(|shape| shape.fold_len()).collect(),
+            selector_columns: selectors.len(),
+        };
         let folded = fold_pass(&trace, &shapes, &r_1, &plan, &layout, &[])?;
         let output_weights = eq_table(&w, None);
         let mut witness_routed = F128::from_raw(0);
@@ -307,6 +315,7 @@ impl Fixture {
         };
         let outer = SpartanOuterF2::new(log_t, 8, fixed.challenge_vector(log_t + 8))?;
         Ok(Self {
+            geometry,
             short,
             short_claims,
             terminal,

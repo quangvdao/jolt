@@ -6,7 +6,7 @@
 //! the supplied point; packed honest-prover inputs alone do not establish this.
 //! Larger-field challenges use consecutive little-endian scalar encodings.
 
-use crate::points::eq_index;
+use crate::points::eq_table;
 use jolt_field::{CanonicalBytes, Zero, F128};
 use jolt_transcript::Transcript;
 use std::error::Error;
@@ -27,13 +27,14 @@ pub struct BitsOpening<'a> {
 impl BitsOpening<'_> {
     /// Evaluation of the column vector at the column point, after shape checks.
     pub fn value(&self) -> F128 {
+        let Ok(weights) = eq_table(self.column_point) else {
+            return F128::zero();
+        };
         self.columns
             .iter()
-            .enumerate()
-            .map(|(y, value)| {
-                eq_index(self.column_point, y).map_or(F128::zero(), |weight| weight * *value)
-            })
-            .fold(F128::zero(), |sum, term| sum + term)
+            .zip(weights)
+            .map(|(value, weight)| weight * *value)
+            .sum()
     }
 }
 

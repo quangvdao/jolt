@@ -5,6 +5,7 @@
 //! sequentially. A scatter emits only weights and reads no source indices.
 
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::Arc;
 
 use jolt_field::F128;
@@ -16,6 +17,8 @@ use crate::par::CycleChunks;
 use crate::source::{CycleSource, ValidatedTrace};
 
 const RANGES: usize = 256;
+
+type EmissionChunk<'a> = (Range<usize>, &'a [u16], &'a mut [F128]);
 
 /// Unrepresentable scatter dimensions or incorrectly sized caller buffers.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -79,7 +82,9 @@ pub struct ScatterPlan<S: CycleSource> {
 }
 
 impl<S: CycleSource> ScatterPlan<S> {
-    /// Count and place destinations in [`CycleChunks`] at round zero.
+    /// Count and place destinations in parallel over [`CycleChunks`] at round
+    /// zero, independently of the thread count. Each chunk owns disjoint slot
+    /// and row-offset slices; only one prefix array per chunk is temporary.
     /// Rejects more than 2^24 rows or chunks longer than 2^16 cycles before
     /// allocation. One row and fewer than 256 rows use one-row ranges.
     #[expect(
@@ -117,27 +122,44 @@ impl<S: CycleSource> ScatterPlan<S> {
         let mut slots = vec![0_u16; cycles];
         let mut row_offsets = vec![0_u16; cycles];
         let mut segments = vec![Segment::default(); chunks * RANGES];
-        for chunk in 0..chunks {
-            let start = chunk * chunk_len;
-            let mut counts = [0_u32; RANGES];
-            for cycle in start..start + chunk_len {
-                counts[source.bytecode_index(cycle) >> range_shift] += 1;
-            }
-            let mut cursors = [0_u32; RANGES];
-            let mut next = 0_u32;
-            for (range, &len) in counts.iter().enumerate() {
-                segments[range * chunks + chunk] = Segment { start: next, len };
-                cursors[range] = next;
-                next += len;
-            }
-            for (cycle, slot) in slots[start..start + chunk_len].iter_mut().enumerate() {
-                let row = source.bytecode_index(start + cycle);
-                let cursor = &mut cursors[row >> range_shift];
-                *slot = *cursor as u16;
-                row_offsets[start + *cursor as usize] = (row & (range_len - 1)) as u16;
-                *cursor += 1;
-            }
-        }
+        let mut prefixes = vec![[0_u32; RANGES]; chunks];
+        slots
+            .par_chunks_mut(chunk_len)
+            .zip(row_offsets.par_chunks_mut(chunk_len))
+            .zip(prefixes.par_iter_mut())
+            .enumerate()
+            .for_each(|(chunk, ((slots, row_offsets), counts))| {
+                let start = chunk * chunk_len;
+                for cycle in start..start + chunk_len {
+                    counts[source.bytecode_index(cycle) >> range_shift] += 1;
+                }
+                let mut cursors = [0_u32; RANGES];
+                let mut next = 0_u32;
+                for (cursor, count) in cursors.iter_mut().zip(counts.iter_mut()) {
+                    *cursor = next;
+                    next += *count;
+                    *count = next;
+                }
+                for (cycle, slot) in slots.iter_mut().enumerate() {
+                    let row = source.bytecode_index(start + cycle);
+                    let cursor = &mut cursors[row >> range_shift];
+                    *slot = *cursor as u16;
+                    row_offsets[*cursor as usize] = (row & (range_len - 1)) as u16;
+                    *cursor += 1;
+                }
+            });
+        segments
+            .par_chunks_mut(chunks)
+            .enumerate()
+            .for_each(|(range, segments)| {
+                for (segment, counts) in segments.iter_mut().zip(&prefixes) {
+                    let start = if range == 0 { 0 } else { counts[range - 1] };
+                    *segment = Segment {
+                        start,
+                        len: counts[range] - start,
+                    };
+                }
+            });
         Ok(Self {
             _trace: trace,
             slots,
@@ -157,6 +179,39 @@ impl<S: CycleSource> ScatterPlan<S> {
     /// Number of output elements, including unvisited bytecode rows.
     pub fn bytecode_rows(&self) -> usize {
         self.rows
+    }
+
+    /// Checked, disjoint emission chunks for a pass fused with other cycle work.
+    ///
+    /// Checks the exact weight-buffer length before yielding any mutable slice.
+    /// Each item binds this plan's global cycle interval to its cycle-ordered
+    /// local slots and its exact mutable segment of the caller's buffer. The
+    /// intervals are the chunks of `CycleChunks::new(log_t, 0)`. Local slots
+    /// form a permutation of `0..segment.len()`: cycle `interval.start + i`
+    /// writes its weight to `segment[usize::from(slots[i])]`.
+    ///
+    /// Initializing every slot with that cycle's weight is required of the
+    /// caller, not checked here, and incorrect folded claims are detected by
+    /// the verifier. The mutable borrow prevents overlapping application while
+    /// the emission iterator or its segments remain in use.
+    pub fn emission_chunks<'a>(
+        &'a self,
+        weights: &'a mut [F128],
+    ) -> Result<impl IndexedParallelIterator<Item = EmissionChunk<'a>> + 'a, ScatterError> {
+        self.check_weight_length(weights.len())?;
+        Ok(self.chunks(weights))
+    }
+
+    /// Apply a previously emitted chunk-major buffer, XORing into `output`.
+    ///
+    /// Checks both exact lengths before changing the output. The caller must
+    /// have initialized every slot using [`Self::emission_chunks`];
+    /// this weight-to-cycle association is required of the caller, not checked
+    /// here, and incorrect folded claims are detected by the verifier.
+    pub fn apply_buffer(&self, weights: &[F128], output: &mut [F128]) -> Result<(), ScatterError> {
+        self.check_buffers(weights.len(), output.len())?;
+        self.apply(weights, output);
+        Ok(())
     }
 
     /// Return `out[k] = Σ_{j: bytecode_index(j) = k} weight(j)`.
@@ -183,96 +238,70 @@ impl<S: CycleSource> ScatterPlan<S> {
         weights: &mut [F128],
         output: &mut [F128],
     ) -> Result<(), ScatterError> {
-        for (buffer, expected, actual) in [
-            ("weights", self.cycles, weights.len()),
-            ("output", self.rows, output.len()),
-        ] {
-            if actual != expected {
-                return Err(ScatterError::BufferLength {
-                    buffer,
-                    expected,
-                    actual,
-                });
-            }
-        }
+        self.check_buffers(weights.len(), output.len())?;
         self.emit(&weight, weights);
         self.apply(weights, output);
         Ok(())
     }
 
-    fn emit(&self, weight: &(impl Fn(usize) -> F128 + Sync), weights: &mut [F128]) {
-        match self.chunk_len {
-            4096 => self.emit_blocks::<4096>(weight, weights),
-            8192 => self.emit_blocks::<8192>(weight, weights),
-            16384 => self.emit_blocks::<16384>(weight, weights),
-            32768 => self.emit_blocks::<32768>(weight, weights),
-            65536 => self.emit_blocks::<65536>(weight, weights),
-            _ => weights
-                .par_chunks_mut(self.chunk_len)
-                .zip(self.slots.par_chunks(self.chunk_len))
-                .enumerate()
-                .for_each(|(chunk, (weights, slots))| {
-                    let start = chunk * self.chunk_len;
-                    for (cycle, &slot) in slots.iter().enumerate() {
-                        weights[usize::from(slot)] = weight(start + cycle);
-                    }
-                }),
+    fn check_buffers(&self, weights: usize, output: usize) -> Result<(), ScatterError> {
+        self.check_weight_length(weights)?;
+        if output != self.rows {
+            return Err(ScatterError::BufferLength {
+                buffer: "output",
+                expected: self.rows,
+                actual: output,
+            });
         }
+        Ok(())
     }
 
-    fn emit_blocks<const N: usize>(
-        &self,
-        weight: &(impl Fn(usize) -> F128 + Sync),
-        weights: &mut [F128],
-    ) {
-        weights
-            .as_chunks_mut::<N>()
-            .0
-            .par_iter_mut()
-            .zip(self.slots.par_chunks(N))
-            .enumerate()
-            .for_each(|(chunk, (weights, slots))| {
-                let start = chunk * N;
-                for (cycle, &slot) in slots.iter().enumerate() {
-                    // new establishes slot < N; the mask exposes that bound to code generation.
-                    weights[usize::from(slot) & (N - 1)] = weight(start + cycle);
-                }
+    fn check_weight_length(&self, actual: usize) -> Result<(), ScatterError> {
+        if actual != self.cycles {
+            return Err(ScatterError::BufferLength {
+                buffer: "weights",
+                expected: self.cycles,
+                actual,
             });
+        }
+        Ok(())
+    }
+
+    fn chunks<'a>(
+        &'a self,
+        weights: &'a mut [F128],
+    ) -> impl IndexedParallelIterator<Item = EmissionChunk<'a>> + 'a {
+        self.slots
+            .par_chunks(self.chunk_len)
+            .zip(weights.par_chunks_mut(self.chunk_len))
+            .enumerate()
+            .map(move |(chunk, (slots, weights))| {
+                let start = chunk * self.chunk_len;
+                (start..start + self.chunk_len, slots, weights)
+            })
+    }
+
+    fn emit(&self, weight: &(impl Fn(usize) -> F128 + Sync), weights: &mut [F128]) {
+        self.chunks(weights).for_each(|(cycles, slots, weights)| {
+            let Some(last) = weights.len().checked_sub(1) else {
+                return;
+            };
+            for (cycle, &slot) in slots.iter().enumerate() {
+                // new makes the clamp an identity; its bound removes per-cycle panic paths.
+                weights[usize::from(slot).min(last)] = weight(cycles.start + cycle);
+            }
+        });
     }
 
     fn apply(&self, weights: &[F128], output: &mut [F128]) {
-        match self.range_len {
-            4096 => self.apply_blocks::<4096>(weights, output),
-            65536 => self.apply_blocks::<65536>(weights, output),
-            _ => {
-                let chunks = self.cycles / self.chunk_len;
-                output
-                    .par_chunks_mut(self.range_len)
-                    .zip(self.segments.par_chunks(chunks))
-                    .for_each(|(output, segments)| {
-                        for (chunk, segment) in segments.iter().enumerate() {
-                            let start = chunk * self.chunk_len + segment.start as usize;
-                            let end = start + segment.len as usize;
-                            for (&row, &weight) in self.row_offsets[start..end]
-                                .iter()
-                                .zip(&weights[start..end])
-                            {
-                                output[usize::from(row)] += weight;
-                            }
-                        }
-                    });
-            }
-        }
-    }
-
-    fn apply_blocks<const N: usize>(&self, weights: &[F128], output: &mut [F128]) {
         let chunks = self.cycles / self.chunk_len;
         output
-            .as_chunks_mut::<N>()
-            .0
-            .par_iter_mut()
+            .par_chunks_mut(self.range_len)
             .zip(self.segments.par_chunks(chunks))
             .for_each(|(output, segments)| {
+                let Some(last) = output.len().checked_sub(1) else {
+                    return;
+                };
                 for (chunk, segment) in segments.iter().enumerate() {
                     let start = chunk * self.chunk_len + segment.start as usize;
                     let end = start + segment.len as usize;
@@ -280,8 +309,8 @@ impl<S: CycleSource> ScatterPlan<S> {
                         .iter()
                         .zip(&weights[start..end])
                     {
-                        // new establishes row < N for this range; no routing is recomputed here.
-                        output[usize::from(row) & (N - 1)] += weight;
+                        // new bounds row within this range; the clamp is an identity.
+                        output[usize::from(row).min(last)] += weight;
                     }
                 }
             });

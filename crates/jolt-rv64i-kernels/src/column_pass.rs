@@ -63,17 +63,16 @@ impl Prepared {
             .zip(self.high.par_chunks(blocks_per_chunk))
             .for_each(|(rows, high)| {
                 let mut scratch = self.scratch.take().expect("one loan per worker");
-                let mut buckets = ByteBuckets::new(&mut scratch).expect("fixed bucket layout");
+                let buckets: &mut [F128; BUCKETS] = (&mut *scratch)
+                    .try_into()
+                    .expect("fixed 8192-element bucket layout");
                 for (block, &high) in rows.chunks_exact(block_len).zip(high) {
                     for (row, &low) in block.iter().zip(&self.low) {
                         let e = low * high;
-                        let positions: &mut [[F128; 256]; 32] = buckets
-                            .positions_mut()
-                            .try_into()
-                            .expect("fixed 32-position layout");
-                        for (&word, positions) in row.iter().zip(positions.as_chunks_mut::<8>().0) {
-                            for (value, bucket) in word.to_le_bytes().into_iter().zip(positions) {
-                                bucket[usize::from(value)] += e;
+                        for (word_slot, &word) in row.iter().enumerate() {
+                            for (byte_slot, value) in word.to_le_bytes().into_iter().enumerate() {
+                                let position = word_slot * 8 + byte_slot;
+                                buckets[256 * position + usize::from(value)] += e;
                             }
                         }
                     }
@@ -109,8 +108,6 @@ fn read_columns(sums: &mut [F128]) -> [F128; 256] {
 /// logarithm in coordinates, low variable first. Both conditions are checked.
 /// The pass borrows the rows and retains no scratch after returning. It uses
 /// two half equality tables and at most 128 KiB of byte buckets per Rayon worker.
-/// There is no additional honest-input condition required of the caller, not
-/// checked, or detected by the verifier.
 pub fn column_pass(rows: &[[u64; 4]], r: &[F128]) -> Result<[F128; 256], ColumnPassError> {
     let prepared = Prepared::new(rows, r)?;
     prepared.pass(rows);

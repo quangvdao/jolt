@@ -45,6 +45,31 @@ fn all_columns_equal_the_defining_sum_at_seeded_and_boolean_points() {
 }
 
 #[test]
+fn multichunk_column_sums_match_the_definition_on_one_and_twelve_threads() {
+    let log_t = 13;
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc011_130c);
+    let rows: Vec<[u64; 4]> = (0..1 << log_t)
+        .map(|_| std::array::from_fn(|_| rng.next_u64()))
+        .collect();
+    let point: Vec<_> = (0..log_t).map(|_| F128::random(&mut rng)).collect();
+    let expected: [F128; 256] = std::array::from_fn(|y| {
+        let table: Vec<_> = rows
+            .iter()
+            .map(|row| F128::from_raw(u128::from((row[y / 64] >> (y % 64)) & 1)))
+            .collect();
+        mle_at(&table, &point).unwrap()
+    });
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let columns = pool.install(|| column_pass(&rows, &point)).unwrap();
+        assert_eq!(columns, expected);
+    }
+}
+
+#[test]
 fn malformed_row_count_is_rejected() {
     for count in [0, 12] {
         assert_eq!(

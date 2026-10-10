@@ -9,7 +9,7 @@ use crate::ids::{
     CommittedPolynomial, DerivedId, OpeningId, RelationId, ValEvaluationDerived, VirtualPolynomial,
 };
 use crate::points::{self, PointsError};
-use jolt_claims::{NoChallenges, SymbolicSumcheck};
+use jolt_claims::{NoChallenges, OutputClaims, SumcheckChallenges, SymbolicSumcheck};
 use jolt_field::JoltField;
 use jolt_verifier::{stages::relations::ConcreteSumcheck, VerifierError};
 
@@ -86,6 +86,37 @@ impl<F: JoltField> ConcreteSumcheck<F> for RegistersValEvaluation<F> {
             store: point.to_vec(),
             inc: self.r_bit.iter().chain(point).copied().collect(),
         })
+    }
+    fn expected_output(
+        &self,
+        input_points: &RegistersValEvaluationInputClaims<Vec<F>>,
+        output_values: &RegistersValEvaluationOutputClaims<F>,
+        output_points: &RegistersValEvaluationOutputClaims<Vec<F>>,
+        challenges: &NoChallenges<F>,
+    ) -> Result<F, VerifierError> {
+        // ConcreteSumcheck's default resolves each occurrence of a derived leaf.
+        // Both register terms share Lt, so reuse its canonical evaluation.
+        let lt_id = DerivedId::RegistersValEvaluation(ValEvaluationDerived::Lt);
+        let lt = self.derive_output_term(&lt_id, input_points, output_points, challenges)?;
+        self.symbolic.output_expression::<F>().try_evaluate(
+            |id| {
+                output_values
+                    .resolve_output(id)
+                    .ok_or(VerifierError::MissingOpeningClaim { id: (*id).into() })
+            },
+            |id| {
+                challenges
+                    .resolve_challenge(id)
+                    .ok_or(VerifierError::MissingStageClaimChallenge { id: (*id).into() })
+            },
+            |id| {
+                if *id == lt_id {
+                    Ok(lt)
+                } else {
+                    Err(VerifierError::MissingStageClaimDerived { id: (*id).into() })
+                }
+            },
+        )
     }
     #[expect(
         clippy::wildcard_enum_match_arm,

@@ -70,7 +70,7 @@ fn lanes_tail_and_committed_indicators_match_their_definitions() {
                         indicators += present;
                     }
                     assert_eq!(indicators == 0, digit == Some(0));
-                } else if column >= 18 {
+                } else if (18..21).contains(&column) {
                     let bit = 228 + column - 18;
                     let flag = (row[bit / 64] >> (bit % 64)) & 1;
                     assert_eq!(flag == 0, digit.is_none());
@@ -134,7 +134,7 @@ fn scaled_locality_visits_one_sixteenth_or_every_bytecode_row() {
 #[test]
 fn uniform_digits_are_present_and_uniform_without_row_dependence() {
     let trace = SyntheticTrace::new(SynthProfile::UniformDigits, 16, 1 << 10, 829).unwrap();
-    for column in 0..trace.digit_columns() {
+    for column in 0..21 {
         assert!(!trace.by_row(column));
         let bound = 1 << trace.bits(column);
         let mut counts = vec![0; bound];
@@ -165,10 +165,10 @@ fn malformed_dimensions_columns_and_indices_are_total() {
         Err(SynthError::BytecodeRows { rows: 3 })
     ));
     let trace = Arc::new(SyntheticTrace::new(SynthProfile::Local, 4, 16, 0).unwrap());
-    assert_eq!(trace.trace_word(6, 0), 0);
+    assert_eq!(trace.trace_word(trace.trace_words(), 0), 0);
     assert_eq!(trace.bytecode_word(4, 0), 0);
     assert_eq!(trace.row_digit(0, 16), None);
-    assert_eq!(trace.digit(21, 0), None);
+    assert_eq!(trace.digit(trace.digit_columns(), 0), None);
 }
 
 #[derive(Debug)]

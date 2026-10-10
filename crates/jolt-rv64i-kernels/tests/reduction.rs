@@ -572,11 +572,11 @@ fn flag_groups_validate_width_count_ranges_overlap_and_columns() {
             &trace,
             &[ColumnMap::Flags {
                 start: 228,
-                columns: vec![18, 21]
+                columns: vec![18, trace.source().digit_columns()]
             }],
             &[]
         ),
-        Err(ReductionError::MapColumn { column: 21, .. })
+        Err(ReductionError::MapColumn { column, .. }) if column == trace.source().digit_columns()
     ));
     assert!(matches!(
         g_pass_digits(

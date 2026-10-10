@@ -1,6 +1,7 @@
-//! Seeded packed traces with six trace words and four bytecode words.
+//! Seeded packed traces with eight trace words and four bytecode words.
 //! Trace words are Rs1Value, Rs2Value, RdPreValue, RamReadValue, NextPC and Inc;
-//! bytecode words are Imm, FallThroughPC, PCPlusImm and PC.
+//! words 6 and 7 are Rs1Value on a clear KeysDiffer flag and Rs2Value on a
+//! set flag; bytecode words are Imm, FallThroughPC, PCPlusImm and PC.
 //!
 //! | Row columns | Contents | Digit columns | Width |
 //! |---|---|---|---|
@@ -22,18 +23,20 @@
 //! The scaled `log_t = log2(bytecode_rows) + 2` rule preserves the reference
 //! ratio of four cycles per bytecode row. RAM accesses use 4,096 words, with
 //! 90% in a 64-word window. Register writes occur on three quarters of cycles.
-//! Uniform digits have no trace words and every column is independent of the
-//! bytecode row; all digits are present and uniform over their bit width.
+//! Uniform digits have zero trace words; columns 0–20 are present, uniform
+//! over their bit width and independent of the bytecode row.
 //!
 //! | Profile | Value-word distribution | Other fields |
 //! |---|---|---|
 //! | `local`, `all_rows` | Uniform 64-bit words | Locality described above |
-//! | `uniform_digits` | Zero trace words, uniform 64-bit Imm | Independent uniform digits |
+//! | `uniform_digits` | Zero trace words, uniform 64-bit Imm | Columns 0–20 are independent uniform digits |
+//! | `chained` | Uniform 64-bit words | `all_rows` with predecessor register and store dependencies |
 //! | `small_values` | Rs1Value, Rs2Value, RdPreValue, RamReadValue and Imm each choose 0, 8, 16, 32 or 64 bits with equal probability, then a uniform word of that width | Identical to `all_rows` at the same seed |
 //!
 //! Fixed chunks of 4,096 cycles use separate ChaCha20 streams indexed by the
 //! chunk, making generation independent of the rayon pool.
 
+use crate::memory::MAX_ADDRESS_BITS;
 use crate::reduction::ColumnMap;
 use crate::source::{CycleSource, LaneSource};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
@@ -41,13 +44,15 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use std::mem::size_of;
 use std::ops::Range;
+use std::sync::Arc;
 use thiserror::Error;
 
 const GENERATION_CHUNK: usize = 4096;
-const DIGIT_COLUMNS: usize = 21;
+const PACKED_DIGIT_COLUMNS: usize = 21;
+const DIGIT_COLUMNS: usize = 29;
 const PRESENT: u8 = 0x80;
 const WIDTHS: [usize; DIGIT_COLUMNS] = [
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 6, 3, 4, 3, 0, 0, 0, 0, 0,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 6, 3, 4, 3, 0, 0, 0, 0, 0, 5, 5, 5, 4, 4, 4, 4, 4,
 ];
 
 const WORD_BITS: usize = 64;
@@ -75,6 +80,7 @@ pub enum SynthProfile {
     AllRows,
     UniformDigits,
     SmallValues,
+    Chained,
 }
 
 impl SynthProfile {
@@ -84,6 +90,7 @@ impl SynthProfile {
             Self::AllRows => "all_rows",
             Self::UniformDigits => "uniform_digits",
             Self::SmallValues => "small_values",
+            Self::Chained => "chained",
         }
     }
 }
@@ -97,6 +104,8 @@ pub enum SynthError {
     BytecodeRows { rows: usize },
     #[error("synthetic table size cannot be represented for exponent {log_t}")]
     TableSize { log_t: usize },
+    #[error("synthetic RAM address bits {bits} must be in 1..={supported}")]
+    AddressBits { bits: usize, supported: usize },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -204,13 +213,22 @@ impl SyntheticTrace {
                     }
                 }
             });
+        if profile == SynthProfile::Chained {
+            let mut previous_rd = (bytecode[bytecode_rows - 1].words[0] >> 10) & 31;
+            for row in &mut bytecode {
+                let rd = (row.words[0] >> 10) & 31;
+                row.words[0] = (row.words[0] & !31) | previous_rd;
+                previous_rd = rd;
+            }
+        }
         let mut rows = vec![[0; 4]; count];
         let mut cycles = vec![Cycle::default(); count];
         let visited = match profile {
             SynthProfile::Local => (bytecode_rows / 16).max(1),
-            SynthProfile::AllRows | SynthProfile::UniformDigits | SynthProfile::SmallValues => {
-                bytecode_rows
-            }
+            SynthProfile::AllRows
+            | SynthProfile::UniformDigits
+            | SynthProfile::SmallValues
+            | SynthProfile::Chained => bytecode_rows,
         };
         let row_offset = seed as usize & (bytecode_rows - 1);
         cycles
@@ -230,7 +248,9 @@ impl SyntheticTrace {
                     let k = (row_offset + j % visited) & (bytecode_rows - 1);
                     cycle.bytecode = k as u32;
                     if profile == SynthProfile::UniformDigits {
-                        for (column, digit) in cycle.digits.iter_mut().enumerate() {
+                        for (column, digit) in
+                            cycle.digits[..PACKED_DIGIT_COLUMNS].iter_mut().enumerate()
+                        {
                             *digit =
                                 PRESENT | (rng.next_u32() as u8 & ((1_u8 << WIDTHS[column]) - 1));
                         }
@@ -276,14 +296,11 @@ impl SyntheticTrace {
                         cycle.tail = a | (b << 2) | ((a & b) << 4);
                     }
                     for (column, &packed) in cycle.digits[..INDICATOR_COLUMNS].iter().enumerate() {
-                        let digit = usize::from(packed & !PRESENT);
-                        if digit != 0 {
-                            let start = INDICATOR_STARTS[column];
-                            let bit = start + digit - 1;
-                            row[bit / 64] |= 1 << (bit % 64);
+                        if profile != SynthProfile::Chained || !(5..10).contains(&column) {
+                            write_indicator(row, column, packed);
                         }
                     }
-                    for column in FLAG_FIRST..DIGIT_COLUMNS {
+                    for column in FLAG_FIRST..PACKED_DIGIT_COLUMNS {
                         if cycle.digits[column] != 0 {
                             let bit = FLAGS_START + column - FLAG_FIRST;
                             row[bit / WORD_BITS] |= 1 << (bit % WORD_BITS);
@@ -291,6 +308,37 @@ impl SyntheticTrace {
                     }
                 }
             });
+        if profile == SynthProfile::Chained {
+            let mut previous_store: Option<[u8; 5]> = None;
+            for cycle in &mut cycles {
+                if let Some(chunks) = previous_store {
+                    cycle.digits[5..10].copy_from_slice(&chunks);
+                }
+                previous_store = (cycle.digits[17] != 0).then(|| {
+                    let mut chunks = [0; 5];
+                    chunks.copy_from_slice(&cycle.digits[5..10]);
+                    chunks
+                });
+            }
+            rows.par_iter_mut().zip(&cycles).for_each(|(row, cycle)| {
+                for column in 5..10 {
+                    write_indicator(row, column, cycle.digits[column]);
+                }
+            });
+        }
+        cycles.par_iter_mut().for_each(|cycle| {
+            let word = bytecode[cycle.bytecode as usize].words[0];
+            for (register, digit) in cycle.digits[21..24].iter_mut().enumerate() {
+                *digit = PRESENT | ((word >> (5 * register)) & 31) as u8;
+            }
+            for chunk in 0..5 {
+                cycle.digits[24 + chunk] = if cycle.digits[14] != 0 {
+                    cycle.digits[5 + chunk]
+                } else {
+                    PRESENT
+                };
+            }
+        });
         Ok(Self {
             profile,
             rows,
@@ -315,7 +363,7 @@ impl SyntheticTrace {
         );
         map.push(ColumnMap::Flags {
             start: FLAGS_START,
-            columns: (FLAG_FIRST..DIGIT_COLUMNS).collect(),
+            columns: (FLAG_FIRST..PACKED_DIGIT_COLUMNS).collect(),
         });
         map
     }
@@ -325,6 +373,16 @@ impl SyntheticTrace {
     /// columns; digit zero has no stored indicator.
     pub fn indicator_start(column: usize) -> Option<usize> {
         INDICATOR_STARTS.get(column).copied()
+    }
+
+    /// RAM chunks low first, rs1/rs2/rd, and the optional Store flag.
+    pub const fn memory_columns() -> ([usize; 5], [usize; 3], usize) {
+        ([24, 25, 26, 27, 28], [21, 22, 23], 17)
+    }
+
+    /// Key flag, gated key words, and power columns for a 32-row block.
+    pub const fn packed_columns() -> (usize, [usize; 2], [usize; 12]) {
+        (18, [6, 7], [0, 1, 2, 3, 4, 24, 25, 26, 27, 28, 10, 11])
     }
 
     pub fn rows(&self) -> &[[u64; 4]] {
@@ -359,12 +417,21 @@ impl CycleSource for SyntheticTrace {
         self.cycles.len()
     }
     fn trace_words(&self) -> usize {
-        6
+        8
     }
     #[inline]
     fn trace_word(&self, word: usize, cycle: usize) -> u64 {
         if word == INC_WORD {
             self.rows.get(cycle).map_or(0, |row| row[0])
+        } else if word == 6 || word == 7 {
+            self.cycles.get(cycle).map_or(0, |c| {
+                let keys_differ = c.digits[18] != 0;
+                if keys_differ == (word == 7) {
+                    c.words[word - 6]
+                } else {
+                    0
+                }
+            })
         } else {
             self.cycles
                 .get(cycle)
@@ -400,7 +467,9 @@ impl CycleSource for SyntheticTrace {
     }
     #[inline]
     fn by_row(&self, column: usize) -> bool {
-        self.profile != SynthProfile::UniformDigits && (column < 5 || (12..18).contains(&column))
+        (21..24).contains(&column)
+            || (self.profile != SynthProfile::UniformDigits
+                && (column < 5 || (12..18).contains(&column)))
     }
     #[inline]
     fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
@@ -434,6 +503,8 @@ impl CycleSource for SyntheticTrace {
         }
         if column < 5 {
             Some((row >> (4 * column)) & 15)
+        } else if (21..24).contains(&column) {
+            Some(((self.bytecode[row].words[0] >> (5 * (column - 21))) & 31) as usize)
         } else {
             self.bytecode[row]
                 .selectors
@@ -443,6 +514,14 @@ impl CycleSource for SyntheticTrace {
                     (encoded != 0).then(|| usize::from(encoded - 1))
                 })
         }
+    }
+}
+
+fn write_indicator(row: &mut [u64; 4], column: usize, packed: u8) {
+    let digit = usize::from(packed & !PRESENT);
+    if digit != 0 {
+        let bit = INDICATOR_STARTS[column] + digit - 1;
+        row[bit / WORD_BITS] |= 1 << (bit % WORD_BITS);
     }
 }
 
@@ -468,4 +547,80 @@ fn small_value(rng: &mut ChaCha20Rng) -> u64 {
     };
     let width = widths[choice];
     rng.next_u64() & u64::MAX.checked_shr(64 - width).unwrap_or(0)
+}
+
+/// Seeded nonzero initial RAM and its store replay for the synthetic trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntheticMemory {
+    pub initial: Vec<(u64, u64)>,
+    pub final_words: Arc<Vec<u64>>,
+    pub mask: Range<usize>,
+    pub io: Vec<u64>,
+}
+
+impl SyntheticMemory {
+    /// Replays normalized RAM columns 24–28 modulo `2^a`, optional Store
+    /// column 17 and Inc word 5. The caller supplies normalized RAM digits
+    /// whose presence and ranges `ValidatedTrace::prepare` has checked.
+    /// The mask covers the first `min(2^a, 4096)` final words.
+    pub fn new<S: CycleSource>(trace: &S, a: usize, seed: u64) -> Result<Self, SynthError> {
+        if !(1..=MAX_ADDRESS_BITS).contains(&a) {
+            return Err(SynthError::AddressBits {
+                bits: a,
+                supported: MAX_ADDRESS_BITS,
+            });
+        }
+        let words = 1_usize
+            .checked_shl(a as u32)
+            .ok_or(SynthError::TableSize { log_t: a })?;
+        if words
+            .checked_mul(size_of::<(u64, u64)>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err(SynthError::TableSize { log_t: a });
+        }
+        let (ram, _, store) = SyntheticTrace::memory_columns();
+        let mut shifts = [0; 5];
+        let mut bits = 0;
+        for (chunk, &column) in ram.iter().enumerate() {
+            shifts[chunk] = bits;
+            let width = trace.bits(column);
+            if width > MAX_ADDRESS_BITS - bits {
+                return Err(SynthError::AddressBits {
+                    bits: bits.saturating_add(width),
+                    supported: MAX_ADDRESS_BITS,
+                });
+            }
+            bits += width;
+        }
+        let mut rng = seeded_rng(seed);
+        let initial: Vec<_> = (0..words)
+            .map(|index| {
+                let word = loop {
+                    let word = rng.next_u64();
+                    if word != 0 {
+                        break word;
+                    }
+                };
+                (index as u64, word)
+            })
+            .collect();
+        let mut final_words: Vec<_> = initial.iter().map(|&(_, word)| word).collect();
+        for j in 0..trace.cycles() {
+            if trace.digit(store, j).is_some() {
+                let address = ram.iter().enumerate().fold(0, |address, (chunk, &column)| {
+                    address | (trace.digit(column, j).unwrap_or(0) << shifts[chunk])
+                }) & (words - 1);
+                final_words[address] ^= trace.trace_word(INC_WORD, j);
+            }
+        }
+        let mask = 0..words.min(1 << 12);
+        let io = final_words[mask.clone()].to_vec();
+        Ok(Self {
+            initial,
+            final_words: Arc::new(final_words),
+            mask,
+            io,
+        })
+    }
 }

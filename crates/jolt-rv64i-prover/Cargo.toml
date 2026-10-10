@@ -37,6 +37,7 @@ jolt-rv64i-verifier.workspace = true
 rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
 
 [dev-dependencies]
+rand_chacha.workspace = true
 jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true
 

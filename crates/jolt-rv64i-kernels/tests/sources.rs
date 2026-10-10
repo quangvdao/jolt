@@ -583,6 +583,173 @@ fn preparation_encodes_full_width_present_and_optional_bytes() {
     }
 }
 
+struct GroupEncodingSource;
+
+impl CycleSource for GroupEncodingSource {
+    fn cycles(&self) -> usize {
+        8192
+    }
+    fn trace_words(&self) -> usize {
+        0
+    }
+    fn trace_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        2
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        cycle % 2
+    }
+    fn digit_columns(&self) -> usize {
+        21
+    }
+    fn bits(&self, column: usize) -> usize {
+        if column == 0 {
+            8
+        } else {
+            7
+        }
+    }
+    fn by_row(&self, column: usize) -> bool {
+        column < 5 || (12..18).contains(&column)
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        if cycle >= self.cycles() {
+            None
+        } else {
+            self.row_digit(column, cycle % 2)
+        }
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        if row >= self.bytecode_rows() || (column == 13 && row == 1) {
+            None
+        } else {
+            [
+                255, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ]
+            .get(column)
+            .copied()
+        }
+    }
+}
+
+#[test]
+fn preparation_keeps_literal_group_encodings_across_tiles_and_chunks() {
+    let cases: [(bool, &[usize], &[u8]); 12] = [
+        (true, &[0, 1, 2, 3, 4], &[255, 1, 2, 3, 4, 255, 1, 2, 3, 4]),
+        (true, &[4, 0, 3, 1, 2], &[4, 255, 3, 1, 2, 4, 255, 3, 1, 2]),
+        (
+            true,
+            &[0, 0, 3, 1, 3],
+            &[255, 255, 3, 1, 3, 255, 255, 3, 1, 3],
+        ),
+        (
+            true,
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            &[255, 1, 2, 3, 4, 5, 6, 7, 255, 1, 2, 3, 4, 5, 6, 7],
+        ),
+        (
+            true,
+            &[7, 0, 5, 2, 6, 1, 4, 3],
+            &[7, 255, 5, 2, 6, 1, 4, 3, 7, 255, 5, 2, 6, 1, 4, 3],
+        ),
+        (
+            true,
+            &[0, 0, 3, 3, 2, 5, 2, 7],
+            &[255, 255, 3, 3, 2, 5, 2, 7, 255, 255, 3, 3, 2, 5, 2, 7],
+        ),
+        (
+            false,
+            &[10, 11, 12, 13, 14],
+            &[11, 12, 13, 14, 15, 11, 12, 13, 0, 15],
+        ),
+        (
+            false,
+            &[14, 10, 13, 11, 12],
+            &[15, 11, 14, 12, 13, 15, 11, 0, 12, 13],
+        ),
+        (
+            false,
+            &[13, 13, 10, 14, 10],
+            &[14, 14, 11, 15, 11, 0, 0, 11, 15, 11],
+        ),
+        (
+            false,
+            &[10, 11, 12, 13, 14, 15, 16, 17],
+            &[
+                11, 12, 13, 14, 15, 16, 17, 18, 11, 12, 13, 0, 15, 16, 17, 18,
+            ],
+        ),
+        (
+            false,
+            &[17, 10, 15, 13, 16, 11, 14, 12],
+            &[
+                18, 11, 16, 14, 17, 12, 15, 13, 18, 11, 16, 0, 17, 12, 15, 13,
+            ],
+        ),
+        (
+            false,
+            &[13, 13, 10, 14, 10, 15, 16, 17],
+            &[14, 14, 11, 15, 11, 16, 17, 18, 0, 0, 11, 15, 11, 16, 17, 18],
+        ),
+    ];
+    let source = Arc::new(GroupEncodingSource);
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                for (present, columns, expected) in cases {
+                    let request = if present {
+                        PrepareRequest {
+                            present: vec![columns.to_vec()],
+                            optional: vec![],
+                        }
+                    } else {
+                        PrepareRequest {
+                            present: vec![],
+                            optional: vec![columns.to_vec()],
+                        }
+                    };
+                    let (_, groups) =
+                        ValidatedTrace::prepare(Arc::clone(&source), request).unwrap();
+                    let bytes = if present {
+                        groups.present[0].bytes()
+                    } else {
+                        groups.optional[0].bytes()
+                    };
+                    assert_eq!(
+                        bytes,
+                        expected.repeat(4096),
+                        "present={present}, columns={columns:?}"
+                    );
+                }
+                let (_, groups) = ValidatedTrace::prepare(
+                    Arc::clone(&source),
+                    PrepareRequest {
+                        present: vec![vec![0, 1, 2, 3, 4], vec![5, 6, 7, 8, 9]],
+                        optional: vec![vec![12, 10, 11, 13, 14, 15, 16, 19]],
+                    },
+                )
+                .unwrap();
+                assert_eq!(groups.present[0].bytes(), [255, 1, 2, 3, 4].repeat(8192));
+                assert_eq!(groups.present[1].bytes(), [5, 6, 7, 8, 9].repeat(8192));
+                assert_eq!(
+                    groups.optional[0].bytes(),
+                    [13, 11, 12, 14, 15, 16, 17, 20, 13, 11, 12, 0, 15, 16, 17, 20].repeat(4096)
+                );
+            });
+    }
+}
+
 #[test]
 fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     let mut source = SourceFixture::new();

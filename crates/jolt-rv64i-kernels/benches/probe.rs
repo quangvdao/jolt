@@ -57,7 +57,17 @@
 //! | fmadd fit reduction_ns | R per chain | fit intercept minus zero-length baseline |
 //! | merge ns | mrg per element | zero-fill, or zero-fill plus tree merge |
 //!
-//! This probe does not measure M. Its table-layout, stream-storage and atomic
+//! `arithmetic/products` measures independent reduced products from trace words.
+//! `mul_x_raw_shift_substitute` uses the raw shift and modulus-0x87 conditional
+//! XOR because the field's mul_x helper is not yet available. `word_monomial_mix`
+//! mirrors the outer monomial rounds: two three-stage Moebius transforms, AND,
+//! then stride-eight gather, totalling nine shifts, eleven ANDs, six XORs and
+//! three ORs (29 word operations). The spec does not fix the ratio within 410 w.
+//! `readout` reads the same column/fold bank geometry as the update probes:
+//! 128 reads per byte output bit, eight per nibble bit, individual indicator
+//! cells, flag-bit sums, and selector One totals. It excludes row-only banks.
+//!
+//! Its table-layout, stream-storage and atomic
 //! substitutions are part of each unit cost, rather than isolated instructions.
 //!
 //! | Lookup pattern | Passage mirrored in the kernel specification | Accesses per cycle |
@@ -342,17 +352,9 @@ enum BucketLayout {
     Fold { byte_selectors: usize, share: usize },
 }
 
-struct Bucket {
-    source: Arc<SyntheticTrace>,
-    layout: BucketLayout,
-    scratch: Vec<Mutex<Vec<F128>>>,
-    offsets: [usize; 5],
-    operations: usize,
-}
-
-impl Bucket {
-    fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
-        let (entries, offsets) = match layout {
+impl BucketLayout {
+    fn geometry(self) -> (usize, [usize; 5]) {
+        match self {
             BucketLayout::Column => (32 * 256, [0; 5]),
             BucketLayout::Fold { byte_selectors, .. } => {
                 let variant = byte_selectors * 5 * 8 * 256 + (64 - byte_selectors) * 5 * 16 * 16;
@@ -366,7 +368,21 @@ impl Bucket {
                     [metadata, shift, memory, compare, branch],
                 )
             }
-        };
+        }
+    }
+}
+
+struct Bucket {
+    source: Arc<SyntheticTrace>,
+    layout: BucketLayout,
+    scratch: Vec<Mutex<Vec<F128>>>,
+    offsets: [usize; 5],
+    operations: usize,
+}
+
+impl Bucket {
+    fn new(source: Arc<SyntheticTrace>, layout: BucketLayout, threads: usize) -> Self {
+        let (entries, offsets) = layout.geometry();
         let operations = match layout {
             BucketLayout::Column => CycleSource::cycles(source.as_ref()) * 32,
             BucketLayout::Fold {
@@ -772,6 +788,191 @@ impl Fmadd {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ArithmeticKind {
+    Product,
+    MulX,
+    Word,
+}
+
+struct Arithmetic {
+    source: Arc<SyntheticTrace>,
+    kind: ArithmeticKind,
+}
+
+impl Arithmetic {
+    fn word_mix(mut a: u64, mut b: u64) -> u64 {
+        for (shift, mask) in [
+            (1, 0xaaaa_aaaa_aaaa_aaaa),
+            (2, 0xcccc_cccc_cccc_cccc),
+            (4, 0xf0f0_f0f0_f0f0_f0f0),
+        ] {
+            a ^= (a << shift) & mask;
+            b ^= (b << shift) & mask;
+        }
+        let mut value = (a & b) & 0x0101_0101_0101_0101;
+        for (shift, mask) in [
+            (7, 0x0003_0003_0003_0003),
+            (14, 0x0000_000f_0000_000f),
+            (28, 0xff),
+        ] {
+            value = (value | (value >> shift)) & mask;
+        }
+        value
+    }
+
+    fn run(&self) -> F128 {
+        let source = black_box(&self.source);
+        (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
+            .into_par_iter()
+            .map(|chunk| {
+                let start = chunk * CHUNK;
+                let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
+                let mut total = F128::from_raw(0);
+                for cycle in start..end {
+                    let a = black_box(trace_value(source, cycle));
+                    let result = match self.kind {
+                        ArithmeticKind::Product => {
+                            let b = black_box(F128::from_raw(
+                                u128::from(source.trace_word(2, cycle))
+                                    | (u128::from(source.trace_word(3, cycle)) << 64),
+                            ));
+                            a * b
+                        }
+                        ArithmeticKind::MulX => {
+                            let raw = a.to_raw();
+                            F128::from_raw((raw << 1) ^ (0x87 & 0_u128.wrapping_sub(raw >> 127)))
+                        }
+                        ArithmeticKind::Word => F128::from_raw(u128::from(Self::word_mix(
+                            a.to_raw() as u64,
+                            (a.to_raw() >> 64) as u64,
+                        ))),
+                    };
+                    total += black_box(result);
+                }
+                total
+            })
+            .reduce(|| F128::from_raw(0), |a, b| a + b)
+    }
+}
+
+struct ReadSpec {
+    base: usize,
+    width: usize,
+    bit: Option<usize>,
+}
+
+struct Readout {
+    buckets: Vec<F128>,
+    specs: Vec<ReadSpec>,
+    output: Vec<F128>,
+    operations: usize,
+}
+
+impl Readout {
+    fn word(specs: &mut Vec<ReadSpec>, base: usize, words: usize, bits: usize) {
+        let width = 1 << bits;
+        for position in 0..words * 64 / bits {
+            for bit in 0..bits {
+                specs.push(ReadSpec {
+                    base: base + position * width,
+                    width,
+                    bit: Some(bit),
+                });
+            }
+        }
+    }
+
+    fn new(layout: BucketLayout) -> Self {
+        let (entries, offsets) = layout.geometry();
+        let mut specs = Vec::new();
+        match layout {
+            BucketLayout::Column => Self::word(&mut specs, 0, 4, 8),
+            BucketLayout::Fold { byte_selectors, .. } => {
+                for selector in 0..64 {
+                    let by_byte = selector < byte_selectors;
+                    let base = if by_byte {
+                        selector * 5 * 8 * 256
+                    } else {
+                        byte_selectors * 5 * 8 * 256 + (selector - byte_selectors) * 5 * 16 * 16
+                    };
+                    Self::word(&mut specs, base, 5, if by_byte { 8 } else { 4 });
+                    for digit in 0..7 {
+                        for value in 1..if digit < 5 { 16 } else { 8 } {
+                            specs.push(ReadSpec {
+                                base: offsets[0] + (selector * 8 + digit) * 16 + value,
+                                width: 1,
+                                bit: None,
+                            });
+                        }
+                    }
+                    for bit in 0..3 {
+                        specs.push(ReadSpec {
+                            base: offsets[0] + (selector * 8 + 7) * 16,
+                            width: 8,
+                            bit: Some(bit),
+                        });
+                    }
+                    specs.push(ReadSpec {
+                        base,
+                        width: if by_byte { 256 } else { 16 },
+                        bit: None,
+                    });
+                }
+                Self::word(&mut specs, offsets[1], 512, 4);
+                Self::word(&mut specs, offsets[2], 128 * 2, 4);
+                Self::word(&mut specs, offsets[3], 512 * 3, 4);
+                Self::word(&mut specs, offsets[4], 2, 4);
+                for selector in 0..512 {
+                    specs.push(ReadSpec {
+                        base: offsets[3] + selector * 3 * 16 * 16,
+                        width: 16,
+                        bit: None,
+                    });
+                }
+            }
+        }
+        let operations = specs
+            .iter()
+            .map(|spec| {
+                if spec.bit.is_some() {
+                    spec.width / 2
+                } else {
+                    spec.width
+                }
+            })
+            .sum();
+        let output = vec![F128::from_raw(0); specs.len()];
+        Self {
+            buckets: field_values(entries),
+            specs,
+            output,
+            operations,
+        }
+    }
+
+    fn run(&mut self) -> F128 {
+        let buckets = black_box(&self.buckets);
+        let specs = black_box(&self.specs);
+        self.output
+            .par_iter_mut()
+            .zip(specs.par_iter())
+            .for_each(|(output, spec)| {
+                let mut total = F128::from_raw(0);
+                for value in 0..spec.width {
+                    if spec.bit.is_none_or(|bit| value & (1 << bit) != 0) {
+                        total += buckets[spec.base + value];
+                    }
+                }
+                *output = total;
+            });
+        black_box(&self.output)
+            .par_iter()
+            .copied()
+            .reduce(|| F128::from_raw(0), |a, b| a + b)
+    }
+}
+
 struct Merge {
     arrays: Vec<Vec<F128>>,
     tree: bool,
@@ -834,6 +1035,8 @@ enum Unit {
     Scatter(Scatter),
     Fmadd(Box<Fmadd>),
     Merge(Merge),
+    Arithmetic(Arithmetic),
+    Readout(Readout),
 }
 
 impl Unit {
@@ -911,6 +1114,34 @@ impl Unit {
                     .ok_or_else(invalid)?;
                 Ok(Self::Fmadd(Box::new(Fmadd::new(source, terms))))
             }
+            "arithmetic" => {
+                let kind = match case.variant.as_str() {
+                    "products" => ArithmeticKind::Product,
+                    "mul_x_raw_shift_substitute" => ArithmeticKind::MulX,
+                    "word_monomial_mix" => ArithmeticKind::Word,
+                    _ => return Err(invalid()),
+                };
+                Ok(Self::Arithmetic(Arithmetic { source, kind }))
+            }
+            "readout" => {
+                let layout = match case.variant.as_str() {
+                    "column_128kib" => BucketLayout::Column,
+                    "fold_none" => BucketLayout::Fold {
+                        byte_selectors: 0,
+                        share: 0,
+                    },
+                    "fold_hot8" => BucketLayout::Fold {
+                        byte_selectors: 8,
+                        share: 0,
+                    },
+                    "fold_all" => BucketLayout::Fold {
+                        byte_selectors: 64,
+                        share: 0,
+                    },
+                    _ => return Err(invalid()),
+                };
+                Ok(Self::Readout(Readout::new(layout)))
+            }
             "merge" => {
                 let tree = match case.variant.as_str() {
                     "zero_fill_10mib" => false,
@@ -935,6 +1166,16 @@ impl ProbeKernel for Unit {
             Self::Scatter(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
             Self::Fmadd(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
             Self::Merge(unit) => [unit.operations(), 0],
+            Self::Arithmetic(unit) => [
+                CycleSource::cycles(unit.source.as_ref())
+                    * if matches!(unit.kind, ArithmeticKind::Word) {
+                        29
+                    } else {
+                        1
+                    },
+                0,
+            ],
+            Self::Readout(unit) => [unit.operations, 0],
         }
     }
 
@@ -945,6 +1186,8 @@ impl ProbeKernel for Unit {
             Self::Scatter(unit) => unit.run(),
             Self::Fmadd(unit) => unit.run(),
             Self::Merge(unit) => unit.run(),
+            Self::Arithmetic(unit) => unit.run(),
+            Self::Readout(unit) => unit.run(),
         }
     }
 
@@ -1012,6 +1255,24 @@ fn main() -> Result<(), RunnerError> {
     for variant in ["zero_fill_10mib", "zero_fill_tree_10mib"] {
         cases.push(ProbeCase {
             unit: "merge",
+            variant: variant.to_owned(),
+            profiles: BOTH,
+        });
+    }
+    for variant in [
+        "products",
+        "mul_x_raw_shift_substitute",
+        "word_monomial_mix",
+    ] {
+        cases.push(ProbeCase {
+            unit: "arithmetic",
+            variant: variant.to_owned(),
+            profiles: BOTH,
+        });
+    }
+    for variant in ["column_128kib", "fold_none", "fold_hot8", "fold_all"] {
+        cases.push(ProbeCase {
+            unit: "readout",
             variant: variant.to_owned(),
             profiles: BOTH,
         });

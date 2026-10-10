@@ -1,8 +1,8 @@
 //! Round messages use monomial coefficients from distinct binary-field nodes and a leading coefficient.
 
 pub mod eq;
-pub mod nodes;
-pub mod product;
+mod nodes;
+mod product;
 
 pub use nodes::{coefficients_from_nodes, eval_at_node};
 pub use product::{linear_at_nodes, quadratic, quadratic_at_nodes};

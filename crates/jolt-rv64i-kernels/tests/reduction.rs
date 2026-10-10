@@ -122,6 +122,25 @@ fn digit_tables_equal_summation_on_indicator_rows() {
             g_pass_digits(&validated, &map(), &four_weights).unwrap(),
             defining_tables(trace.rows(), &four_weights)
         );
+        if log_t == 8 {
+            let full_support_weights: Vec<Vec<_>> = (0..4)
+                .map(|_| {
+                    (0..256)
+                        .map(|column| {
+                            if column < 231 {
+                                F128::random(&mut rng)
+                            } else {
+                                F128::from_raw(0)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                g_pass_digits(&validated, &map(), &full_support_weights).unwrap(),
+                defining_tables(trace.rows(), &full_support_weights)
+            );
+        }
     }
 }
 
@@ -141,10 +160,19 @@ impl Fixture {
         .unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(771 + log_t as u64);
         let tables = defining_tables(trace.rows(), &weights(&mut rng)[1..]);
+        Self::from_tables(tables, log_t, shared, &mut rng)
+    }
+
+    fn from_tables(
+        tables: Vec<Vec<F128>>,
+        log_t: usize,
+        shared: bool,
+        rng: &mut ChaCha20Rng,
+    ) -> Self {
         let legs = (0..if shared { 4 } else { 3 })
             .map(|leg| {
                 let table = leg.min(2);
-                let point: Vec<_> = (0..log_t).map(|_| F128::random(&mut rng)).collect();
+                let point: Vec<_> = (0..log_t).map(|_| F128::random(rng)).collect();
                 let claim = tables[table]
                     .iter()
                     .enumerate()
@@ -153,7 +181,7 @@ impl Fixture {
                 ReductionLeg {
                     table,
                     point,
-                    coefficient: F128::random(&mut rng),
+                    coefficient: F128::random(rng),
                     claim,
                 }
             })
@@ -585,17 +613,19 @@ impl CycleSource for OneBitDigit {
 #[test]
 fn eight_reduction_legs_match_the_definition() {
     let mut fixture = Fixture::new(8, true);
-    let point: Vec<_> = (0..8).map(|i| F128::from_raw(211 + i as u128)).collect();
-    let claim = fixture.tables[1]
-        .iter()
-        .enumerate()
-        .map(|(j, &g)| eq(&point, j) * g)
-        .sum();
-    for _ in 0..4 {
+    for leg in 0..4 {
+        let point: Vec<_> = (0..8)
+            .map(|i| F128::from_raw(211 + 8 * leg as u128 + i as u128))
+            .collect();
+        let claim = fixture.tables[1]
+            .iter()
+            .enumerate()
+            .map(|(j, &g)| eq(&point, j) * g)
+            .sum();
         fixture.legs.push(ReductionLeg {
             table: 1,
-            point: point.clone(),
-            coefficient: F128::from_raw(73),
+            point,
+            coefficient: F128::from_raw(73 + leg as u128),
             claim,
         });
     }
@@ -628,4 +658,117 @@ fn reduction_rejects_weight_and_leg_counts_above_the_bounds() {
         ),
         Err(ReductionError::LegCount { count: 9 })
     ));
+}
+
+#[test]
+fn two_chunk_tables_round_messages_and_final_values_match_the_definition_on_each_pool() {
+    let log_t = 13;
+    let source = Arc::new(SyntheticTrace::new(SynthProfile::Local, log_t, 1 << 11, 918).unwrap());
+    let trace = ValidatedTrace::new(source.clone()).unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(173);
+    let weights = weights(&mut rng);
+    let weights = &weights[1..];
+    let map = map();
+    let expected_tables = defining_tables(source.rows(), weights);
+    let fixture = Fixture::from_tables(expected_tables, log_t, true, &mut rng);
+    let challenges: Vec<_> = (0..log_t).map(|_| F128::random(&mut rng)).collect();
+    let expected_messages: Vec<_> = (0..log_t)
+        .map(|round| fixture.expected_round(&challenges[..round]))
+        .collect();
+    let expected_final_values: Vec<_> = fixture
+        .tables
+        .iter()
+        .map(|table| mle_at(table, &challenges).unwrap())
+        .collect();
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let tables = g_pass_digits(&trace, &map, weights).unwrap();
+            assert_eq!(tables, fixture.tables);
+            let mut core = ReductionCore::new(tables, fixture.legs.clone()).unwrap();
+            core.check_claims().unwrap();
+            let mut claim = fixture.claim();
+            for (round, expected) in expected_messages.iter().enumerate() {
+                let message = core
+                    .prove_round(
+                        round.checked_sub(1).map(|previous| challenges[previous]),
+                        round,
+                        claim,
+                    )
+                    .unwrap();
+                assert_eq!(message.coefficients(), expected.coefficients());
+                claim = expected.evaluate(challenges[round]);
+            }
+            core.finish_rounds(challenges[log_t - 1]).unwrap();
+            assert_eq!(core.final_values().unwrap(), expected_final_values);
+        });
+    }
+}
+
+#[test]
+fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    pool.install(|| {
+        for log_t in [8, 14] {
+            let source = Arc::new(
+                SyntheticTrace::new(
+                    SynthProfile::Local,
+                    log_t,
+                    1 << log_t.saturating_sub(2),
+                    713,
+                )
+                .unwrap(),
+            );
+            let trace = ValidatedTrace::new(source.clone()).unwrap();
+            let mut rng = ChaCha20Rng::seed_from_u64(818);
+            let weights = weights(&mut rng);
+            let weights = &weights[1..];
+            let map = map();
+            let expected = defining_tables(source.rows(), weights);
+            drop(g_pass_digits(&trace, &map, weights).unwrap());
+            let resident = CountingAllocator::live_bytes();
+            let measurement = AllocationMeasurement::begin();
+            let tables = g_pass_digits(&trace, &map, weights).unwrap();
+            let stats = measurement.finish();
+            assert!(
+                stats.allocs <= 256,
+                "{} allocations at log_t={log_t}",
+                stats.allocs
+            );
+            let output_bytes = tables.capacity() * std::mem::size_of::<Vec<F128>>()
+                + tables
+                    .iter()
+                    .map(|table| table.capacity() * std::mem::size_of::<F128>())
+                    .sum::<usize>();
+            assert_eq!(stats.final_bytes, output_bytes);
+            assert_eq!(tables, expected);
+            drop(tables);
+            assert_eq!(CountingAllocator::live_bytes(), resident);
+        }
+    });
+}
+
+#[test]
+fn complete_small_cores_zero_coefficients_and_same_point_shared_legs_match_oracle() {
+    for log_t in [1, 2] {
+        for variant in 0..3 {
+            let mut fixture = Fixture::new(log_t, false);
+            match variant {
+                1 => fixture.legs[1].coefficient = F128::from_raw(0),
+                2 => {
+                    fixture.legs[2] = ReductionLeg {
+                        table: fixture.legs[1].table,
+                        point: fixture.legs[1].point.clone(),
+                        coefficient: F128::from_raw(73),
+                        claim: fixture.legs[1].claim,
+                    }
+                }
+                _ => {}
+            }
+            prove_and_verify(&fixture, true);
+        }
+    }
 }

@@ -10,7 +10,7 @@ pub mod support;
 
 use jolt_field::F128;
 use jolt_rv64i_kernels::packed::buckets::{BucketError, NibbleBuckets};
-use jolt_rv64i_kernels::packed::lift::{LiftError, WordLift};
+use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
@@ -38,8 +38,6 @@ const CHUNK: usize = 4096;
 
 #[derive(Debug, Error)]
 enum MachineryError {
-    #[error(transparent)]
-    Lift(#[from] LiftError),
     #[error(transparent)]
     Bucket(#[from] BucketError),
     #[error(transparent)]
@@ -202,7 +200,7 @@ impl Machinery {
                 });
                 Ok(Self::Lift {
                     inputs,
-                    lift: Box::new(WordLift::new(&weights)?),
+                    lift: Box::new(WordLift::new(&weights)),
                 })
             }
             "bucket" => {

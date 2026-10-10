@@ -32,9 +32,9 @@ impl WordLift {
     /// The array type checks the weight count. Every field element is valid,
     /// so this constructor has no rejecting input. To scale the map, supply
     /// weights already multiplied by the scalar.
-    pub fn new(weights: &[F128; 64]) -> Result<Self, LiftError> {
+    pub fn new(weights: &[F128; 64]) -> Self {
         let tables = std::array::from_fn(|byte| table(&weights[8 * byte..8 * byte + 8]));
-        Ok(Self { tables })
+        Self { tables }
     }
 
     /// Returns the sum of the weights of all set bits, without multiplication.

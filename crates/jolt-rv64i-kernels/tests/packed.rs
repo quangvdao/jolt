@@ -29,7 +29,7 @@ mod tests {
     fn lifts_equal_weighted_bits() {
         let mut rng = ChaCha20Rng::seed_from_u64(73);
         let weights: [F128; 64] = std::array::from_fn(|_| field(&mut rng));
-        let lift = WordLift::new(&weights).unwrap();
+        let lift = WordLift::new(&weights);
         let words: Vec<_> = (0..64)
             .map(|bit| 1_u64 << bit)
             .chain([0, u64::MAX])

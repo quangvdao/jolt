@@ -32,5 +32,8 @@ serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+num-bigint.workspace = true
+num-rational = { version = "0.4.2", default-features = false, features = ["num-bigint"] }
+num-traits.workspace = true
 jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true

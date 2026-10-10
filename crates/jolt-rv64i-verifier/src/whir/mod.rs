@@ -11,6 +11,8 @@
 //! before indexing or allocation, with geometry checked first.
 //!
 //! Parameters, transcript order, wire encoding and conditional security claims
-//! are specified in `specs/rv64i-binary-commitment.md`, sections 2–6 and 8.
+//! are specified in the [commitment specification](../../../../specs/rv64i-binary-commitment.md),
+//! sections 2–6 and 8.
 
 pub mod error;
+pub mod params;

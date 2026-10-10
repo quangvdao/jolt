@@ -16,7 +16,7 @@ pub(super) const SHIFT_SQUARE128: bool = true;
 impl Word {
     #[inline]
     pub(super) fn reduce64(self) -> u64 {
-        self.low() ^ super::super::portable::fold64(self.high_to_low()).low()
+        self.low() ^ super::portable::fold64(self.high_to_low()).low()
     }
 
     #[inline]

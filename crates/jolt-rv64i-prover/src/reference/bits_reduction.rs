@@ -25,41 +25,53 @@ impl<F: JoltField> PrepareKernel<F, BitsReduction<F>, Rv64iPlane> for BitsReduct
         let mut openings = BTreeMap::new();
         let mut derived = BTreeMap::new();
         let mut point = vec![F::zero(); inputs.relation.r_1().len()];
-        for y in 0..BITS_COLUMNS {
-            let bits = witness
-                .bits
-                .iter()
-                .map(|r| {
-                    if r.get(y / 64).is_some_and(|w| (w >> (y % 64)) & 1 != 0) {
+        let mut bit_tables: [Vec<F>; BITS_COLUMNS] =
+            std::array::from_fn(|_| Vec::with_capacity(witness.bits.len()));
+        let mut weight_tables: [Vec<F>; BITS_COLUMNS] =
+            std::array::from_fn(|_| Vec::with_capacity(witness.bits.len()));
+        for (cycle, bits) in witness.bits.iter().enumerate() {
+            for (bit, coordinate) in point.iter_mut().enumerate() {
+                *coordinate = if (cycle >> bit) & 1 != 0 {
+                    F::one()
+                } else {
+                    F::zero()
+                };
+            }
+            let weights = inputs
+                .relation
+                .column_weights(&point, inputs.challenges)
+                .map_err(|error| KernelError::InvalidGeometry {
+                    reason: error.to_string(),
+                })?;
+            for (column, ((bit_table, weight_table), weight)) in bit_tables
+                .iter_mut()
+                .zip(&mut weight_tables)
+                .zip(weights)
+                .enumerate()
+            {
+                bit_table.push(
+                    if bits
+                        .get(column / 64)
+                        .is_some_and(|word| (word >> (column % 64)) & 1 != 0)
+                    {
                         F::one()
                     } else {
                         F::zero()
-                    }
-                })
-                .collect();
+                    },
+                );
+                weight_table.push(weight);
+            }
+        }
+        for (column, (bits, weights)) in bit_tables.into_iter().zip(weight_tables).enumerate() {
             let _ = openings.insert(
-                OpeningId::committed(CommittedPolynomial::Column(y), RelationId::BitsReduction),
+                OpeningId::committed(
+                    CommittedPolynomial::Column(column),
+                    RelationId::BitsReduction,
+                ),
                 Polynomial::new(bits),
             );
-            let weights = (0..witness.bits.len())
-                .map(|j| {
-                    for (i, coordinate) in point.iter_mut().enumerate() {
-                        *coordinate = if (j >> i) & 1 != 0 {
-                            F::one()
-                        } else {
-                            F::zero()
-                        };
-                    }
-                    inputs
-                        .relation
-                        .column_weight(y, &point, inputs.challenges)
-                        .map_err(|error| KernelError::InvalidGeometry {
-                            reason: error.to_string(),
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             let _ = derived.insert(
-                DerivedId::BitsReduction(BitsReductionDerived::ColumnWeight(y)),
+                DerivedId::BitsReduction(BitsReductionDerived::ColumnWeight(column)),
                 Polynomial::new(weights),
             );
         }

@@ -22,8 +22,6 @@ pub struct Output {
     pub x: Vec<F128>,
     /// Five router folds consumed by batch 3b.
     pub claims: Stage3aOutputClaims<F128>,
-    /// Router-restricted short points consumed by batch 3b.
-    pub points: Stage3aOutputPoints<F128>,
 }
 
 impl Output {
@@ -34,7 +32,7 @@ impl Output {
         points: Stage3aOutputPoints<F128>,
     ) -> Result<Self, PointsError> {
         let x = short_point(&points.router_short.compare)?;
-        Ok(Self { x, claims, points })
+        Ok(Self { x, claims })
     }
 }
 

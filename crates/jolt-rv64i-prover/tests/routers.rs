@@ -547,25 +547,6 @@ fn prove_router_batches(
     short.append_output_claims(&mut verifier, &proof.output_claims);
     assert_eq!(prover.state(), verifier.state());
     assert_eq!(outputs, proof.output_points);
-    let stage3a_output = checked.map(|_checked| {
-        let wire = BatchProof {
-            rounds: proof.recorded.proof.clone(),
-            values: stage3a::verify::values(&proof.output_claims),
-        };
-        let output = stage3a::verify::verify_converted(
-            &wire,
-            &mut stage_transcript,
-            ShortInputs {
-                batch: VerifierStage3a::new(w.clone(), r1.clone(), Arc::clone(&routes)).unwrap(),
-                claims: inputs.clone(),
-                points: input_points.clone(),
-            },
-        )
-        .unwrap();
-        assert_eq!(output.points, outputs);
-        assert_eq!(stage_transcript.state(), prover.state());
-        output
-    });
     let mut x = vec![F128::zero(); 17];
     let p = &proof.output_points.router_short;
     let values = &proof.output_claims.router_short;
@@ -587,6 +568,25 @@ fn prove_router_batches(
     {
         x[slot] = value;
     }
+    let stage3a_output = checked.map(|_checked| {
+        let wire = BatchProof {
+            rounds: proof.recorded.proof.clone(),
+            values: stage3a::verify::values(&proof.output_claims),
+        };
+        let output = stage3a::verify::verify_converted(
+            &wire,
+            &mut stage_transcript,
+            ShortInputs {
+                batch: VerifierStage3a::new(w.clone(), r1.clone(), Arc::clone(&routes)).unwrap(),
+                claims: inputs.clone(),
+                points: input_points.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(output.x, x);
+        assert_eq!(stage_transcript.state(), prover.state());
+        output
+    });
     for (router, restricted) in ROUTERS
         .into_iter()
         .zip([&p.variant, &p.shift, &p.memory, &p.compare, &p.branch])

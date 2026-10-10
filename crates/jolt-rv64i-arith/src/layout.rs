@@ -10,6 +10,11 @@ use thiserror::Error;
 
 /// Number of committed columns per cycle.
 pub const BITS_COLUMNS: usize = 256;
+
+/// The crate's limit on what [`Bytecode::preprocess`](crate::bytecode::Bytecode::preprocess)
+/// allocates: `2^24` rows, whatever the length of the instruction list.
+pub const MAX_LOG_K_BYTECODE: usize = 24;
+
 /// Column `c` is bit `c mod 64` of word `floor(c/64)`.
 pub type BitsRow = [u64; 4];
 
@@ -57,26 +62,31 @@ impl Chunk {
     pub(crate) const fn constant(start: u16, bits: u8) -> Self {
         Self { start, bits }
     }
+
     /// First stored indicator's column.
     #[inline]
     pub const fn start(self) -> u16 {
         self.start
     }
+
     /// Digit width in `1..=4`.
     #[inline]
     pub const fn bits(self) -> u8 {
         self.bits
     }
+
     /// Number of stored indicators, `2^bits - 1`.
     #[inline]
     pub const fn indicators(self) -> usize {
         (1_usize << self.bits) - 1
     }
+
     #[inline]
     fn mask(self, i: u8) -> u16 {
         const MASKS: [u16; 4] = [0x5555, 0x6666, 0x7878, 0x7f80];
         MASKS.get(usize::from(i)).copied().unwrap_or(0) & ((1_u16 << self.indicators()) - 1)
     }
+
     /// Bit `k-1` is set exactly when nonzero digit `k` has digit bit `i` set.
     #[inline]
     pub fn digit_bit_mask(self, i: u8) -> Result<u16, ChunkError> {
@@ -88,6 +98,7 @@ impl Chunk {
         }
         Ok(self.mask(i))
     }
+
     /// Stored indicator `k` appears at bit `k-1` of the result.
     #[inline]
     pub fn stored(self, row: &BitsRow) -> u16 {
@@ -101,17 +112,20 @@ impl Chunk {
         };
         ((low | high) & ((1_u64 << self.indicators()) - 1)) as u16
     }
+
     /// All indicators, `(stored << 1) | (1 XOR parity(stored))`.
     #[inline]
     pub fn full(self, row: &BitsRow) -> u16 {
         let stored = self.stored(row);
         (stored << 1) | (1 ^ (stored.count_ones() as u16 & 1))
     }
+
     /// Linear digit bit `parity(stored AND digit_bit_mask(i))`.
     #[inline]
     pub fn digit_bit(self, row: &BitsRow, i: u8) -> Result<bool, ChunkError> {
         Ok((self.stored(row) & self.digit_bit_mask(i)?).count_ones() & 1 != 0)
     }
+
     /// Clears this chunk and writes the indicator for `digit` (none for zero).
     /// An out-of-range digit leaves the row unchanged.
     #[inline]
@@ -125,6 +139,7 @@ impl Chunk {
         self.write_validated_digit(row, digit);
         Ok(())
     }
+
     #[inline]
     fn write_validated_digit(self, row: &mut BitsRow, digit: u8) {
         let start = usize::from(self.start);
@@ -147,6 +162,7 @@ pub(crate) fn bit(row: &BitsRow, column: usize) -> bool {
     row.get(column / 64)
         .is_some_and(|word| word & (1_u64 << (column % 64)) != 0)
 }
+
 #[inline]
 pub(crate) fn set_bit(row: &mut BitsRow, column: usize, value: bool) {
     if let Some(word) = row.get_mut(column / 64) {
@@ -189,8 +205,10 @@ pub struct Layout {
     pos_ra: [Chunk; 2],
     keys_differ: usize,
 }
+
 impl Layout {
-    /// Checks exponents in `1..=32` and `1..=61`, 8-byte RAM alignment,
+    /// Checks bytecode exponents in `1..=MAX_LOG_K_BYTECODE` (see
+    /// [`MAX_LOG_K_BYTECODE`]) and RAM exponents in `1..=61`, 8-byte alignment,
     /// `LowestAddress + 8 * 2^log_K_ram <= 2^64`, then row capacity.
     pub fn new(
         log_K_bytecode: usize,
@@ -198,7 +216,7 @@ impl Layout {
         lowest_address: u64,
     ) -> Result<Self, LayoutError> {
         for (name, log_size, max) in [
-            ("log_K_bytecode", log_K_bytecode, 32),
+            ("log_K_bytecode", log_K_bytecode, MAX_LOG_K_BYTECODE),
             ("log_K_ram", log_K_ram, 61),
         ] {
             if log_size == 0 || log_size > max {
@@ -232,6 +250,7 @@ impl Layout {
             keys_differ: usize::from(start) + 14,
         })
     }
+
     fn address_chunks(log_size: usize, start: &mut u16) -> Vec<Chunk> {
         let mut out = Vec::with_capacity(log_size.div_ceil(4));
         for from in (0..log_size).step_by(4) {
@@ -241,6 +260,7 @@ impl Layout {
         }
         out
     }
+
     #[cfg(test)]
     fn new_without_ram_range_check(
         log_K_bytecode: usize,
@@ -254,36 +274,43 @@ impl Layout {
         layout.lowest_address = lowest_address;
         Ok(layout)
     }
+
     /// Bytecode address exponent.
     #[inline]
     pub fn log_K_bytecode(&self) -> usize {
         self.log_K_bytecode
     }
+
     /// RAM word address exponent.
     #[inline]
     pub fn log_K_ram(&self) -> usize {
         self.log_K_ram
     }
+
     /// Base address subtracted from memory displacements.
     #[inline]
     pub fn lowest_address(&self) -> u64 {
         self.lowest_address
     }
+
     /// Bytecode address chunks in least-significant order.
     #[inline]
     pub fn bytecode_ra(&self) -> &[Chunk] {
         &self.bytecode_ra
     }
+
     /// RAM word address chunks in least-significant order.
     #[inline]
     pub fn ram_ra(&self) -> &[Chunk] {
         &self.ram_ra
     }
+
     /// Low and high 3-bit `Pos` chunks.
     #[inline]
     pub fn pos_ra(&self) -> [Chunk; 2] {
         self.pos_ra
     }
+
     /// Chunks in row order: bytecode, RAM, low Pos, high Pos.
     #[inline]
     pub fn chunks(&self) -> impl Iterator<Item = Chunk> + '_ {
@@ -293,32 +320,38 @@ impl Layout {
             .chain(&self.pos_ra)
             .copied()
     }
+
     /// `KeysDiffer` column.
     #[inline]
     pub fn keys_differ(&self) -> usize {
         self.keys_differ
     }
+
     /// `ShouldBranch` column.
     #[inline]
     pub fn should_branch(&self) -> usize {
         self.keys_differ + 1
     }
+
     /// `JalrLowBit` column.
     #[inline]
     pub fn jalr_low_bit(&self) -> usize {
         self.keys_differ + 2
     }
+
     /// Used columns, `81 + n(log_K_bytecode) + n(log_K_ram)`.
     #[inline]
     pub fn used_columns(&self) -> usize {
         self.keys_differ + 3
     }
+
     /// Increment word at columns `0..64`.
     #[inline]
     pub fn inc(&self, row: &BitsRow) -> u64 {
         let [inc, ..] = *row;
         inc
     }
+
     #[inline]
     fn index(chunks: &[Chunk], row: &BitsRow) -> u64 {
         let mut out = 0;
@@ -333,21 +366,25 @@ impl Layout {
         }
         out
     }
+
     /// Bytecode index reconstructed linearly from digit indicator parities.
     #[inline]
     pub fn bytecode_index(&self, row: &BitsRow) -> u64 {
         Self::index(&self.bytecode_ra, row)
     }
+
     /// RAM word index reconstructed linearly from digit indicator parities.
     #[inline]
     pub fn ram_index(&self, row: &BitsRow) -> u64 {
         Self::index(&self.ram_ra, row)
     }
+
     /// Six-bit position reconstructed linearly from the two Pos chunks.
     #[inline]
     pub fn pos(&self, row: &BitsRow) -> u8 {
         Self::index(&self.pos_ra, row) as u8
     }
+
     #[inline]
     fn write_index(
         chunks: &[Chunk],
@@ -371,6 +408,7 @@ impl Layout {
         }
         Ok(())
     }
+
     /// Clears and writes bytecode chunks; rejects an index outside `2^log_K_bytecode`.
     #[inline]
     pub fn write_bytecode_index(&self, row: &mut BitsRow, index: u64) -> Result<(), LayoutError> {
@@ -382,11 +420,13 @@ impl Layout {
             self.log_K_bytecode,
         )
     }
+
     /// Clears and writes RAM chunks; rejects an index outside `2^log_K_ram`.
     #[inline]
     pub fn write_ram_index(&self, row: &mut BitsRow, index: u64) -> Result<(), LayoutError> {
         Self::write_index(&self.ram_ra, row, index, "RAM", self.log_K_ram)
     }
+
     /// Clears and writes Pos chunks; rejects a position outside `0..64`.
     #[inline]
     pub fn write_pos(&self, row: &mut BitsRow, pos: u8) -> Result<(), LayoutError> {
@@ -401,6 +441,7 @@ impl Layout {
 )]
 mod tests {
     use super::*;
+    use crate::{BaseWords, BytecodeRow, RowSystem, Variant, WitnessRow};
 
     #[test]
     fn sizes_and_reference_columns() {
@@ -453,14 +494,18 @@ mod tests {
             (228, 229, 230)
         );
         assert_eq!(layout.chunks().count(), 12);
-        assert_eq!(3 * 64 + 3 * 64 + 2 * 64 + 3 * 64 + 11 + 3, 718);
-        assert_eq!(chunk_indicators(20) * 2 + 14 + 1, 165);
     }
+
     #[test]
     fn layout_checks_and_boundaries() {
         for (bytecode, ram, name, value) in [
             (0, 1, "log_K_bytecode", 0),
-            (33, 1, "log_K_bytecode", 33),
+            (
+                MAX_LOG_K_BYTECODE + 1,
+                1,
+                "log_K_bytecode",
+                MAX_LOG_K_BYTECODE + 1,
+            ),
             (1, 0, "log_K_ram", 0),
             (1, 62, "log_K_ram", 62),
         ] {
@@ -490,6 +535,7 @@ mod tests {
             LayoutError::BitsRowOverflow { used_columns: 261 }
         );
     }
+
     #[test]
     fn checked_chunk_domains() {
         assert_eq!(
@@ -500,14 +546,19 @@ mod tests {
             Chunk::new(0, 5),
             Err(ChunkError::WidthOutOfRange { bits: 5 })
         );
-        assert_eq!(
-            Chunk::new(242, 4),
-            Err(ChunkError::ColumnRangeOutOfRange {
-                start: 242,
-                bits: 4
-            })
-        );
         for bits in 1..=4 {
+            let start = 256 - ((1_u16 << bits) - 1);
+            let last = Chunk::new(start, bits).unwrap();
+            assert_eq!(last.start(), start);
+            assert_eq!(last.bits(), bits);
+            assert_eq!(usize::from(last.start()) + last.indicators(), 256);
+            assert_eq!(
+                Chunk::new(start + 1, bits),
+                Err(ChunkError::ColumnRangeOutOfRange {
+                    start: start + 1,
+                    bits
+                })
+            );
             let chunk = Chunk::new(63, bits).unwrap();
             let mut row = [u64::MAX; 4];
             assert_eq!(
@@ -542,6 +593,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn indicator_parity_is_linear_on_every_pattern() {
         for bits in [3, 4] {
@@ -565,6 +617,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn index_writers_clear_and_preserve_other_columns() {
         let layout = Layout::new(5, 7, 0).unwrap();
@@ -597,7 +650,21 @@ mod tests {
             assert!(matches!(result, Err(LayoutError::IndexOutOfRange { .. })));
         }
         assert_eq!(row, [0; 4]);
-        for bytecode in 1..=32 {
+        let layout = Layout::new(MAX_LOG_K_BYTECODE, 1, 0).unwrap();
+        let limit = 1_u64 << MAX_LOG_K_BYTECODE;
+        layout.write_bytecode_index(&mut row, limit - 1).unwrap();
+        assert_eq!(layout.bytecode_index(&row), limit - 1);
+        let before = row;
+        assert_eq!(
+            layout.write_bytecode_index(&mut row, limit),
+            Err(LayoutError::IndexOutOfRange {
+                name: "bytecode",
+                index: limit,
+                log_size: MAX_LOG_K_BYTECODE
+            })
+        );
+        assert_eq!(row, before);
+        for bytecode in 1..=MAX_LOG_K_BYTECODE {
             for ram in 1..=61 {
                 if let Ok(layout) = Layout::new(bytecode, ram, 0) {
                     for chunk in layout.chunks() {
@@ -607,9 +674,9 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn unchecked_ram_range_admits_a_wrapped_address() {
-        use crate::{BaseWords, BytecodeRow, RowSystem, Variant, WitnessRow};
         let lowest = u64::MAX - (1 << 22) + 1;
         assert!(matches!(
             Layout::new(1, 20, lowest),

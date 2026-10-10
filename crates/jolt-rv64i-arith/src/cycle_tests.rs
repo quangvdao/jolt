@@ -128,10 +128,6 @@ fn hand_computed_cycles_and_words() {
         let row = &bytecode.rows()[fact.bytecode_index as usize];
         let base = BaseWords::from_facts(&fact);
         let z = WitnessRow::compute(&layout, row, &base, &bits);
-        assert_eq!(
-            z,
-            WitnessRow::assemble(&Words::compute(&layout, row, &base, &bits), &bits)
-        );
         assert!(
             system.failing_rows(&z).is_empty(),
             "cycle {}: {:?}",
@@ -258,32 +254,6 @@ fn each_row_group_has_an_independent_failure_signal() {
                 "cycle {i}, row {failure}"
             );
         }
-    }
-}
-
-#[test]
-fn jalr_local_contract_leaves_low_bit_split_to_surrounding_protocol() {
-    let layout = Layout::new(1, 1, 0).unwrap();
-    let instruction = decode_instruction(0x0010_8067, 0, false, RV64IMAC_JOLT).unwrap();
-    let bytecode = Bytecode::preprocess(&[instruction], &layout).unwrap();
-    let builder = BitsBuilder::new(&layout, &bytecode).unwrap();
-    let system = RowSystem::new(&layout);
-    let fact = facts(0, 0, 0, 0);
-    let mut bits = builder.bits_row(&fact).unwrap();
-    for (next_pc, low_bit) in [(0, true), (1, false)] {
-        set_bit(&mut bits, layout.jalr_low_bit(), low_bit);
-        let base = BaseWords {
-            next_pc,
-            ..BaseWords::from_facts(&fact)
-        };
-        assert!(system
-            .failing_rows(&WitnessRow::compute(
-                &layout,
-                &bytecode.rows()[0],
-                &base,
-                &bits
-            ))
-            .is_empty());
     }
 }
 

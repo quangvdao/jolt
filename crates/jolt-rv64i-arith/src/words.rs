@@ -7,11 +7,17 @@ use crate::layout::{BitsRow, Layout};
 
 /// Values supplied by the surrounding register, RAM and successor arguments.
 ///
-/// These arguments must bind the fetched row to `BytecodeRa`, bind `NextPC` to
-/// a valid bytecode address, and establish
-/// `RdWriteValue = old_rd XOR ((1 XOR Store) AND Inc)` and
-/// `ram_post = RamReadValue XOR (Store AND Inc)`. The local rows do not establish
-/// these identities or perform the lookups.
+/// The surrounding protocol owes five obligations against the one machine
+/// state before the cycle: authenticate the row selected by `BytecodeRa`;
+/// authenticate `Rs1Value` and `Rs2Value` as the contents of that row's `rs1`
+/// and `rs2`, with `x0` reading zero; bind `NextPC` to the next cycle's PC or a
+/// `FinalPC` accepted by `Bytecode::final_pc_index`; establish
+/// `RdWriteValue = old_rd XOR ((1 XOR Store) AND Inc)`, where `old_rd` is the
+/// content of that row's `rd`; and update the word at the committed RAM index
+/// from its content `RamReadValue` to `RamReadValue XOR (Store AND Inc)`.
+/// Register reads, `old_rd` and `RamReadValue` all come from that same state.
+/// The local rows do not authenticate these reads, perform the lookups or
+/// establish the two update identities.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BaseWords {
     pub rs1_value: u64,

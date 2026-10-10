@@ -9,9 +9,13 @@ use crate::variant::{BranchCondition, Variant};
 use crate::words::BaseWords;
 
 /// Facts for one fetched instruction. Register reads correspond to its source
-/// selectors; destination values are zero when `rd = x0`. A data access's RAM
+/// selectors in the state before the cycle, with `x0` reading zero. Destination
+/// pre-values and RAM pre-words come from that same state; destination values
+/// are zero when `rd = x0`. A data access's RAM
 /// index is `(address - LowestAddress) / 8`, and words are little endian.
-/// `next_pc` is the next cycle's PC, or `FinalPC` on the last cycle.
+/// `next_pc` is the next cycle's PC, or `FinalPC` on the last cycle. The
+/// surrounding protocol owes the five obligations documented on [`BaseWords`];
+/// this crate does not authenticate the facts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CycleFacts {
     pub bytecode_index: u32,

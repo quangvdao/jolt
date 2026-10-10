@@ -104,21 +104,25 @@ impl PackedTerm {
     pub const fn start(self) -> u16 {
         self.start
     }
+
     /// Number of consecutive input columns, in 1..=64.
     #[inline]
     pub const fn length(self) -> u8 {
         self.len
     }
+
     /// Distance between successive polynomial exponents.
     #[inline]
     pub const fn stride(self) -> u8 {
         self.stride
     }
+
     /// Exponent of the first input column.
     #[inline]
     pub const fn shift(self) -> u8 {
         self.shift
     }
+
     /// Whether each coefficient additionally contains its constant monomial.
     #[inline]
     pub const fn complement(self) -> bool {
@@ -230,6 +234,7 @@ impl RowSet {
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|word| *word == 0)
     }
+
     /// Whether the given equation failed; out-of-range indices return false.
     #[inline]
     pub fn contains(&self, row: usize) -> bool {
@@ -237,12 +242,14 @@ impl RowSet {
             .get(row / 64)
             .is_some_and(|word| word & (1u64 << (row % 64)) != 0)
     }
+
     /// Failed row indices in increasing order.
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.bits.iter().enumerate().flat_map(|(block, &word)| {
             (0..64).filter_map(move |bit| (word & (1u64 << bit) != 0).then_some(block * 64 + bit))
         })
     }
+
     fn insert(&mut self, row: usize) {
         if let Some(word) = self.bits.get_mut(row / 64) {
             *word |= 1u64 << (row % 64);
@@ -279,9 +286,16 @@ pub struct RowFailure {
 /// `Layout::chunks()` order. All additions in these equations are XOR.
 ///
 /// On a canonical witness these are local equations. The surrounding protocol
-/// must bind `BytecodeRa` to the supplied row, validate `NextPC` as a bytecode
-/// address, enforce `RdWriteValue = old_rd XOR ((1 XOR Store) AND Inc)`, and
-/// enforce `ram_post = ram_pre XOR (Store AND Inc)`.
+/// owes five obligations against the one machine state before the cycle:
+/// authenticate the row selected by `BytecodeRa`; authenticate `Rs1Value` and
+/// `Rs2Value` as the contents of that row's `rs1` and `rs2`, with `x0` reading
+/// zero; bind `NextPC` to the next cycle's PC or a `FinalPC` accepted by
+/// `Bytecode::final_pc_index`; enforce
+/// `RdWriteValue = old_rd XOR ((1 XOR Store) AND Inc)`, where `old_rd` is the
+/// content of that row's `rd`; and update the word at the committed RAM index
+/// from its content `RamReadValue` to `RamReadValue XOR (Store AND Inc)`.
+/// Register reads, `old_rd` and `RamReadValue` all come from that same state.
+/// These authentication and update obligations are not enforced by this crate.
 #[derive(Clone, Debug)]
 pub struct RowSystem {
     lanes: [LaneRows; 2],
@@ -415,14 +429,17 @@ impl RowSystem {
     pub fn lane_rows(&self) -> &[LaneRows; 2] {
         &self.lanes
     }
+
     /// Packed equations, starting at row 128.
     pub fn packed_rows(&self) -> &[PackedRow] {
         &self.packed
     }
+
     /// Total equations, including one per address and position chunk.
     pub fn num_rows(&self) -> usize {
         128 + self.packed.len()
     }
+
     /// Family of a row, or `None` beyond the equation list.
     pub fn group_of(&self, row: usize) -> Option<RowGroup> {
         if row < 128 {
@@ -433,8 +450,9 @@ impl RowSystem {
     }
 
     /// Checks the listed equations on a canonical witness. This does not bind
-    /// `BytecodeRa` to the row, validate `NextPC` as a bytecode address, or enforce
-    /// the register and RAM update identities documented on [`RowSystem`].
+    /// `BytecodeRa` to the row, authenticate source-register reads, validate
+    /// `NextPC` as a bytecode address, or enforce the register and RAM update
+    /// identities documented on [`RowSystem`].
     pub fn failing_rows(&self, z: &WitnessRow) -> RowSet {
         let mut failures = RowSet::default();
         for (family, lane) in self.lanes.iter().enumerate() {
@@ -509,6 +527,7 @@ impl RowSystem {
 mod tests {
     use super::{PackedForm, PackedTerm, PackedTermError, RowGroup, RowSystem};
     use crate::layout::Layout;
+    use crate::layout::MAX_LOG_K_BYTECODE;
     use crate::words::{column, WitnessRow, WITNESS_COLUMNS};
     use jolt_field::F128;
     use jolt_r1cs::{ConstraintMatrices, SparseRow};
@@ -557,7 +576,7 @@ mod tests {
         );
         assert!(PackedTerm::new(1023, 1, 255, 127, true).is_ok());
         assert!(PackedTerm::new(0, 64, 2, 1, true).is_ok());
-        for log_bytecode in 1..=32 {
+        for log_bytecode in 1..=MAX_LOG_K_BYTECODE {
             for log_ram in 1..=61 {
                 if let Ok(layout) = Layout::new(log_bytecode, log_ram, 0) {
                     let rows = RowSystem::new(&layout);

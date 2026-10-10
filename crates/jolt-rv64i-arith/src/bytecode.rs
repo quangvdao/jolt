@@ -28,6 +28,7 @@ pub enum BytecodeColumn {
     Rs2Ra,
     RdWa,
 }
+
 impl BytecodeColumn {
     /// Columns in wire order.
     pub const ALL: [Self; 9] = [
@@ -76,6 +77,7 @@ pub struct BytecodeRow {
     pub rs2: u8,
     pub rd: u8,
 }
+
 #[derive(Clone, Copy)]
 enum Shape {
     Register,
@@ -88,6 +90,7 @@ enum Shape {
     Upper,
     System,
 }
+
 impl BytecodeRow {
     /// Reads normalized operands without decoding an instruction word. Required
     /// operands and immediate encoding ranges are checked. Unsupported kinds
@@ -234,6 +237,7 @@ impl BytecodeRow {
             rd,
         })
     }
+
     /// Column bit pattern, using one-hot variant and register selectors. Every
     /// column is zero for an invalid row. Malformed register fields give zero.
     #[inline]
@@ -281,6 +285,7 @@ pub enum BytecodeError {
     #[error("final PC {final_pc} is not in valid bytecode")]
     FinalPcNotInBytecode { final_pc: u64 },
 }
+
 /// Public table padded with invalid rows to exactly `2^log_K_bytecode` rows.
 #[derive(Debug, Clone)]
 pub struct Bytecode {
@@ -289,10 +294,12 @@ pub struct Bytecode {
     lowest_address: u64,
     pc_indices: HashMap<u64, usize>,
 }
+
 impl Bytecode {
     /// Preprocesses the decoded public program into the supplied layout. The
     /// input list is the decoded public program; this function validates source
     /// shape, immediate ranges, valid-PC alignment and uniqueness, and capacity.
+    /// The padded row table and PC map are both reserved fallibly.
     pub fn preprocess(
         instructions: &[SourceInstruction],
         layout: &Layout,
@@ -313,7 +320,10 @@ impl Bytecode {
         let mut rows = Vec::new();
         rows.try_reserve_exact(capacity)
             .map_err(|_| BytecodeError::TableAllocationFailed { rows: capacity })?;
-        let mut pc_indices = HashMap::with_capacity(instructions.len());
+        let mut pc_indices = HashMap::new();
+        pc_indices
+            .try_reserve(instructions.len())
+            .map_err(|_| BytecodeError::TableAllocationFailed { rows: capacity })?;
         for (index, instruction) in instructions.iter().enumerate() {
             let row = BytecodeRow::from_source(instruction, layout.lowest_address())
                 .map_err(|source| BytecodeError::Row { index, source })?;
@@ -339,26 +349,31 @@ impl Bytecode {
             pc_indices,
         })
     }
+
     /// Exactly `2^log_K` rows, including invalid padding.
     #[inline]
     pub fn rows(&self) -> &[BytecodeRow] {
         &self.rows
     }
+
     /// Exponent from the supplied layout.
     #[inline]
     pub fn log_K(&self) -> usize {
         self.log_K
     }
+
     /// RAM base used to normalize memory immediates.
     #[inline]
     pub fn lowest_address(&self) -> u64 {
         self.lowest_address
     }
+
     /// Index of a valid row with this PC; invalid and padding rows are excluded.
     #[inline]
     pub fn index_of_pc(&self, pc: u64) -> Option<usize> {
         self.pc_indices.get(&pc).copied()
     }
+
     /// Checks the public `FinalPC` names a valid row.
     #[inline]
     pub fn final_pc_index(&self, final_pc: u64) -> Result<usize, BytecodeError> {
@@ -381,6 +396,7 @@ mod tests {
     fn decode(word: u32, pc: u64) -> SourceInstruction {
         decode_instruction(word, pc, false, RV64IMAC_JOLT).unwrap()
     }
+
     #[test]
     fn literal_decoded_rows_and_column_widths() {
         assert_eq!(
@@ -547,6 +563,7 @@ mod tests {
             [1, 1, 0x100, 0, 0x104, 0x100, 32, 64, 8]
         );
     }
+
     #[test]
     fn every_alu_x0_keeps_source_selectors() {
         let register_words = [
@@ -627,6 +644,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn invalid_wire_row_is_all_zero() {
         let row = BytecodeRow {
@@ -653,6 +671,7 @@ mod tests {
             BytecodeRow::default()
         );
     }
+
     #[test]
     fn preprocessing_capacity_padding_and_public_pc_checks() {
         let layout = Layout::new(3, 1, 0).unwrap();
@@ -707,6 +726,7 @@ mod tests {
             [BytecodeRow::default(); 4]
         );
     }
+
     #[test]
     fn malformed_source_shape_and_immediate_domains() {
         let row = |kind, operands| {
@@ -804,6 +824,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn every_immediate_encoding_rejects_both_just_past_bounds() {
         for (kind, bounds) in [

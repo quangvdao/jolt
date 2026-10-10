@@ -31,25 +31,28 @@ impl Inventory {
             MemoryRow {
                 object: "lanes",
                 law: "48*T",
-                spec: "adapters:155",
+                spec: "adapters Memory: Lanes and tails",
                 sizes: vec![48 * cycles],
             },
             MemoryRow {
                 object: "lane_or_core_tail",
                 law: "T",
-                spec: "adapters:155;kernels:306",
+                spec: concat!(
+                    "adapters Memory: Lanes and tails; kernels Memory: ",
+                    "A, B, C of lane groups 0 and 1 at the position point; tail bytes"
+                ),
                 sizes: vec![cycles],
             },
             MemoryRow {
                 object: "prepared_row_cache",
                 law: "2*K",
-                spec: "adapters:156",
+                spec: "adapters Memory: Prepared source",
                 sizes: vec![2 * bytecode],
             },
             MemoryRow {
                 object: "chunk_bytes",
                 law: "d_b*T|d_a*T",
-                spec: "adapters:157",
+                spec: "adapters Memory: Selector bytes, chunk bytes",
                 sizes: vec![
                     layout.bytecode_ra().len() * cycles,
                     layout.ram_ra().len() * cycles,
@@ -58,61 +61,81 @@ impl Inventory {
             MemoryRow {
                 object: "selector_bytes",
                 law: "distinct_selector_columns*T",
-                spec: "adapters:157;kernels:315",
+                spec: concat!(
+                    "adapters Memory: Selector bytes, chunk bytes; ",
+                    "kernels Memory: Selector columns"
+                ),
                 sizes: vec![geometry.selector_columns * cycles],
             },
             MemoryRow {
                 object: "scatter_plan_arrays",
                 law: "2*T (two arrays)",
-                spec: "adapters:158;kernels:325",
+                spec: concat!(
+                    "adapters Memory: Scatter plan; ",
+                    "kernels Memory (smaller state): ScatterPlan"
+                ),
                 sizes: vec![2 * cycles],
             },
             MemoryRow {
                 object: "fold_worker_buckets",
                 law: "16*FoldLayout.entries()",
-                spec: "kernels:308",
+                spec: "kernels Memory: Bucket layout of fold_pass",
                 sizes: vec![16 * geometry.fold_entries],
             },
             MemoryRow {
                 object: "fold_row_buckets",
                 law: "16*FoldLayout.row_entries()",
-                spec: "kernels:308",
+                spec: "kernels Memory: Bucket layout of fold_pass",
                 sizes: vec![16 * geometry.row_entries],
             },
             MemoryRow {
                 object: "fold_or_short_weight",
                 law: "16*RouterShape.fold_len()",
-                spec: "kernels:311",
+                spec: "kernels Memory: Fold_ρ; W_ρ",
                 sizes: geometry.fold_lengths.iter().map(|n| 16 * n).collect(),
             },
             MemoryRow {
                 object: "short_second_buffers",
                 law: "8*RouterShape.fold_len()",
-                spec: "kernels:331",
+                spec: concat!(
+                    "kernels Memory (smaller state): ",
+                    "Second buffers of the short core's binds"
+                ),
                 sizes: geometry.fold_lengths.iter().map(|n| 8 * n).collect(),
             },
             MemoryRow {
                 object: "row_field_tables",
                 law: "16*K",
-                spec: "kernels:310,312",
+                spec: concat!(
+                    "kernels Memory: ra_fold; the scatter of claims_pass; ",
+                    "Row tables of source_lift"
+                ),
                 sizes: vec![16 * bytecode],
             },
             MemoryRow {
                 object: "cycle_field_tables",
                 law: "16*T",
-                spec: "kernels:306,309,313,314,316,318",
+                spec: concat!(
+                    "kernels Memory: ",
+                    "A, B, C of lane groups 0 and 1 at the position point; tail bytes; ",
+                    "Scatter buffer; Word lifts; Source tables with second buffers; ",
+                    "Weight with second buffer; G tables with second buffers"
+                ),
                 sizes: vec![16 * cycles],
             },
             MemoryRow {
                 object: "cycle_second_buffers",
                 law: "8*T",
-                spec: "kernels:314,316,318",
+                spec: concat!(
+                    "kernels Memory: Source tables with second buffers; ",
+                    "Weight with second buffer; G tables with second buffers"
+                ),
                 sizes: vec![8 * cycles],
             },
             MemoryRow {
                 object: "materialised_selector_or_chunk",
                 law: "16*(T/16)=T at fourth bind",
-                spec: "kernels:315,317",
+                spec: "kernels Memory: Selector columns; Chunk columns",
                 sizes: vec![cycles],
             },
         ];

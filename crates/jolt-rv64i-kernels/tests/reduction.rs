@@ -112,13 +112,13 @@ fn digit_tables_equal_summation_on_indicator_rows() {
             g_pass_digits(&validated, &map(), &weights[1..]).unwrap(),
             defining_tables(trace.rows(), &weights[1..])
         );
-        let five_weights: Vec<_> = [1, 2, 3, 1, 2]
+        let four_weights: Vec<_> = [1, 2, 3, 1]
             .into_iter()
             .map(|index| weights[index].clone())
             .collect();
         assert_eq!(
-            g_pass_digits(&validated, &map(), &five_weights).unwrap(),
-            defining_tables(trace.rows(), &five_weights)
+            g_pass_digits(&validated, &map(), &four_weights).unwrap(),
+            defining_tables(trace.rows(), &four_weights)
         );
     }
 }
@@ -536,7 +536,7 @@ impl CycleSource for OneBitDigit {
 }
 
 #[test]
-fn reduction_with_more_than_four_legs_matches_the_unbounded_contract() {
+fn eight_reduction_legs_match_the_definition() {
     let mut fixture = Fixture::new(8, true);
     let point: Vec<_> = (0..8).map(|i| F128::from_raw(211 + i as u128)).collect();
     let claim = fixture.tables[1]
@@ -544,6 +544,27 @@ fn reduction_with_more_than_four_legs_matches_the_unbounded_contract() {
         .enumerate()
         .map(|(j, &g)| eq(&point, j) * g)
         .sum();
-    fixture.legs.push((1, point, F128::from_raw(73), claim));
+    for _ in 0..4 {
+        fixture
+            .legs
+            .push((1, point.clone(), F128::from_raw(73), claim));
+    }
     prove_and_verify(&fixture, true);
+}
+
+#[test]
+fn reduction_rejects_weight_and_leg_counts_above_the_bounds() {
+    let zero = F128::from_raw(0);
+    let trace = ValidatedTrace::new(Arc::new(
+        SyntheticTrace::new(SynthProfile::Local, 3, 2, 17).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        g_pass_digits(&trace, &map(), &vec![vec![zero; 256]; 5]),
+        Err(ReductionError::WeightCount { count: 5 })
+    );
+    assert!(matches!(
+        ReductionCore::new(vec![vec![zero; 8]], vec![(0, vec![zero; 3], zero, zero); 9]),
+        Err(ReductionError::LegCount { count: 9 })
+    ));
 }

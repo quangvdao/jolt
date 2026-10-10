@@ -25,6 +25,10 @@ pub enum ColumnMap {
 /// Rejected reduction geometry or a diagnostic claim mismatch.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ReductionError {
+    #[error("{count} weight vectors exceed the maximum of four")]
+    WeightCount { count: usize },
+    #[error("{count} reduction legs exceed the maximum of eight")]
+    LegCount { count: usize },
     #[error("table {table} has invalid length {actual}; expected {expected:?}")]
     TableLength {
         table: usize,
@@ -73,6 +77,11 @@ pub enum ReductionError {
 }
 
 fn check_weights(weights: &[Vec<F128>]) -> Result<(), ReductionError> {
+    if weights.len() > 4 {
+        return Err(ReductionError::WeightCount {
+            count: weights.len(),
+        });
+    }
     for (weight, values) in weights.iter().enumerate() {
         if values.len() != 256 {
             return Err(ReductionError::WeightLength {
@@ -91,21 +100,6 @@ fn output_views(tables: &mut [Vec<F128>], chunk: usize) -> Vec<(usize, &mut [F12
         .collect();
     views.sort_by_key(|&(index, _)| index);
     views
-}
-
-enum DigitLift {
-    Flags {
-        columns: Vec<usize>,
-        values: Vec<F128>,
-    },
-    Word {
-        trace_word: usize,
-        lift: Box<WordLift>,
-    },
-    Indicators {
-        column: usize,
-        values: Vec<F128>,
-    },
 }
 
 #[derive(Default)]
@@ -322,111 +316,65 @@ pub fn g_pass_digits<S: CycleSource>(
             }
         }
     }
-    let lifts: Vec<Vec<DigitLift>> = if weights.len() <= 4 {
-        Vec::new()
-    } else {
-        weights
-            .iter()
-            .map(|weight| {
-                ranges
-                    .iter()
-                    .filter(|(_, range)| {
-                        weight[range.clone()]
-                            .iter()
-                            .any(|&w| w != F128::from_raw(0))
-                    })
-                    .map(|(entry, range)| match entry.clone() {
-                        ColumnMap::Word { trace_word, .. } => {
-                            let mut values = [F128::from_raw(0); 64];
-                            values.copy_from_slice(&weight[range.clone()]);
-                            DigitLift::Word {
-                                trace_word,
-                                lift: Box::new(WordLift::new(&values)),
-                            }
-                        }
-                        ColumnMap::Indicators { column, .. } => {
-                            let mut values = Vec::with_capacity(range.len() + 1);
-                            values.push(F128::from_raw(0));
-                            values.extend_from_slice(&weight[range.clone()]);
-                            DigitLift::Indicators { column, values }
-                        }
-                        ColumnMap::Flags { columns, .. } => {
-                            let mut values = vec![F128::from_raw(0); 1 << columns.len()];
-                            for mask in 1_usize..values.len() {
-                                let bit = mask.trailing_zeros() as usize;
-                                values[mask] =
-                                    values[mask & (mask - 1)] + weight[range.start + bit];
-                            }
-                            DigitLift::Flags { columns, values }
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
-    };
-    let groups: Vec<_> = if weights.len() <= 4 {
-        ranges
-            .iter()
-            .map(|(entry, range)| {
-                let supported: Vec<_> = weights
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, weight)| {
-                        weight[range.clone()]
-                            .iter()
-                            .any(|&v| v != F128::from_raw(0))
-                    })
-                    .collect();
-                match entry {
-                    ColumnMap::Word { trace_word, .. } => {
-                        let mut lifts = std::array::from_fn(|_| None);
-                        for (index, weight) in supported {
-                            let mut values = [F128::from_raw(0); 64];
-                            values.copy_from_slice(&weight[range.clone()]);
-                            lifts[index] = Some(Box::new(WordLift::new(&values)));
-                        }
-                        GroupLift::Word {
-                            trace_word: *trace_word,
-                            lifts,
-                        }
+    let groups: Vec<_> = ranges
+        .iter()
+        .map(|(entry, range)| {
+            let supported: Vec<_> = weights
+                .iter()
+                .enumerate()
+                .filter(|(_, weight)| {
+                    weight[range.clone()]
+                        .iter()
+                        .any(|&v| v != F128::from_raw(0))
+                })
+                .collect();
+            match entry {
+                ColumnMap::Word { trace_word, .. } => {
+                    let mut lifts = std::array::from_fn(|_| None);
+                    for (index, weight) in supported {
+                        let mut values = [F128::from_raw(0); 64];
+                        values.copy_from_slice(&weight[range.clone()]);
+                        lifts[index] = Some(Box::new(WordLift::new(&values)));
                     }
-                    ColumnMap::Indicators { column, .. } => GroupLift::Indicators {
-                        column: *column,
-                        tables: GroupTables::new(
-                            supported
-                                .into_iter()
-                                .map(|(index, weight)| {
-                                    let mut values = Vec::with_capacity(range.len() + 1);
-                                    values.push(F128::from_raw(0));
-                                    values.extend_from_slice(&weight[range.clone()]);
-                                    (index, values)
-                                })
-                                .collect(),
-                        ),
-                    },
-                    ColumnMap::Flags { columns, .. } => GroupLift::Flags {
-                        columns: columns.clone(),
-                        tables: GroupTables::new(
-                            supported
-                                .into_iter()
-                                .map(|(index, weight)| {
-                                    let mut values = vec![F128::from_raw(0); 1 << columns.len()];
-                                    for mask in 1_usize..values.len() {
-                                        let bit = mask.trailing_zeros() as usize;
-                                        values[mask] =
-                                            values[mask & (mask - 1)] + weight[range.start + bit];
-                                    }
-                                    (index, values)
-                                })
-                                .collect(),
-                        ),
-                    },
+                    GroupLift::Word {
+                        trace_word: *trace_word,
+                        lifts,
+                    }
                 }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                ColumnMap::Indicators { column, .. } => GroupLift::Indicators {
+                    column: *column,
+                    tables: GroupTables::new(
+                        supported
+                            .into_iter()
+                            .map(|(index, weight)| {
+                                let mut values = Vec::with_capacity(range.len() + 1);
+                                values.push(F128::from_raw(0));
+                                values.extend_from_slice(&weight[range.clone()]);
+                                (index, values)
+                            })
+                            .collect(),
+                    ),
+                },
+                ColumnMap::Flags { columns, .. } => GroupLift::Flags {
+                    columns: columns.clone(),
+                    tables: GroupTables::new(
+                        supported
+                            .into_iter()
+                            .map(|(index, weight)| {
+                                let mut values = vec![F128::from_raw(0); 1 << columns.len()];
+                                for mask in 1_usize..values.len() {
+                                    let bit = mask.trailing_zeros() as usize;
+                                    values[mask] =
+                                        values[mask & (mask - 1)] + weight[range.start + bit];
+                                }
+                                (index, values)
+                            })
+                            .collect(),
+                    ),
+                },
+            }
+        })
+        .collect();
     let mut tables = vec![vec![F128::from_raw(0); source.cycles()]; weights.len()];
     if weights.is_empty() {
         return Ok(tables);
@@ -456,34 +404,8 @@ pub fn g_pass_digits<S: CycleSource>(
             }
 
             for cycle in 0..outputs[0].1.len() {
-                if weights.len() <= 4 {
-                    let values = group_values(source.as_ref(), &groups, index * chunk + cycle);
-                    for ((_, output), value) in outputs.iter_mut().zip(values) {
-                        output[cycle] = value;
-                    }
-                    continue;
-                }
-                for ((_, output), lifts) in outputs.iter_mut().zip(&lifts) {
-                    let mut value = F128::from_raw(0);
-                    for lift in lifts {
-                        value += match lift {
-                            DigitLift::Flags { columns, values } => {
-                                let mask =
-                                    columns.iter().enumerate().fold(0, |mask, (bit, &column)| {
-                                        mask | (usize::from(
-                                            source.digit(column, index * chunk + cycle).is_some(),
-                                        ) << bit)
-                                    });
-                                values[mask]
-                            }
-                            DigitLift::Word { trace_word, lift } => {
-                                lift.lift(source.trace_word(*trace_word, index * chunk + cycle))
-                            }
-                            DigitLift::Indicators { column, values } => {
-                                values[source.digit(*column, index * chunk + cycle).unwrap_or(0)]
-                            }
-                        };
-                    }
+                let values = group_values(source.as_ref(), &groups, index * chunk + cycle);
+                for ((_, output), value) in outputs.iter_mut().zip(values) {
                     output[cycle] = value;
                 }
             }
@@ -529,6 +451,9 @@ impl ReductionCore {
         tables: Vec<Vec<F128>>,
         legs: Vec<(usize, Vec<F128>, F128, F128)>,
     ) -> Result<Self, ReductionError> {
+        if legs.len() > 8 {
+            return Err(ReductionError::LegCount { count: legs.len() });
+        }
         let length = tables.first().map_or(0, Vec::len);
         for (table, values) in tables.iter().enumerate() {
             if !values.len().is_power_of_two() || values.len() != length {
@@ -671,11 +596,7 @@ impl ReductionCore {
                 .zip(self.partials[..2 * count * leg_count].par_chunks_mut(2 * leg_count))
                 .enumerate()
                 .for_each(|(index, (views, partials))| {
-                    if leg_count <= 4 {
-                        Self::accumulate_chunk::<4>(views, legs, partials, index, chunk, bind);
-                    } else {
-                        Self::accumulate_large_chunk(views, legs, partials, index, chunk, bind);
-                    }
+                    Self::accumulate_chunk::<8>(views, legs, partials, index, chunk, bind);
                 });
         } else if let Some(challenge) = bind {
             views.par_chunks_mut(tables).for_each(|views| {
@@ -718,19 +639,6 @@ impl ReductionCore {
             bind,
         );
         partials[..legs.len()].copy_from_slice(&total[..legs.len()]);
-    }
-
-    fn accumulate_large_chunk(
-        views: &mut [(usize, &[F128], &mut [F128])],
-        legs: &[Leg],
-        partials: &mut [F128Accumulator],
-        index: usize,
-        chunk: usize,
-        bind: Option<F128>,
-    ) {
-        let (total, sums) = partials.split_at_mut(legs.len());
-        total.fill(F128Accumulator::default());
-        Self::accumulate_blocks(views, legs, (total, sums), (index, chunk), bind);
     }
 
     fn accumulate_blocks(

@@ -982,94 +982,6 @@ impl Fmadd {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ArithmeticKind {
-    Product,
-    MulX,
-    Word,
-}
-
-struct Arithmetic {
-    source: Arc<SyntheticTrace>,
-    kind: ArithmeticKind,
-}
-
-impl Arithmetic {
-    fn word_mix(mut a: u64, mut b: u64) -> u64 {
-        for (shift, mask) in [
-            (1, 0xaaaa_aaaa_aaaa_aaaa),
-            (2, 0xcccc_cccc_cccc_cccc),
-            (4, 0xf0f0_f0f0_f0f0_f0f0),
-        ] {
-            a ^= (a << shift) & mask;
-            b ^= (b << shift) & mask;
-        }
-        let mut value = (a & b) & 0x0101_0101_0101_0101;
-        for (shift, mask) in [
-            (7, 0x0003_0003_0003_0003),
-            (14, 0x0000_000f_0000_000f),
-            (28, 0xff),
-        ] {
-            value = (value | (value >> shift)) & mask;
-        }
-        value
-    }
-
-    fn run(&self) -> F128 {
-        match self.kind {
-            ArithmeticKind::Product => self.product_stream(),
-            ArithmeticKind::MulX => self.mul_x_stream(),
-            ArithmeticKind::Word => self.word_stream(),
-        }
-    }
-
-    #[inline(never)]
-    fn product_stream(&self) -> F128 {
-        self.run_with(|source, cycle| {
-            let a = trace_value(source, cycle);
-            let b = F128::from_raw(
-                u128::from(source.trace_word(2, cycle))
-                    | (u128::from(source.trace_word(3, cycle)) << 64),
-            );
-            a * b
-        })
-    }
-
-    #[inline(never)]
-    fn mul_x_stream(&self) -> F128 {
-        self.run_with(|source, cycle| {
-            let raw = trace_value(source, cycle).to_raw();
-            F128::from_raw((raw << 1) ^ (0x87 & 0_u128.wrapping_sub(raw >> 127)))
-        })
-    }
-
-    #[inline(never)]
-    fn word_stream(&self) -> F128 {
-        self.run_with(|source, cycle| {
-            F128::from_raw(u128::from(Self::word_mix(
-                source.trace_word(0, cycle),
-                source.trace_word(1, cycle),
-            )))
-        })
-    }
-
-    fn run_with(&self, operation: impl Fn(&SyntheticTrace, usize) -> F128 + Sync) -> F128 {
-        let source = black_box(&self.source);
-        (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
-            .into_par_iter()
-            .map(|chunk| {
-                let start = chunk * CHUNK;
-                let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
-                let mut total = F128::from_raw(0);
-                for cycle in start..end {
-                    total += operation(source, cycle);
-                }
-                total
-            })
-            .reduce(|| F128::from_raw(0), |a, b| a + b)
-    }
-}
-
 struct ReadSpec {
     base: usize,
     width: usize,
@@ -1300,7 +1212,6 @@ enum Unit {
     Partitioned(Box<PartitionedScatter>),
     Fmadd(Box<Fmadd>),
     Merge(Merge),
-    Arithmetic(Arithmetic),
     Hot(HotArithmetic),
     Readout(Readout),
 }
@@ -1408,17 +1319,11 @@ impl Unit {
                     case.variant == "reduce_hot_control",
                 )))
             }
-            "arithmetic" => {
-                let kind = match case.variant.as_str() {
-                    "products" => ArithmeticKind::Product,
-                    "mul_x_raw_shift_substitute" => ArithmeticKind::MulX,
-                    "word_monomial_mix" => ArithmeticKind::Word,
-                    _ => return Err(invalid()),
-                };
-                Ok(Self::Arithmetic(Arithmetic {
-                    source: trace()?,
-                    kind,
-                }))
+            "arithmetic" if case.variant == "mul_x_hot_raw_shift_substitute" => {
+                Ok(Self::Hot(HotArithmetic::mul_x()))
+            }
+            "arithmetic" if case.variant == "word_monomial_hot" => {
+                Ok(Self::Hot(HotArithmetic::word()))
             }
             "readout" => {
                 let layout = match case.variant.as_str() {
@@ -1465,15 +1370,6 @@ impl ProbeKernel for Unit {
             Self::Partitioned(unit) => [unit.cycles(), 0],
             Self::Fmadd(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
             Self::Merge(unit) => [unit.operations(), 0],
-            Self::Arithmetic(unit) => [
-                CycleSource::cycles(unit.source.as_ref())
-                    * if matches!(unit.kind, ArithmeticKind::Word) {
-                        29
-                    } else {
-                        1
-                    },
-                0,
-            ],
             Self::Readout(unit) => [unit.operations, 0],
             Self::Hot(unit) => [unit.operations(), 0],
         }
@@ -1487,7 +1383,6 @@ impl ProbeKernel for Unit {
             Self::Partitioned(unit) => unit.run(),
             Self::Fmadd(unit) => unit.run(),
             Self::Merge(unit) => unit.run(),
-            Self::Arithmetic(unit) => unit.run(),
             Self::Readout(unit) => unit.run(),
             Self::Hot(unit) => unit.run(),
         }
@@ -1614,15 +1509,11 @@ fn main() -> Result<(), RunnerError> {
             minimum_threads: 1,
         });
     }
-    for variant in [
-        "products",
-        "mul_x_raw_shift_substitute",
-        "word_monomial_mix",
-    ] {
+    for variant in ["mul_x_hot_raw_shift_substitute", "word_monomial_hot"] {
         cases.push(ProbeCase {
             unit: "arithmetic",
             variant: variant.to_owned(),
-            profiles: BOTH,
+            profiles: &[],
             minimum_threads: 1,
         });
     }

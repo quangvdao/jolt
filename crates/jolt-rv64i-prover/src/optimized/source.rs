@@ -4,9 +4,15 @@ use crate::error::Rv64iProverError;
 use crate::plane::{CycleWords, DecodedCycle, DigitField, DigitFields, Rv64iWitness};
 #[cfg(feature = "allocative")]
 use allocative::Allocative;
+use jolt_field::F128;
+use jolt_kernels::KernelError;
 use jolt_rv64i_arith::{Bytecode, BytecodeRow, Chunk, Layout, Variant};
+use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
 use jolt_rv64i_kernels::reduction::ColumnMap;
-use jolt_rv64i_kernels::source::CycleSource;
+use jolt_rv64i_kernels::source::{
+    CycleSource, OptionalGroup, PrepareRequest, PresentGroup, ValidatedTrace,
+};
+use std::fmt::Display;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
@@ -383,5 +389,225 @@ impl CycleSource for WitnessSource {
             .get(row)?
             .variant
             .map(|variant| variant.index())
+    }
+}
+
+/// Byte groups retained for the router and tail adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceGroup {
+    BytecodeChunks,
+    RamChunks,
+    Selectors,
+}
+impl SourceGroup {
+    fn name(self) -> &'static str {
+        match self {
+            Self::BytecodeChunks => "bytecode chunk group",
+            Self::RamChunks => "RAM chunk group",
+            Self::Selectors => "selector group",
+        }
+    }
+}
+
+/// Whether preparation requested a group and whether its core has taken it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupState {
+    NotRequested,
+    Held,
+    Taken,
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative), allocative(bound = ""))]
+enum OwnedGroup<G> {
+    NotRequested,
+    Held(#[cfg_attr(feature = "allocative", allocative(skip))] G),
+    Taken,
+}
+impl<G> OwnedGroup<G> {
+    fn state(&self) -> GroupState {
+        match self {
+            Self::NotRequested => GroupState::NotRequested,
+            Self::Held(_) => GroupState::Held,
+            Self::Taken => GroupState::Taken,
+        }
+    }
+
+    fn take(&mut self, group: SourceGroup) -> Result<G, KernelError<F128>> {
+        match std::mem::replace(self, Self::Taken) {
+            Self::Held(value) => Ok(value),
+            Self::NotRequested => {
+                *self = Self::NotRequested;
+                Err(SharedSource::geometry(format!(
+                    "{} was not requested",
+                    group.name()
+                )))
+            }
+            Self::Taken => Err(SharedSource::geometry(format!(
+                "{} was already taken",
+                group.name()
+            ))),
+        }
+    }
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+enum SharedPlan {
+    NotBuilt,
+    Held(#[cfg_attr(feature = "allocative", allocative(skip))] Arc<ScatterPlan<WitnessSource>>),
+    Released,
+}
+
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+struct PreparedSource {
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    trace: Arc<ValidatedTrace<WitnessSource>>,
+    bytecode: OwnedGroup<PresentGroup>,
+    ram: OwnedGroup<PresentGroup>,
+    selectors: OwnedGroup<OptionalGroup>,
+    plan: SharedPlan,
+}
+
+/// Cross-batch state inserted empty with `ProofSession::state_or_insert_with`.
+/// A first caller in batch 3a or 3b passes the selector columns listed by
+/// `RoutersCycleCore::columns` for all five shapes, regardless of optimised
+/// slots: preparation writes that optional
+/// group and each chunk group with at most seven columns. A first caller in
+/// batch 6b passes `None`, requesting only the eligible chunk groups, because
+/// batches 3a and 3b are behind it. A later router request after that tail-first
+/// preparation fails with `InvalidGeometry`; it never adds a second walk.
+/// `BytecodeReadCycle` and `RamRaProduct` take their respective present groups;
+/// the first optimised `RouterCycle` prepare takes selectors for `RoutersCycleCore`.
+/// Untaken groups drop with the session.
+/// The session belongs to one witness, and router callers supply the same
+/// canonical selector list throughout it. Taken groups and a released plan
+/// are never reconstructed.
+#[derive(Default)]
+#[cfg_attr(feature = "allocative", derive(Allocative))]
+pub struct SharedSource {
+    prepared: Option<PreparedSource>,
+}
+impl SharedSource {
+    fn geometry(reason: impl Display) -> KernelError<F128> {
+        KernelError::InvalidGeometry {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Prepares on a miss and returns the same trace `Arc` on later requests.
+    /// `Some` supplies the router selector list; `None` selects a tail request.
+    /// Failure leaves the previous state intact.
+    pub fn prepare(
+        &mut self,
+        witness: &Rv64iWitness,
+        selectors: Option<Vec<usize>>,
+    ) -> Result<Arc<ValidatedTrace<WitnessSource>>, KernelError<F128>> {
+        if let Some(prepared) = &self.prepared {
+            if selectors.is_some() && matches!(prepared.selectors, OwnedGroup::NotRequested) {
+                return Err(Self::geometry("selector group was not requested"));
+            }
+            return Ok(Arc::clone(&prepared.trace));
+        }
+        let source = Arc::new(WitnessSource::new(witness).map_err(Self::geometry)?);
+        let columns = source.columns();
+        let bytecode_requested = columns.bytecode_chunks().len() <= 7;
+        let ram_requested = columns.ram_chunks().len() <= 7;
+        let mut present = Vec::with_capacity(2);
+        if bytecode_requested {
+            present.push(columns.bytecode_chunks().to_vec());
+        }
+        if ram_requested {
+            present.push(columns.ram_chunks().to_vec());
+        }
+        let request = PrepareRequest {
+            present,
+            optional: selectors.into_iter().collect(),
+        };
+        let (trace, groups) = ValidatedTrace::prepare(source, request).map_err(Self::geometry)?;
+        let mut present = groups.present.into_iter();
+        let mut next_present = |requested| {
+            if requested {
+                present
+                    .next()
+                    .map(OwnedGroup::Held)
+                    .ok_or_else(|| Self::geometry("preparation omitted a requested chunk group"))
+            } else {
+                Ok(OwnedGroup::NotRequested)
+            }
+        };
+        let bytecode = next_present(bytecode_requested)?;
+        let ram = next_present(ram_requested)?;
+        let selectors = groups
+            .optional
+            .into_iter()
+            .next()
+            .map_or(OwnedGroup::NotRequested, OwnedGroup::Held);
+        let trace = Arc::new(trace);
+        self.prepared = Some(PreparedSource {
+            trace: Arc::clone(&trace),
+            bytecode,
+            ram,
+            selectors,
+            plan: SharedPlan::NotBuilt,
+        });
+        Ok(trace)
+    }
+
+    /// Reports a group's lifecycle; an empty preparation has requested none.
+    pub fn group_state(&self, group: SourceGroup) -> GroupState {
+        self.prepared
+            .as_ref()
+            .map_or(GroupState::NotRequested, |prepared| match group {
+                SourceGroup::BytecodeChunks => prepared.bytecode.state(),
+                SourceGroup::RamChunks => prepared.ram.state(),
+                SourceGroup::Selectors => prepared.selectors.state(),
+            })
+    }
+
+    fn prepared_mut(&mut self) -> Result<&mut PreparedSource, KernelError<F128>> {
+        self.prepared
+            .as_mut()
+            .ok_or_else(|| Self::geometry("source has not been prepared"))
+    }
+
+    /// Moves held bytecode chunk bytes into their core; absent or taken is an error.
+    pub fn take_bytecode_group(&mut self) -> Result<PresentGroup, KernelError<F128>> {
+        self.prepared_mut()?
+            .bytecode
+            .take(SourceGroup::BytecodeChunks)
+    }
+
+    /// Moves held RAM chunk bytes into their core; absent or taken is an error.
+    pub fn take_ram_group(&mut self) -> Result<PresentGroup, KernelError<F128>> {
+        self.prepared_mut()?.ram.take(SourceGroup::RamChunks)
+    }
+
+    /// Moves held selector bytes into the cycle core; absent or taken is an error.
+    pub fn take_selector_group(&mut self) -> Result<OptionalGroup, KernelError<F128>> {
+        self.prepared_mut()?.selectors.take(SourceGroup::Selectors)
+    }
+
+    /// Requires preparation; builds the plan once and shares it until release.
+    /// Access after release fails instead of rebuilding cycle-sized storage.
+    pub fn plan(&mut self) -> Result<Arc<ScatterPlan<WitnessSource>>, KernelError<F128>> {
+        let prepared = self.prepared_mut()?;
+        match &prepared.plan {
+            SharedPlan::Held(plan) => return Ok(Arc::clone(plan)),
+            SharedPlan::Released => return Err(Self::geometry("scatter plan was released")),
+            SharedPlan::NotBuilt => {}
+        }
+        let plan = Arc::new(ScatterPlan::new(Arc::clone(&prepared.trace)).map_err(Self::geometry)?);
+        prepared.plan = SharedPlan::Held(Arc::clone(&plan));
+        Ok(plan)
+    }
+
+    /// Drops the session's held plan reference. Repeated release is harmless;
+    /// release before a plan was built is invalid geometry.
+    pub fn release_plan(&mut self) -> Result<(), KernelError<F128>> {
+        let prepared = self.prepared_mut()?;
+        if matches!(prepared.plan, SharedPlan::NotBuilt) {
+            return Err(Self::geometry("scatter plan has not been built"));
+        }
+        prepared.plan = SharedPlan::Released;
+        Ok(())
     }
 }

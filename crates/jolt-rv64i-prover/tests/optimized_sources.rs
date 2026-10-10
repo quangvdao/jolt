@@ -9,15 +9,16 @@ mod support;
 
 use common::constants::RAM_START_ADDRESS;
 use jolt_field::{Zero, F128};
+use jolt_kernels::{KernelError, ProofSession};
 use jolt_rv64i_arith::{BitsRow, Layout, WitnessRow, WITNESS_COLUMNS};
 use jolt_rv64i_kernels::{
     reduction::g_pass_digits,
-    source::{CycleSource, ValidatedTrace},
+    source::{CycleSource, PresentGroup},
 };
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
     error::Rv64iProverError,
-    optimized::source::{WitnessColumns, WitnessSource},
+    optimized::source::{GroupState, SharedSource, SourceGroup, WitnessColumns, WitnessSource},
     plane::{DecodedCycle, DigitFields, Rv64iWitness},
     prover::{prove, ProverPreprocessing},
 };
@@ -279,7 +280,36 @@ fn check_source(witness: &Rv64iWitness) {
     for weight in &mut weights[..layout.used_columns()] {
         *weight = F128::from_raw(rng.gen());
     }
-    let trace = ValidatedTrace::new(Arc::clone(&source)).unwrap();
+    let mut shared = SharedSource::default();
+    let selector_columns = selector_columns(columns);
+    let trace = shared
+        .prepare(witness, Some(selector_columns.clone()))
+        .unwrap();
+    let bytecode = shared.take_bytecode_group().unwrap();
+    let ram = shared.take_ram_group().unwrap();
+    check_present_group(&bytecode, &source, columns.bytecode_chunks());
+    check_present_group(&ram, &source, columns.ram_chunks());
+    let selectors = shared.take_selector_group().unwrap();
+    assert_eq!(selectors.columns(), selector_columns);
+    assert_eq!(selectors.cycles(), source.cycles());
+    assert_eq!(
+        selectors.bytes().len(),
+        source.cycles() * selector_columns.len()
+    );
+    for (cycle, bytes) in selectors
+        .bytes()
+        .chunks_exact(selector_columns.len())
+        .enumerate()
+    {
+        for (&column, &found) in selector_columns.iter().zip(bytes) {
+            let expected = source.digit(column, cycle).map_or(0, |digit| digit + 1);
+            assert_eq!(
+                usize::from(found),
+                expected,
+                "cycle {cycle}, column {column}"
+            );
+        }
+    }
     let tables =
         g_pass_digits(&trace, columns.column_map(), std::slice::from_ref(&weights)).unwrap();
     for (cycle, committed) in witness.bits.iter().enumerate() {
@@ -289,6 +319,34 @@ fn check_source(witness: &Rv64iWitness) {
             .filter(|(column, _)| bit(committed, *column))
             .fold(F128::zero(), |sum, (_, weight)| sum + *weight);
         assert_eq!(tables[0][cycle], expected);
+    }
+}
+
+fn selector_columns(columns: &WitnessColumns) -> Vec<usize> {
+    vec![
+        columns.variant(),
+        columns.pos(0).unwrap(),
+        columns.pos(1).unwrap(),
+        columns.shift_kind(),
+        columns.access_kind(),
+        columns.key_kind(),
+        columns.branch(),
+        columns.should_branch(),
+    ]
+}
+
+fn check_present_group(group: &PresentGroup, source: &WitnessSource, columns: &[usize]) {
+    assert_eq!(group.columns(), columns);
+    assert_eq!(group.cycles(), source.cycles());
+    assert_eq!(group.bytes().len(), source.cycles() * columns.len());
+    for (cycle, bytes) in group.bytes().chunks_exact(columns.len()).enumerate() {
+        for (&column, &found) in columns.iter().zip(bytes) {
+            assert_eq!(
+                usize::from(found),
+                source.digit(column, cycle).unwrap(),
+                "cycle {cycle}, column {column}"
+            );
+        }
     }
 }
 
@@ -306,6 +364,142 @@ fn source_matches_committed_columns_words_and_weighted_sum() {
         .unwrap();
         check_source(&from_bits);
     }
+}
+
+#[test]
+fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
+    let (_, _, witness) = support::counting_loop();
+    let columns = WitnessColumns::new(&witness.layout);
+    let selectors = selector_columns(&columns);
+    let mut session = ProofSession::default();
+    let shared = session.state_or_insert_with(SharedSource::default);
+    for group in [
+        SourceGroup::BytecodeChunks,
+        SourceGroup::RamChunks,
+        SourceGroup::Selectors,
+    ] {
+        assert_eq!(shared.group_state(group), GroupState::NotRequested);
+    }
+    assert!(matches!(
+        shared.take_bytecode_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_ram_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_selector_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.plan(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    let trace = shared.prepare(&witness, Some(selectors.clone())).unwrap();
+    let warm = shared.prepare(&witness, None).unwrap();
+    let router_warm = shared.prepare(&witness, Some(selectors.clone())).unwrap();
+    assert!(Arc::ptr_eq(&trace, &warm));
+    assert!(Arc::ptr_eq(&trace, &router_warm));
+    for group in [
+        SourceGroup::BytecodeChunks,
+        SourceGroup::RamChunks,
+        SourceGroup::Selectors,
+    ] {
+        assert_eq!(shared.group_state(group), GroupState::Held);
+    }
+    let _bytecode = shared.take_bytecode_group().unwrap();
+    let _ram = shared.take_ram_group().unwrap();
+    let _selectors = shared.take_selector_group().unwrap();
+    for group in [
+        SourceGroup::BytecodeChunks,
+        SourceGroup::RamChunks,
+        SourceGroup::Selectors,
+    ] {
+        assert_eq!(shared.group_state(group), GroupState::Taken);
+    }
+    assert!(matches!(
+        shared.take_bytecode_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_ram_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.take_selector_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        shared.release_plan(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    let plan = shared.plan().unwrap();
+    let plan_again = shared.plan().unwrap();
+    assert!(Arc::ptr_eq(&plan, &plan_again));
+    let weak_plan = Arc::downgrade(&plan);
+    shared.release_plan().unwrap();
+    shared.release_plan().unwrap();
+    assert!(matches!(
+        shared.plan(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(weak_plan.upgrade().is_some());
+    drop(plan);
+    drop(plan_again);
+    assert!(weak_plan.upgrade().is_none());
+    let after_take = shared.prepare(&witness, Some(selectors.clone())).unwrap();
+    assert!(Arc::ptr_eq(&trace, &after_take));
+    for group in [
+        SourceGroup::BytecodeChunks,
+        SourceGroup::RamChunks,
+        SourceGroup::Selectors,
+    ] {
+        assert_eq!(shared.group_state(group), GroupState::Taken);
+    }
+    let weak_trace = Arc::downgrade(&trace);
+    let weak_source = Arc::downgrade(trace.source());
+    drop(trace);
+    drop(warm);
+    drop(router_warm);
+    drop(after_take);
+    assert!(weak_trace.upgrade().is_some());
+    assert!(weak_source.upgrade().is_some());
+    drop(session);
+    assert!(weak_trace.upgrade().is_none());
+    assert!(weak_source.upgrade().is_none());
+
+    let mut tail_session = ProofSession::default();
+    let tail = tail_session.state_or_insert_with(SharedSource::default);
+    let trace = tail.prepare(&witness, None).unwrap();
+    assert_eq!(
+        tail.group_state(SourceGroup::BytecodeChunks),
+        GroupState::Held
+    );
+    assert_eq!(tail.group_state(SourceGroup::RamChunks), GroupState::Held);
+    assert_eq!(
+        tail.group_state(SourceGroup::Selectors),
+        GroupState::NotRequested
+    );
+    assert!(matches!(
+        tail.take_selector_group(),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    assert!(matches!(
+        tail.prepare(&witness, Some(selectors)),
+        Err(KernelError::InvalidGeometry { .. })
+    ));
+    let warm = tail.prepare(&witness, None).unwrap();
+    assert!(Arc::ptr_eq(&trace, &warm));
+    assert_eq!(
+        tail.group_state(SourceGroup::BytecodeChunks),
+        GroupState::Held
+    );
+    assert_eq!(tail.group_state(SourceGroup::RamChunks), GroupState::Held);
+    assert_eq!(
+        tail.group_state(SourceGroup::Selectors),
+        GroupState::NotRequested
+    );
 }
 
 #[test]

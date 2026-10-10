@@ -1,10 +1,52 @@
 //! Packed passes at log_t=20 and 22, five samples, on warmed one- and twelve-thread
-//! pools. Lift prices one whole word. Bucket prices one nibble update in the
+//! pools. `validate` prices `ValidatedTrace::new` on the all-rows synthetic trace,
+//! including temporary row-cache allocation and release, excluding trace generation.
+//! Five alternating one-/twelve-thread samples at both sizes:
+//! ```sh
+//! for sample in 1 2 3 4 5; do
+//!   RUSTFLAGS='-C target-cpu=native' CARGO_TARGET_DIR=/Users/quangdao/Documents/SNARKs/jolt-wt/k-outer-target cargo bench -p jolt-rv64i-kernels --features test-utils --bench machinery -- --units validate --log-t 20,22 --threads 1,12 --samples 1
+//! done
+//! ```
+//! Lift prices one whole word. Bucket prices one nibble update in the
 //! complete no-byte-selector fold layout. Scatter prices one cycle, excluding
 //! plan construction and weight/output allocation. The requirement row uses
 //! consecutive `all_rows` destinations; `scatter_permuted` uses a fixed seeded
 //! permutation of all bytecode rows, repeated over cycles, with no requirement. Merge prices each of the
 //! `(2W - 1) * layout_len` zero-fill and tree-merge element operations.
+
+//!
+//! Validation record, 2026-10-10: integration head `a398d5f0a` versus this
+//! validator, five alternating before/after executable pairs, each with the
+//! dimensions and pools above. The machine was loaded (load averages near
+//! 49/44/35 before comparison and 56/48/38 during it); these are wall-clock
+//! ns/cycle, median (minimum–maximum), not isolated instruction timings.
+//!
+//! | log_t | threads | before | after |
+//! |---|---|---|---|
+//! | 20 | 1 | 70.44 (46.56–135.24) | 87.58 (43.16–136.19) |
+//! | 20 | 12 | 52.48 (45.67–122.04) | 56.11 (6.16–97.88) |
+//! | 22 | 1 | 41.25 (32.90–89.26) | 65.58 (34.39–98.24) |
+//! | 22 | 12 | 44.56 (32.49–103.52) | 23.20 (3.32–30.67) |
+//!
+//! Preserve each native `machinery` executable as `machinery-validate-before`
+//! and `machinery-validate-after` in the target's release directory, then:
+//! ```sh
+//! validation_target=/Users/quangdao/Documents/SNARKs/jolt-wt/k-outer-target
+//! for sample in 1 2 3 4 5; do
+//!   for version in before after; do
+//!     "$validation_target/release/machinery-validate-$version" --units validate --log-t 20,22 --threads 1,12 --samples 1
+//!   done
+//! done
+//! ```
+//!
+//! On this synthetic trace, each cycle still reads one bytecode index and all
+//! 21 digits, including 11 cached row digits; each bytecode row still reads
+//! those 11 digits once. Preparation replaces 21 per-cycle bound shifts and
+//! cache-presence tests with column-class loops. Cache loads shrink from eight
+//! bytes to one per row-based column (88 to 11 bytes/cycle); widths of eight
+//! bits or more retain the wide cache. The measured temporary allocation peak
+//! falls from 92,275,360 to 11,654,312 bytes, with 168 bytes retained by the
+//! validated widths. Fixed row-chunk descriptors raise allocations from 13 to 278.
 
 pub mod support;
 
@@ -154,6 +196,10 @@ impl Inputs {
 }
 
 enum Machinery {
+    Validate {
+        source: Arc<SyntheticTrace>,
+        validated: Option<ValidatedTrace<SyntheticTrace>>,
+    },
     Lift {
         inputs: Arc<Inputs>,
         lift: Box<WordLift>,
@@ -193,6 +239,10 @@ impl Machinery {
             Ok(pool)
         };
         match name {
+            "validate" => Ok(Self::Validate {
+                source: Arc::clone(&inputs.trace.source().base),
+                validated: None,
+            }),
             "lift" => {
                 let mut rng = ChaCha20Rng::seed_from_u64(54);
                 let weights = std::array::from_fn(|_| {
@@ -273,6 +323,7 @@ impl MachineryKernel for Machinery {
     type Error = MachineryError;
     fn operations(&self) -> usize {
         match self {
+            Self::Validate { source, .. } => source.cycles(),
             Self::Lift { inputs, .. } => inputs.words.len(),
             Self::Bucket { operations, .. } => *operations,
             Self::Scatter { plan, .. } => plan.cycles(),
@@ -320,11 +371,17 @@ impl MachineryKernel for Machinery {
                 0,
                 rayon::current_num_threads() * layout_entries * std::mem::size_of::<F128>(),
             )),
+            Self::Validate { .. } => None,
             Self::Lift { .. } => Some((std::mem::size_of::<WordLift>(), 0)),
         }
     }
     fn run(&mut self) -> Result<F128, MachineryError> {
         match self {
+            Self::Validate { source, validated } => {
+                *validated = Some(ValidatedTrace::new(Arc::clone(black_box(source)))?);
+                let _ = black_box(&*validated);
+                Ok(F128::from_raw(0))
+            }
             Self::Lift { inputs, lift } => Ok(black_box(&inputs.words)
                 .par_chunks(CHUNK)
                 .map(|words| {
@@ -454,6 +511,7 @@ impl MachineryKernel for Machinery {
 fn main() -> Result<(), RunnerError> {
     run_machinery(
         &[
+            ("validate", None),
             ("lift", Some(4.8)),
             ("bucket", Some(0.9)),
             ("scatter", Some(2.1)),

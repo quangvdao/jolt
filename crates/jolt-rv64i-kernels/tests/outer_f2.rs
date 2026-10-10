@@ -189,7 +189,7 @@ impl Batch {
 }
 
 fn options() -> impl Iterator<Item = OuterF2Options> {
-    (3..=6).flat_map(|monomial_rounds| {
+    (2..=6).flat_map(|monomial_rounds| {
         [false, true].into_iter().flat_map(move |nibble_round_2| {
             [false, true]
                 .into_iter()

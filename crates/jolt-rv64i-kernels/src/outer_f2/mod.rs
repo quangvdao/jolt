@@ -45,8 +45,8 @@ pub enum OuterError {
     /// The point must have eight row coordinates and one per cycle variable.
     #[error("point length {actual} differs from {expected}")]
     PointLength { expected: usize, actual: usize },
-    /// Both schedules require the switch after three through six position rounds.
-    #[error("monomial round count {rounds} is outside 3..=6")]
+    /// Both schedules require the switch after two through six position rounds.
+    #[error("monomial round count {rounds} is outside 2..=6")]
     MonomialRounds { rounds: usize },
     /// A shared round helper rejected its geometry.
     #[error(transparent)]
@@ -62,7 +62,7 @@ pub enum OuterError {
 /// Table choices that preserve the defining polynomial and challenge order.
 #[derive(Clone, Copy, Debug)]
 pub struct OuterF2Options {
-    /// Number of position rounds in monomial form, in `3..=6` (default 3).
+    /// Number of position rounds in monomial form, in `2..=6` (default 3).
     pub monomial_rounds: usize,
     /// Use nibble rather than byte lifts in the second round (default false).
     pub nibble_round_2: bool,
@@ -129,7 +129,7 @@ impl<S: LaneSource> OuterF2Core<S> {
                 actual: tau.len(),
             });
         }
-        if !(3..=6).contains(&options.monomial_rounds) {
+        if !(2..=6).contains(&options.monomial_rounds) {
             return Err(OuterError::MonomialRounds {
                 rounds: options.monomial_rounds,
             });
@@ -219,16 +219,22 @@ impl<S: LaneSource> OuterF2Core<S> {
             }
             sums
         } else {
-            let form = Window::new(
-                &self.point,
-                &rho,
-                &self.omega,
-                self.options.folded_group_weights,
-            );
+            macro_rules! window {
+                ($n:literal, $a:literal, $c:literal, $units:literal) => {
+                    Window::<$n, $a, $c>::new(
+                        &self.point,
+                        &rho,
+                        &self.omega,
+                        self.options.folded_group_weights,
+                    )
+                    .pass::<$units, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi)
+                };
+            }
             match k {
-                3 => form.pass::<1, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi),
-                4 => form.pass::<2, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi),
-                _ => form.pass::<4, AT_ONE, S>(&*self.source, self.chunks, &self.lo, &self.hi),
+                2 => window!(16, 16, 8, 1),
+                3 => window!(256, 8, 4, 1),
+                4 => window!(256, 8, 4, 2),
+                _ => window!(256, 8, 4, 4),
             }
         };
         let tail = self.tail_position(k, AT_ONE);

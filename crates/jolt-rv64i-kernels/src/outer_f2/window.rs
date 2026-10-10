@@ -5,10 +5,8 @@ use crate::source::LaneSource;
 use jolt_field::{Accumulator, F128Accumulator, F128};
 use rayon::prelude::*;
 
-type ByteTable = [F128; 256];
-
-pub(super) fn byte_table(weights: &[F128]) -> ByteTable {
-    let mut table = [ZERO; 256];
+fn window_table<const N: usize>(weights: &[F128]) -> [F128; N] {
+    let mut table = [ZERO; N];
     for (bit, &weight) in weights.iter().enumerate() {
         let width = 1 << bit;
         let (lo, hi) = table[..2 * width].split_at_mut(width);
@@ -19,33 +17,38 @@ pub(super) fn byte_table(weights: &[F128]) -> ByteTable {
     table
 }
 
-pub(super) struct Window {
-    a: Vec<[ByteTable; 8]>,
-    c: Vec<[ByteTable; 4]>,
-    b: Vec<ByteTable>,
+pub(super) struct Window<const N: usize, const A: usize, const C: usize> {
+    a: Vec<[[F128; N]; A]>,
+    c: Vec<[[F128; N]; C]>,
+    b: Vec<[F128; N]>,
     omega: [F128; 2],
     folded: bool,
 }
 
-impl Window {
+impl<const N: usize, const A: usize, const C: usize> Window<N, A, C> {
     pub(super) fn new(point: &[F128], rho: &[F128], omega: &[F128], folded: bool) -> Self {
         let bits = eq_table(point, None);
-        let bytes = bits.len() / 8;
-        let b: Vec<_> = bits.chunks_exact(8).map(byte_table).collect();
+        let width = N.ilog2() as usize;
+        let bytes = bits.len() / width;
+        let b: Vec<_> = bits.chunks_exact(width).map(window_table).collect();
         let mut a = Vec::with_capacity(if folded { 2 } else { 1 });
         let mut c = Vec::with_capacity(a.capacity());
         for &scale in if folded { &omega[..2] } else { &[ONE] } {
             a.push(std::array::from_fn(|byte| {
                 let weight = rho[byte / (2 * bytes)] * scale;
-                byte_table(&std::array::from_fn::<_, 8, _>(|bit| {
-                    bits[(byte % bytes) * 8 + bit] * weight
-                }))
+                window_table(
+                    &std::array::from_fn::<_, 8, _>(|bit| {
+                        bits[(byte % bytes) * width + bit % width] * weight
+                    })[..width],
+                )
             }));
             c.push(std::array::from_fn(|byte| {
                 let weight = rho[byte / bytes] * scale;
-                byte_table(&std::array::from_fn::<_, 8, _>(|bit| {
-                    bits[(byte % bytes) * 8 + bit] * weight
-                }))
+                window_table(
+                    &std::array::from_fn::<_, 8, _>(|bit| {
+                        bits[(byte % bytes) * width + bit % width] * weight
+                    })[..width],
+                )
             }));
         }
         Self {
@@ -64,21 +67,23 @@ impl Window {
         lanes: [u64; 3],
         sums: &mut [F128Accumulator; 2],
     ) {
-        let [a, b, c] = lanes.map(u64::to_le_bytes);
+        let [a, b, c] = lanes;
+        let width = N.ilog2() as usize;
+        let index = |word: u64, unit: usize| ((word >> (width * unit)) & (N as u64 - 1)) as usize;
         let table_group = if self.folded { group } else { 0 };
-        for pair in 0..4 / BYTES {
+        for pair in 0..C / BYTES {
             let mut av = [ZERO; 2];
             let mut bv = [ZERO; 2];
             let mut cv = ZERO;
             for byte in 0..BYTES {
                 let even = pair * 2 * BYTES + byte;
                 let odd = even + BYTES;
-                av[0] += self.a[table_group][even][usize::from(a[even])];
-                av[1] += self.a[table_group][odd][usize::from(a[odd])];
-                bv[0] += self.b[byte][usize::from(b[even])];
-                bv[1] += self.b[byte][usize::from(b[odd])];
+                av[0] += self.a[table_group][even][index(a, even)];
+                av[1] += self.a[table_group][odd][index(a, odd)];
+                bv[0] += self.b[byte][index(b, even)];
+                bv[1] += self.b[byte][index(b, odd)];
                 cv += self.c[table_group][pair * BYTES + byte]
-                    [usize::from(c[if AT_ONE { odd } else { even }])];
+                    [index(c, if AT_ONE { odd } else { even })];
             }
             let endpoint = usize::from(AT_ONE);
             sums[0].fmadd(av[endpoint], bv[endpoint]);

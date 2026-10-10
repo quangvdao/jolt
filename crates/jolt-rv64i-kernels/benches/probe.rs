@@ -1,5 +1,13 @@
 //! Unit costs on seeded packed traces, before the packed passes are available.
 //!
+//! Canonical lookup ids narrow the outer/lift cases to suboperations:
+//! outer_materialise covers 48 of outer's 253 L per cycle; word_lift_bytes
+//! covers 48 of source_lift's 59 L, excluding digit and combined-row tables.
+//! Canonical g_digits has sixteen distinct byte banks and twenty-one compact
+//! banks (70,048 bytes, rounded to 69 KiB), fixed assignments with no aliasing.
+//! Every lookup prints allocated_bytes and addressable_entries, a conservative
+//! union bound from the synthetic value domains and both schedules, not a hit
+//! count. Artificial footprints have pressure in their ids.
 //! `lookup` issues 48 byte reads for the outer lanes, 48 for six word lifts,
 //! 37 for the digit builder, and 49 for the byte builder. Ordinary layouts have
 //! disjoint 256-entry banks and, at 5/69 KiB, a final 64-entry bank. That smaller
@@ -160,6 +168,7 @@ struct Lookup {
     table: Vec<F128>,
     pattern: LookupPattern,
     accesses: [[Access; 49]; 2],
+    addressable_entries: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -171,14 +180,206 @@ struct Access {
 
 impl Lookup {
     fn new(source: Arc<SyntheticTrace>, pattern: LookupPattern, kib: usize) -> Self {
-        let entries = kib * 1024 / size_of::<F128>();
-        let accesses = Self::accesses(pattern, entries);
+        let canonical_digits = matches!(pattern, LookupPattern::Digits) && kib == 69;
+        let entries = if canonical_digits {
+            4378
+        } else {
+            kib * 1024 / size_of::<F128>()
+        };
+        let accesses = if canonical_digits {
+            Self::digit_accesses()
+        } else {
+            Self::accesses(pattern, entries)
+        };
+        let addressable_entries = Self::domain_bound(&source, pattern, &accesses, entries);
         Self {
             source,
             table: field_values(entries),
             pattern,
             accesses,
+            addressable_entries,
         }
+    }
+
+    fn digit_accesses() -> [[Access; 49]; 2] {
+        let mut access = [Access::default(); 49];
+        let mut base = 0;
+        for entry in &mut access[..16] {
+            *entry = Access {
+                base,
+                mask: 255,
+                shift: 0,
+            };
+            base += 256;
+        }
+        for (group, columns) in [&DIGITS_FIRST[..], &DIGITS_SECOND[..]]
+            .into_iter()
+            .enumerate()
+        {
+            for (index, &column) in columns.iter().enumerate() {
+                let width = if column == 18 {
+                    if group == 0 {
+                        2
+                    } else {
+                        8
+                    }
+                } else if column < 10 {
+                    16
+                } else {
+                    8
+                };
+                let stream = 16
+                    + if group == 0 {
+                        index
+                    } else {
+                        DIGITS_FIRST.len() + index
+                    };
+                access[stream] = Access {
+                    base,
+                    mask: width - 1,
+                    shift: 0,
+                };
+                base += width;
+            }
+        }
+        [access; 2]
+    }
+
+    fn domain_bound(
+        source: &SyntheticTrace,
+        pattern: LookupPattern,
+        accesses: &[[Access; 49]; 2],
+        entries: usize,
+    ) -> usize {
+        let visited = match source.profile() {
+            SynthProfile::Local => source.bytecode_rows() / 16,
+            SynthProfile::AllRows | SynthProfile::UniformDigits => source.bytecode_rows(),
+        }
+        .max(1)
+        .min(CycleSource::cycles(source));
+        let mut bytecode_digits = [[false; 16]; 5];
+        let mut pc_bytes = [[false; 256]; 8];
+        let first = source.bytecode_index(0);
+        for index in 0..visited {
+            let row = (first + index) & (source.bytecode_rows() - 1);
+            for (column, values) in bytecode_digits.iter_mut().enumerate() {
+                values[(row >> (column * 4)) & 15] = true;
+            }
+            for (byte, value) in ((row as u64) * 4).to_le_bytes().into_iter().enumerate() {
+                pc_bytes[byte][usize::from(value)] = true;
+            }
+        }
+        // NextPC can read the row just beyond a shorter CLI stream.
+        let next = (first + visited) & (source.bytecode_rows() - 1);
+        for (byte, value) in ((next as u64) * 4).to_le_bytes().into_iter().enumerate() {
+            pc_bytes[byte][usize::from(value)] = true;
+        }
+        let digits: [Vec<usize>; 12] = std::array::from_fn(|column| {
+            if column < 5 {
+                bytecode_digits[column]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(v, &possible)| possible.then_some(v))
+                    .collect()
+            } else if column == 8 || column == 9 {
+                vec![0]
+            } else {
+                (0..if column < 10 { 16 } else { 8 }).collect()
+            }
+        });
+        let domains: Vec<Vec<usize>> = match pattern {
+            LookupPattern::Outer => (0..48).map(|_| (0..256).collect()).collect(),
+            LookupPattern::Lift => (0..48)
+                .map(|stream| {
+                    if stream / 8 == 4 {
+                        pc_bytes[stream % 8]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(v, &possible)| possible.then_some(v))
+                            .collect()
+                    } else {
+                        (0..256).collect()
+                    }
+                })
+                .collect(),
+            LookupPattern::Digits => {
+                let mut domains: Vec<Vec<usize>> = (0..16).map(|_| (0..256).collect()).collect();
+                for (group, columns) in [&DIGITS_FIRST[..], &DIGITS_SECOND[..]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    for &column in columns {
+                        domains.push(if column == 18 {
+                            (0..if group == 0 { 2 } else { 8 }).collect()
+                        } else {
+                            digits[column].clone()
+                        });
+                    }
+                }
+                domains
+            }
+            LookupPattern::Bytes => {
+                let mut bytes: [Vec<usize>; 32] = std::array::from_fn(|byte| {
+                    if byte < 8 {
+                        (0..256).collect()
+                    } else {
+                        vec![0]
+                    }
+                });
+                for (column, values) in digits.iter().enumerate() {
+                    let start = if column < 10 {
+                        64 + 15 * column
+                    } else {
+                        214 + 7 * (column - 10)
+                    };
+                    for (byte, domain) in bytes.iter_mut().enumerate().skip(8) {
+                        let choices: Vec<_> = values
+                            .iter()
+                            .map(|&value| {
+                                if value != 0 && (start + value - 1) / 8 == byte {
+                                    1 << ((start + value - 1) % 8)
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        let mut possible = [false; 256];
+                        for &old in domain.iter() {
+                            for &choice in &choices {
+                                possible[old | choice] = true;
+                            }
+                        }
+                        *domain = possible
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(v, &possible)| possible.then_some(v))
+                            .collect();
+                    }
+                }
+                for bit in 228..231 {
+                    let byte = bit / 8;
+                    let old = bytes[byte].clone();
+                    bytes[byte].extend(old.iter().map(|v| v | (1 << (bit % 8))));
+                }
+                let mut domains = Vec::new();
+                for byte in 0..29 {
+                    for _ in 0..BYTE_USES[byte] {
+                        domains.push(bytes[byte].clone());
+                    }
+                }
+                domains
+            }
+        };
+        let mut reachable = vec![false; entries];
+        for layout in accesses {
+            for (stream, domain) in domains.iter().enumerate() {
+                let access = layout[stream];
+                for &value in domain {
+                    reachable[access.base + ((value & access.mask) << access.shift)] = true;
+                }
+            }
+        }
+        reachable.iter().filter(|&&reachable| reachable).count()
     }
 
     fn accesses(pattern: LookupPattern, entries: usize) -> [[Access; 49]; 2] {
@@ -311,15 +512,24 @@ impl Lookup {
                                     stream += 1;
                                 }
                             }
-                            for columns in [&DIGITS_FIRST[..], &DIGITS_SECOND[..]] {
+                            for (group, columns) in [&DIGITS_FIRST[..], &DIGITS_SECOND[..]]
+                                .into_iter()
+                                .enumerate()
+                            {
                                 for &column in columns {
-                                    let digit = source.digit(column, cycle).map_or(0, |value| {
-                                        if column == 18 {
-                                            1
+                                    let digit = if column == 18 {
+                                        if group == 0 {
+                                            usize::from(source.digit(18, cycle).is_some())
                                         } else {
-                                            value
+                                            (18..21).enumerate().fold(0, |bits, (bit, column)| {
+                                                bits | (usize::from(
+                                                    source.digit(column, cycle).is_some(),
+                                                ) << bit)
+                                            })
                                         }
-                                    });
+                                    } else {
+                                        source.digit(column, cycle).unwrap_or(0)
+                                    };
                                     sum += self.entry(accesses, stream, digit);
                                     stream += 1;
                                 }
@@ -1059,15 +1269,19 @@ impl Unit {
         };
         match case.unit {
             "lookup" => {
-                let (pattern, size) = case.variant.rsplit_once('_').ok_or_else(invalid)?;
+                let variant = case
+                    .variant
+                    .strip_prefix("pressure_")
+                    .unwrap_or(&case.variant);
+                let (pattern, size) = variant.rsplit_once('_').ok_or_else(invalid)?;
                 let kib = size
                     .strip_suffix("kib")
                     .and_then(|size| size.parse::<usize>().ok())
                     .filter(|size| [5, 32, 64, 69, 96, 196].contains(size))
                     .ok_or_else(invalid)?;
                 let pattern = match pattern {
-                    "outer" => LookupPattern::Outer,
-                    "source_lift" => LookupPattern::Lift,
+                    "outer_materialise" => LookupPattern::Outer,
+                    "word_lift_bytes" => LookupPattern::Lift,
                     "g_digits" => LookupPattern::Digits,
                     "g_bytes" => LookupPattern::Bytes,
                     _ => return Err(invalid()),
@@ -1201,6 +1415,16 @@ impl ProbeKernel for Unit {
         }
     }
 
+    fn lookup_layout(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Lookup(unit) => Some((
+                unit.table.len() * size_of::<F128>(),
+                unit.addressable_entries,
+            )),
+            _ => None,
+        }
+    }
+
     fn chain_terms(&self) -> Option<usize> {
         match self {
             Self::Fmadd(unit) => Some(unit.terms),
@@ -1224,10 +1448,23 @@ fn field_values(entries: usize) -> Vec<F128> {
 fn main() -> Result<(), RunnerError> {
     let mut cases = Vec::new();
     for kib in [5, 32, 64, 69, 96, 196] {
-        for pattern in ["outer", "source_lift", "g_digits", "g_bytes"] {
+        for pattern in [
+            "outer_materialise",
+            "word_lift_bytes",
+            "g_digits",
+            "g_bytes",
+        ] {
             cases.push(ProbeCase {
                 unit: "lookup",
-                variant: format!("{pattern}_{kib}kib"),
+                variant: if (kib == 32
+                    && ["outer_materialise", "word_lift_bytes"].contains(&pattern))
+                    || (kib == 69 && pattern == "g_digits")
+                    || (kib == 196 && pattern == "g_bytes")
+                {
+                    format!("{pattern}_{kib}kib")
+                } else {
+                    format!("pressure_{pattern}_{kib}kib")
+                },
                 profiles: BOTH,
             });
         }

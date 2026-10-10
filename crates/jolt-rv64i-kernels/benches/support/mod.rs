@@ -333,6 +333,9 @@ pub trait ProbeKernel: Send {
     fn chain_terms(&self) -> Option<usize> {
         None
     }
+    fn lookup_layout(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
 
 /// Affine fit of fused-chain medians, with the zero-length control kept separate.
@@ -424,8 +427,9 @@ where
                     let mut samples = Vec::with_capacity(options.samples);
                     let mut operations = [0; 2];
                     let mut chain_terms = None;
+                    let mut lookup_layout = None;
                     for _ in 0..options.samples {
-                        let (sample, (counts, terms)) = pool.install(|| {
+                        let (sample, (counts, terms, layout)) = pool.install(|| {
                             let measurement = AllocationMeasurement::begin();
                             let start = Instant::now();
                             let mut kernel = construct(case, Arc::clone(&source), *threads)
@@ -435,6 +439,7 @@ where
                             let construct_ns = start.elapsed().as_nanos() as f64;
                             let counts = kernel.operations();
                             let terms = kernel.chain_terms();
+                            let layout = kernel.lookup_layout();
                             if counts[0] == 0 {
                                 return Err(RunnerError::WorkCount {
                                     variant: case.variant.clone(),
@@ -456,12 +461,13 @@ where
                                     times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
                                     allocation,
                                 },
-                                (counts, terms),
+                                (counts, terms, layout),
                             ))
                         })?;
                         samples.push(sample);
                         operations = counts;
                         chain_terms = terms;
+                        lookup_layout = layout;
                     }
                     let primary = Sample::phase(&samples, 1, operations[0] as f64);
                     if let Some(terms) = chain_terms {
@@ -481,6 +487,9 @@ where
                         final_bytes,
                         allocs
                     );
+                    if let Some((bytes, entries)) = lookup_layout {
+                        print!(" allocated_bytes={bytes} addressable_entries={entries}");
+                    }
                     if operations[1] != 0 {
                         let auxiliary = Sample::phase(&samples, 2, operations[1] as f64);
                         print!(

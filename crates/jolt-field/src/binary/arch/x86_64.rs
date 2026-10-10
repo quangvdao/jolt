@@ -1,11 +1,7 @@
 use std::arch::x86_64::{
     __m128i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128, _mm_shuffle_epi32,
-    _mm_sll_epi64, _mm_slli_epi64, _mm_slli_si128, _mm_srl_epi64, _mm_srli_epi64, _mm_srli_si128,
-    _mm_xor_si128,
+    _mm_slli_epi64, _mm_slli_si128, _mm_srli_epi64, _mm_srli_si128, _mm_xor_si128,
 };
-use std::ops::{Shl, Shr};
-#[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
-use wide::Wide;
 
 #[derive(Clone, Copy)]
 pub(super) struct Word(__m128i);
@@ -18,40 +14,17 @@ pub(super) const SHIFT_SQUARE128: bool = true;
 impl Word {
     #[inline]
     pub(super) fn products<const N: usize>(a: [Self; N], b: [Self; N]) -> [Self; N] {
-        const { assert!(N == 2 || N == 3) };
-        #[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
-        {
-            let product = Wide::pack(a).mul(Wide::pack(b));
-            let words = [
-                product.lane::<0>(),
-                product.lane::<1>(),
-                product.lane::<2>(),
-            ];
-            std::array::from_fn(|i| words[i])
-        }
-        #[cfg(not(all(target_feature = "vpclmulqdq", target_feature = "avx512f")))]
         std::array::from_fn(|i| a[i].mul_ll(b[i]))
     }
 
     #[inline]
     pub(super) fn reduce3(products: [Self; 3]) -> [u64; 3] {
-        #[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
-        {
-            let product = Wide::pack(products);
-            let reduced = product ^ super::portable::fold64(product.highs());
-            [
-                reduced.lane::<0>().low(),
-                reduced.lane::<1>().low(),
-                reduced.lane::<2>().low(),
-            ]
-        }
-        #[cfg(not(all(target_feature = "vpclmulqdq", target_feature = "avx512f")))]
         products.map(Self::reduce64)
     }
 
     #[inline]
     pub(super) fn reduce64(self) -> u64 {
-        self.low() ^ super::portable::fold64(self.high_to_low()).low()
+        super::portable::reduce64(self.to_u128())
     }
 
     #[inline]
@@ -164,115 +137,5 @@ impl Word {
     pub(super) fn low_to_high(self) -> Self {
         // SAFETY: SSE2 is baseline on x86_64.
         unsafe { Self(_mm_slli_si128::<8>(self.0)) }
-    }
-}
-
-impl Shl<u32> for Word {
-    type Output = Self;
-
-    #[inline]
-    fn shl(self, shift: u32) -> Self {
-        // SAFETY: SSE2 is baseline on x86_64; shifts act independently on each lane.
-        unsafe { Self(_mm_sll_epi64(self.0, _mm_cvtsi64_si128(i64::from(shift)))) }
-    }
-}
-
-impl Shr<u32> for Word {
-    type Output = Self;
-
-    #[inline]
-    fn shr(self, shift: u32) -> Self {
-        // SAFETY: SSE2 is baseline on x86_64; shifts act independently on each lane.
-        unsafe { Self(_mm_srl_epi64(self.0, _mm_cvtsi64_si128(i64::from(shift)))) }
-    }
-}
-
-#[cfg(all(target_feature = "vpclmulqdq", target_feature = "avx512f"))]
-mod wide {
-    use super::Word;
-    use std::arch::x86_64::{
-        __m512i, _mm512_castsi128_si512, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32,
-        _mm512_inserti32x4, _mm512_shuffle_epi32, _mm512_sll_epi64, _mm512_srl_epi64,
-        _mm512_xor_si512, _mm_cvtsi64_si128,
-    };
-    use std::ops::{BitXor, Shl, Shr};
-
-    #[derive(Clone, Copy)]
-    pub(super) struct Wide(__m512i);
-
-    impl Wide {
-        #[inline]
-        pub(super) fn pack<const N: usize>(words: [Word; N]) -> Self {
-            const { assert!(N == 2 || N == 3) };
-            // SAFETY: the module cfg guarantees AVX-512. N is checked at
-            // compile time; callers read only the N initialized lanes.
-            unsafe {
-                let mut packed = _mm512_castsi128_si512(words[0].0);
-                packed = _mm512_inserti32x4::<1>(packed, words[1].0);
-                if N == 3 {
-                    packed = _mm512_inserti32x4::<2>(packed, words[2].0);
-                }
-                Self(packed)
-            }
-        }
-
-        #[inline]
-        pub(super) fn lane<const N: i32>(self) -> Word {
-            // SAFETY: the module cfg guarantees AVX-512; the intrinsic checks N.
-            unsafe { Word(_mm512_extracti32x4_epi32::<N>(self.0)) }
-        }
-
-        #[inline]
-        pub(super) fn mul(self, rhs: Self) -> Self {
-            // SAFETY: the module cfg guarantees AVX-512 and VPCLMULQDQ.
-            unsafe { Self(_mm512_clmulepi64_epi128::<0>(self.0, rhs.0)) }
-        }
-
-        #[inline]
-        pub(super) fn highs(self) -> Self {
-            // SAFETY: the module cfg guarantees AVX-512; 0xee duplicates each
-            // 128-bit lane's high 64 bits into both of its halves.
-            unsafe { Self(_mm512_shuffle_epi32::<0xee>(self.0)) }
-        }
-    }
-
-    impl BitXor for Wide {
-        type Output = Self;
-
-        #[inline]
-        fn bitxor(self, rhs: Self) -> Self {
-            // SAFETY: the module cfg guarantees AVX-512.
-            unsafe { Self(_mm512_xor_si512(self.0, rhs.0)) }
-        }
-    }
-
-    impl Shl<u32> for Wide {
-        type Output = Self;
-
-        #[inline]
-        fn shl(self, shift: u32) -> Self {
-            // SAFETY: the module cfg guarantees AVX-512; each 64-bit lane shifts independently.
-            unsafe {
-                Self(_mm512_sll_epi64(
-                    self.0,
-                    _mm_cvtsi64_si128(i64::from(shift)),
-                ))
-            }
-        }
-    }
-
-    impl Shr<u32> for Wide {
-        type Output = Self;
-
-        #[inline]
-        fn shr(self, shift: u32) -> Self {
-            // SAFETY: the module cfg guarantees AVX-512; each 64-bit lane shifts independently.
-            unsafe {
-                Self(_mm512_srl_epi64(
-                    self.0,
-                    _mm_cvtsi64_si128(i64::from(shift)),
-                ))
-            }
-        }
     }
 }

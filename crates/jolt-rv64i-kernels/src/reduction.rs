@@ -131,67 +131,78 @@ impl Sums {
     }
 }
 
-enum GroupEntry {
-    Eight(Box<[F128; 8]>),
-    Sixteen(Box<[F128; 16]>),
-    Byte(Box<[F128; 256]>),
-    Other(Vec<F128>),
-}
-impl GroupEntry {
-    fn new(table: Vec<F128>) -> Self {
-        match table.len() {
-            8 => {
-                let mut entries = Box::new([F128::from_raw(0); 8]);
-                entries.copy_from_slice(&table);
-                Self::Eight(entries)
-            }
-            16 => {
-                let mut entries = Box::new([F128::from_raw(0); 16]);
-                entries.copy_from_slice(&table);
-                Self::Sixteen(entries)
-            }
-            256 => {
-                let mut entries = Box::new([F128::from_raw(0); 256]);
-                entries.copy_from_slice(&table);
-                Self::Byte(entries)
-            }
-            _ => Self::Other(table),
-        }
-    }
-    #[inline(always)]
-    fn value(&self, index: usize) -> F128 {
-        match self {
-            Self::Eight(table) => table[index & 7],
-            Self::Sixteen(table) => table[index & 15],
-            Self::Byte(table) => table[index & 255],
-            Self::Other(table) => table[index],
-        }
-    }
-}
-struct GroupTables {
-    entries: [Option<GroupEntry>; 4],
+enum GroupTables {
+    Eight([Option<Box<[F128; 8]>>; 4]),
+    Sixteen([Option<Box<[F128; 16]>>; 4]),
+    Byte([Option<Box<[F128; 256]>>; 4]),
+    Other([Option<Vec<F128>>; 4]),
 }
 impl GroupTables {
     fn new(tables: Vec<(usize, Vec<F128>)>) -> Self {
+        match tables.first().map(|(_, table)| table.len()) {
+            Some(8) => Self::Eight(Self::fixed_tables(tables)),
+            Some(16) => Self::Sixteen(Self::fixed_tables(tables)),
+            Some(256) => Self::Byte(Self::fixed_tables(tables)),
+            _ => {
+                let mut entries = std::array::from_fn(|_| None);
+                for (weight, table) in tables {
+                    entries[weight] = Some(table);
+                }
+                Self::Other(entries)
+            }
+        }
+    }
+    fn fixed_tables<const N: usize>(
+        tables: Vec<(usize, Vec<F128>)>,
+    ) -> [Option<Box<[F128; N]>>; 4] {
         let mut entries = std::array::from_fn(|_| None);
         for (weight, table) in tables {
-            entries[weight] = Some(GroupEntry::new(table));
+            let mut values = Box::new([F128::from_raw(0); N]);
+            values.copy_from_slice(&table);
+            entries[weight] = Some(values);
         }
-        Self { entries }
+        entries
+    }
+    #[inline(always)]
+    fn add_fixed<const N: usize>(
+        entries: &[Option<Box<[F128; N]>>; 4],
+        index: usize,
+        sums: &mut Sums,
+    ) {
+        let index = index & (N - 1);
+        if let Some(table) = &entries[0] {
+            sums.a += table[index];
+        }
+        if let Some(table) = &entries[1] {
+            sums.b += table[index];
+        }
+        if let Some(table) = &entries[2] {
+            sums.c += table[index];
+        }
+        if let Some(table) = &entries[3] {
+            sums.d += table[index];
+        }
     }
     #[inline(always)]
     fn add(&self, index: usize, sums: &mut Sums) {
-        if let Some(table) = &self.entries[0] {
-            sums.a += table.value(index);
-        }
-        if let Some(table) = &self.entries[1] {
-            sums.b += table.value(index);
-        }
-        if let Some(table) = &self.entries[2] {
-            sums.c += table.value(index);
-        }
-        if let Some(table) = &self.entries[3] {
-            sums.d += table.value(index);
+        match self {
+            Self::Eight(entries) => Self::add_fixed(entries, index, sums),
+            Self::Sixteen(entries) => Self::add_fixed(entries, index, sums),
+            Self::Byte(entries) => Self::add_fixed(entries, index, sums),
+            Self::Other(entries) => {
+                if let Some(table) = &entries[0] {
+                    sums.a += table[index];
+                }
+                if let Some(table) = &entries[1] {
+                    sums.b += table[index];
+                }
+                if let Some(table) = &entries[2] {
+                    sums.c += table[index];
+                }
+                if let Some(table) = &entries[3] {
+                    sums.d += table[index];
+                }
+            }
         }
     }
 }

@@ -73,7 +73,16 @@ fn scratch_is_bounded_and_released_on_return() {
             .build_scoped(
                 |thread| thread.run(),
                 |pool| {
-                    let _ = pool.broadcast(|_| ());
+                    // Warm each worker's work-stealing bookkeeping, including
+                    // workers that the four-chunk fixture may otherwise leave idle.
+                    let _ = pool.broadcast(|_| {
+                        rayon::join(
+                            || {
+                                let _ = rayon::yield_now();
+                            },
+                            || (),
+                        )
+                    });
                     let trace = pool
                         .install(|| SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0xc011))
                         .unwrap();

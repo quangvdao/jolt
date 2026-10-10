@@ -11,14 +11,15 @@ use jolt_field::JoltField;
 use jolt_rv64i_arith::Layout;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
+use std::sync::Arc;
 
 /// Read checking over low-variable-first RAM addresses followed by cycles, at the shared batch-3a bit point.
 /// The read claims and their bit-then-cycle points must come from batch 3b.
 #[derive(Clone)]
 pub struct RamReadChecking<F: JoltField> {
     symbolic: RamReadCheckingSymbolic,
-    r_bit: Vec<F>,
-    r_3: Vec<F>,
+    r_bit: Arc<Vec<F>>,
+    r_3: Arc<Vec<F>>,
     a: usize,
 }
 
@@ -26,6 +27,15 @@ impl<F: JoltField> RamReadChecking<F> {
     /// Establishes six bit coordinates and a nonempty cycle point bounded by `LOG_T_MAX`, returning `PointsError` on mismatch.
     /// The checked layout must admit at least five RAM address coordinates, which this constructor checks.
     pub fn new(layout: &Layout, r_bit: Vec<F>, r_3: Vec<F>) -> Result<Self, PointsError> {
+        Self::new_shared(layout, Arc::new(r_bit), Arc::new(r_3))
+    }
+
+    /// Enforces `new`'s point bounds while sharing coordinates with the other batch-4 members.
+    pub(crate) fn new_shared(
+        layout: &Layout,
+        r_bit: Arc<Vec<F>>,
+        r_3: Arc<Vec<F>>,
+    ) -> Result<Self, PointsError> {
         check_read_points(&r_bit, &r_3)?;
         let a = layout.log_K_ram();
         if a < 5 {
@@ -51,7 +61,7 @@ impl<F: JoltField> RamReadChecking<F> {
     }
     /// Consumed read points in six-bit-then-cycle order, low variable first in each part.
     pub fn input_points(&self) -> RamReadCheckingInputClaims<Vec<F>> {
-        let point: Vec<_> = self.r_bit.iter().chain(&self.r_3).copied().collect();
+        let point: Vec<_> = self.r_bit.iter().chain(self.r_3.iter()).copied().collect();
         RamReadCheckingInputClaims {
             ram_read_value: point,
         }
@@ -89,7 +99,7 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamReadChecking<F> {
             ram_ra: point.to_vec(),
             ram_val: address
                 .iter()
-                .chain(&self.r_bit)
+                .chain(self.r_bit.iter())
                 .chain(cycle)
                 .copied()
                 .collect(),

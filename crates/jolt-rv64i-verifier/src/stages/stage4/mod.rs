@@ -30,7 +30,7 @@ pub struct Stage4Sumchecks<F: JoltField> {
 
 impl<F: JoltField> Stage4Sumchecks<F> {
     /// Establishes six bit coordinates, bounded cycle coordinates, and at least five RAM addresses, all low variable first.
-    /// Rejects malformed points or I/O geometry and draws the output-check address challenge before member coefficients.
+    /// Shares point buffers across members, rejects malformed geometry, and draws the output-check address challenge before member coefficients.
     pub fn new<T: Transcript<Challenge = F>>(
         layout: &Layout,
         r_bit: Vec<F>,
@@ -38,10 +38,13 @@ impl<F: JoltField> Stage4Sumchecks<F> {
         io: impl Into<Arc<PublicIoMemory>>,
         transcript: &mut T,
     ) -> Result<Self, PointsError> {
-        let registers_read_checking = RegistersReadChecking::new(r_bit.clone(), r_3.clone())?;
-        let ram_read_checking = RamReadChecking::new(layout, r_bit.clone(), r_3)?;
+        let r_bit = Arc::new(r_bit);
+        let r_3 = Arc::new(r_3);
+        let registers_read_checking =
+            RegistersReadChecking::new_shared(Arc::clone(&r_bit), Arc::clone(&r_3))?;
+        let ram_read_checking = RamReadChecking::new_shared(layout, Arc::clone(&r_bit), r_3)?;
         let tau = transcript.challenge_vector(layout.log_K_ram());
-        let ram_output_check = RamOutputCheck::new(tau, r_bit, io)?;
+        let ram_output_check = RamOutputCheck::new_shared(tau, r_bit, io)?;
         Ok(Self {
             registers_read_checking,
             ram_read_checking,

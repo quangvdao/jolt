@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub struct RamOutputCheck<F: JoltField> {
     symbolic: RamOutputCheckSymbolic,
     tau: Vec<F>,
-    r_bit: Vec<F>,
+    r_bit: Arc<Vec<F>>,
     io: Arc<PublicIoMemory>,
 }
 impl<F: JoltField> RamOutputCheck<F> {
@@ -29,6 +29,15 @@ impl<F: JoltField> RamOutputCheck<F> {
     pub fn new(
         tau: Vec<F>,
         r_bit: Vec<F>,
+        io: impl Into<Arc<PublicIoMemory>>,
+    ) -> Result<Self, PointsError> {
+        Self::new_shared(tau, Arc::new(r_bit), io)
+    }
+
+    /// Enforces `new`'s point bounds while sharing coordinates with the other batch-4 members.
+    pub(crate) fn new_shared(
+        tau: Vec<F>,
+        r_bit: Arc<Vec<F>>,
         io: impl Into<Arc<PublicIoMemory>>,
     ) -> Result<Self, PointsError> {
         let io = io.into();
@@ -91,7 +100,7 @@ impl<F: JoltField> ConcreteSumcheck<F> for RamOutputCheck<F> {
             }));
         }
         Ok(RamOutputCheckOutputClaims {
-            ram_val_final: point.iter().chain(&self.r_bit).copied().collect(),
+            ram_val_final: point.iter().chain(self.r_bit.iter()).copied().collect(),
         })
     }
     #[expect(

@@ -1,0 +1,22 @@
+[package]
+name = "jolt-rv64i-trace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "RV64I execution traces to cycle facts"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+emulator = ["dep:tracer"]
+
+[dependencies]
+jolt-rv64i-arith.workspace = true
+jolt-program = { workspace = true, features = ["image"] }
+jolt-riscv.workspace = true
+common = { workspace = true, features = ["std"] }
+rayon.workspace = true
+thiserror.workspace = true
+tracer = { workspace = true, optional = true, features = ["std"] }

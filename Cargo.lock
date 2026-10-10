@@ -3798,6 +3798,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-rv64i-trace"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "jolt-program",
+ "jolt-riscv",
+ "jolt-rv64i-arith",
+ "rayon",
+ "thiserror 2.0.20",
+ "tracer",
+]
+
+[[package]]
 name = "jolt-rv64i-verifier"
 version = "0.1.0"
 dependencies = [

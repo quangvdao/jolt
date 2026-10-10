@@ -1,0 +1,637 @@
+#![cfg(feature = "test-utils")]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "acceptance fixtures and assertions fail by panicking"
+)]
+
+#[path = "../benches/support/allocator.rs"]
+mod allocator;
+
+use allocator::{AllocationMeasurement, CountingAllocator, RAYON_WORKER_ALLOWANCE};
+use jolt_field::{Field, F128};
+use jolt_poly::UnivariatePoly;
+use jolt_rv64i_kernels::chunk_product::{
+    combined_weight, ChunkProductCore, ChunkWeight, ChunkWeightTerm,
+};
+use jolt_rv64i_kernels::column_pass::column_pass;
+use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
+use jolt_rv64i_kernels::par::CycleChunks;
+use jolt_rv64i_kernels::reduction::{g_pass_digits, ColumnMap, ReductionCore, ReductionLeg};
+use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, ValidatedTrace};
+use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
+use jolt_sumcheck::{
+    prove_batch, BatchMember, BatchPrelude, BooleanHypercube, ClearProof, ClearSumcheckRecorder,
+    ProveRounds, ProvedBatch, SequentialRounds, SumcheckClaim, SumcheckError, SumcheckProof,
+    SumcheckRecorder, SumcheckVerifier, SUMCHECK_ROUND_TRANSCRIPT_LABEL,
+};
+use jolt_transcript::{Blake2bTranscript, Transcript};
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use rayon::ThreadPoolBuilder;
+use std::mem::size_of;
+use std::sync::Arc;
+
+const ZERO: F128 = F128::from_raw(0);
+const ONE: F128 = F128::from_raw(1);
+const LABEL: &[u8] = b"rv64i-tail";
+const BATCH: [F128; 3] = [F128::from_raw(71), F128::from_raw(97), F128::from_raw(113)];
+
+fn eq(point: &[F128], vertex: usize) -> F128 {
+    point
+        .iter()
+        .enumerate()
+        .map(|(bit, &w)| ONE + w + F128::from_raw(((vertex >> bit) & 1) as u128))
+        .product()
+}
+
+fn point(length: usize, rng: &mut ChaCha20Rng) -> Vec<F128> {
+    (0..length).map(|_| F128::random(rng)).collect()
+}
+
+fn map() -> Vec<ColumnMap> {
+    let mut map = vec![ColumnMap::Word {
+        start: 0,
+        trace_word: 5,
+    }];
+    map.extend((0..10).map(|column| ColumnMap::Indicators {
+        start: 64 + 15 * column,
+        column,
+    }));
+    map.extend((10..12).map(|column| ColumnMap::Indicators {
+        start: 214 + 7 * (column - 10),
+        column,
+    }));
+    map.push(ColumnMap::Flags {
+        start: 228,
+        columns: vec![18, 19, 20],
+    });
+    map
+}
+
+struct Definition {
+    leaves: Vec<Vec<F128>>,
+    legs: Vec<ReductionLeg>,
+    rounds: usize,
+}
+
+impl Definition {
+    fn sum(&self, member: usize, values: &[F128]) -> F128 {
+        match member {
+            0 | 1 => values[6 * member..6 * member + 6].iter().copied().product(),
+            _ => self
+                .legs
+                .iter()
+                .enumerate()
+                .map(|(i, leg)| leg.coefficient * values[12 + leg.table] * values[15 + i])
+                .sum(),
+        }
+    }
+
+    fn claims(&self) -> [F128; 3] {
+        std::array::from_fn(|member| {
+            (0..1 << self.rounds)
+                .map(|j| {
+                    let values: Vec<_> = self.leaves.iter().map(|leaf| leaf[j]).collect();
+                    self.sum(member, &values)
+                })
+                .sum()
+        })
+    }
+
+    fn final_claims(&self, point: &[F128]) -> [F128; 3] {
+        let values: Vec<_> = self
+            .leaves
+            .iter()
+            .map(|leaf| mle_at(leaf, point).unwrap())
+            .collect();
+        std::array::from_fn(|member| self.sum(member, &values))
+    }
+}
+
+struct Fixture {
+    trace: Arc<ValidatedTrace<SyntheticTrace>>,
+    points: [Vec<Vec<F128>>; 2],
+    terms: [Vec<ChunkWeightTerm>; 2],
+    weights: Vec<Vec<F128>>,
+    definition: Definition,
+}
+
+impl Fixture {
+    fn new(log_t: usize) -> Self {
+        let source =
+            Arc::new(SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0x7a11).unwrap());
+        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_5eed);
+        let points =
+            std::array::from_fn(|_| (0..5).map(|_| point(4, &mut rng)).collect::<Vec<_>>());
+        let terms = std::array::from_fn(|member| {
+            (0..if member == 0 { 5 } else { 2 })
+                .map(|i| {
+                    let coefficient = F128::random(&mut rng);
+                    let point = if member == 0 && i == 0 {
+                        (0..log_t)
+                            .map(|bit| F128::from_raw((bit & 1) as u128))
+                            .collect()
+                    } else {
+                        point(log_t, &mut rng)
+                    };
+                    if member == 0 && i == 4 {
+                        ChunkWeightTerm::Next { coefficient, point }
+                    } else {
+                        ChunkWeightTerm::Eq { coefficient, point }
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let weights: Vec<Vec<_>> = (0..3)
+            .map(|support| {
+                (0..256)
+                    .map(|y| {
+                        let active = match support {
+                            0 => (64..=228).contains(&y),
+                            1 => y < 64 || (139..=230).contains(&y),
+                            _ => y < 64,
+                        };
+                        if active {
+                            F128::random(&mut rng)
+                        } else {
+                            ZERO
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut leaves: Vec<Vec<F128>> = Vec::new();
+        for member in 0..2 {
+            leaves.push(
+                (0..source.cycles())
+                    .map(|j| {
+                        terms[member]
+                            .iter()
+                            .map(|term| match term {
+                                ChunkWeightTerm::Eq { coefficient, point } => {
+                                    *coefficient * eq(point, j)
+                                }
+                                ChunkWeightTerm::Next { coefficient, point } => j
+                                    .checked_sub(1)
+                                    .map_or(ZERO, |j| *coefficient * eq(point, j)),
+                            })
+                            .sum()
+                    })
+                    .collect(),
+            );
+            for (c, a) in points[member].iter().enumerate() {
+                leaves.push(
+                    (0..source.cycles())
+                        .map(|j| eq(a, source.digit(5 * member + c, j).unwrap()))
+                        .collect(),
+                );
+            }
+        }
+        for weight in &weights {
+            leaves.push(
+                source
+                    .rows()
+                    .iter()
+                    .map(|row| {
+                        weight
+                            .iter()
+                            .enumerate()
+                            .filter(|(y, _)| row[y / 64] & (1 << (y % 64)) != 0)
+                            .map(|(_, &w)| w)
+                            .sum()
+                    })
+                    .collect(),
+            );
+        }
+        let legs: Vec<_> = (0..3)
+            .map(|table| {
+                let point = point(log_t, &mut rng);
+                let claim = leaves[12 + table]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &g)| eq(&point, j) * g)
+                    .sum();
+                ReductionLeg {
+                    table,
+                    point,
+                    coefficient: F128::random(&mut rng),
+                    claim,
+                }
+            })
+            .collect();
+        for leg in &legs {
+            leaves.push((0..source.cycles()).map(|j| eq(&leg.point, j)).collect());
+        }
+        Self {
+            trace,
+            points,
+            terms,
+            weights,
+            definition: Definition {
+                leaves,
+                legs,
+                rounds: log_t,
+            },
+        }
+    }
+
+    fn cores(&self) -> (ChunkProductCore, ChunkProductCore, ReductionCore) {
+        let tables = g_pass_digits(&self.trace, &map(), &self.weights).unwrap();
+        assert_eq!(tables, self.definition.leaves[12..15]);
+        let weights = self
+            .terms
+            .each_ref()
+            .map(|terms| combined_weight(self.definition.rounds, terms).unwrap());
+        assert_eq!(weights[0], self.definition.leaves[0]);
+        assert_eq!(weights[1], self.definition.leaves[6]);
+        let [first, second] = weights;
+        let chunk = |member: usize, weight| {
+            ChunkProductCore::new(
+                DigitColumns::from_validated(
+                    Arc::clone(&self.trace),
+                    (5 * member..5 * member + 5).collect(),
+                )
+                .unwrap(),
+                self.points[member].clone(),
+                ChunkWeight::Dense(weight),
+            )
+            .unwrap()
+        };
+        (
+            chunk(0, first),
+            chunk(1, second),
+            ReductionCore::new(tables, self.definition.legs.clone()).unwrap(),
+        )
+    }
+
+    fn prelude(&self) -> BatchPrelude<F128> {
+        BatchPrelude::try_new(
+            self.definition
+                .claims()
+                .into_iter()
+                .zip(BATCH)
+                .map(|(input_claim, coefficient)| BatchMember {
+                    input_claim,
+                    coefficient,
+                    rounds: self.definition.rounds,
+                    offset: 0,
+                })
+                .collect(),
+            self.definition.rounds,
+            6,
+        )
+        .unwrap()
+    }
+
+    fn assert_columns(
+        &self,
+        r: &[F128],
+        columns: &[F128; 256],
+        chunks: &[(F128, Vec<F128>); 2],
+        g: &[F128],
+        proved: &ProvedBatch<F128>,
+    ) {
+        for (member, (_, values)) in chunks.iter().enumerate() {
+            for (c, a) in self.points[member].iter().enumerate() {
+                let zero = eq(a, 0);
+                let start = 64 + 15 * (5 * member + c);
+                let expected = zero
+                    + (1..16)
+                        .map(|k| (eq(a, k) + zero) * columns[start + k - 1])
+                        .sum::<F128>();
+                assert_eq!(values[c], expected);
+            }
+            assert_eq!(
+                chunks[member].0,
+                mle_at(&self.definition.leaves[6 * member], r).unwrap()
+            );
+        }
+        for (table, weight) in self.weights.iter().enumerate() {
+            assert_eq!(
+                g[table],
+                weight
+                    .iter()
+                    .zip(columns)
+                    .map(|(&l, &c)| l * c)
+                    .sum::<F128>()
+            );
+        }
+        let expected = self.definition.final_claims(r);
+        assert_eq!(proved.member_claims, expected);
+        assert_eq!(
+            proved.final_claim,
+            expected
+                .into_iter()
+                .zip(BATCH)
+                .map(|(claim, coefficient)| claim * coefficient)
+                .sum::<F128>()
+        );
+    }
+}
+
+struct Recorded<C> {
+    inner: C,
+    messages: Vec<UnivariatePoly<F128>>,
+}
+impl<C: ProveRounds<F128>> ProveRounds<F128> for Recorded<C> {
+    fn num_rounds(&self) -> usize {
+        self.inner.num_rounds()
+    }
+    fn prove_round(
+        &mut self,
+        bind: Option<F128>,
+        round: usize,
+        claim: F128,
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        let message = self.inner.prove_round(bind, round, claim)?;
+        self.messages.push(message.clone());
+        Ok(message)
+    }
+    fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
+        self.inner.finish_rounds(bind)
+    }
+}
+
+struct OracleCore<'a> {
+    definition: &'a Definition,
+    member: usize,
+    bound: Vec<F128>,
+}
+impl ProveRounds<F128> for OracleCore<'_> {
+    fn num_rounds(&self) -> usize {
+        self.definition.rounds
+    }
+    fn prove_round(
+        &mut self,
+        bind: Option<F128>,
+        _: usize,
+        _: F128,
+    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
+        if let Some(r) = bind {
+            self.bound.push(r);
+        }
+        let leaves: Vec<_> = self.definition.leaves.iter().map(Vec::as_slice).collect();
+        Ok(round_polynomial(
+            &leaves,
+            &self.bound,
+            if self.member < 2 { 6 } else { 2 },
+            |v| self.definition.sum(self.member, v),
+        )
+        .unwrap())
+    }
+    fn finish_rounds(&mut self, r: F128) -> Result<(), SumcheckError<F128>> {
+        self.bound.push(r);
+        Ok(())
+    }
+}
+
+fn prove(
+    members: &mut [&mut dyn ProveRounds<F128>],
+    prelude: &BatchPrelude<F128>,
+) -> (ProvedBatch<F128>, SumcheckProof<F128, ()>) {
+    let mut transcript = Blake2bTranscript::new(LABEL);
+    let mut recorder = ClearSumcheckRecorder::new();
+    let proved = prove_batch(
+        prelude,
+        members,
+        &mut SequentialRounds,
+        &mut recorder,
+        &mut transcript,
+    )
+    .unwrap();
+    let proof = recorder
+        .finish(&proved.member_claims, &mut transcript)
+        .unwrap()
+        .proof;
+    (proved, proof)
+}
+
+fn verify(
+    prelude: &BatchPrelude<F128>,
+    proved: &ProvedBatch<F128>,
+    proof: &SumcheckProof<F128, ()>,
+) {
+    let SumcheckProof::Clear(ClearProof::Compressed(proof)) = proof else {
+        panic!("clear proof expected")
+    };
+    let mut transcript = Blake2bTranscript::new(LABEL);
+    let reduced = SumcheckVerifier::verify_compressed(
+        &SumcheckClaim::new(prelude.max_num_vars, 6, prelude.claimed_sum),
+        proof,
+        BooleanHypercube,
+        SUMCHECK_ROUND_TRANSCRIPT_LABEL,
+        &mut transcript,
+    )
+    .unwrap();
+    assert_eq!(reduced.point.as_slice(), proved.challenges);
+    assert_eq!(reduced.value, proved.final_claim);
+}
+
+fn acceptance(log_t: usize, threads: &[usize], dense_bits: bool) {
+    let fixture = Fixture::new(log_t);
+    let prelude = fixture.prelude();
+    let mut oracle: Vec<_> = (0..3)
+        .map(|member| Recorded {
+            inner: OracleCore {
+                definition: &fixture.definition,
+                member,
+                bound: Vec::new(),
+            },
+            messages: Vec::new(),
+        })
+        .collect();
+    let mut members: Vec<&mut dyn ProveRounds<F128>> = oracle
+        .iter_mut()
+        .map(|core| core as &mut dyn ProveRounds<F128>)
+        .collect();
+    let (expected, expected_proof) = prove(&mut members, &prelude);
+    let expected_columns: [F128; 256] = std::array::from_fn(|y| {
+        fixture
+            .trace
+            .source()
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row[y / 64] & (1 << (y % 64)) != 0)
+            .map(|(j, _)| eq(&expected.challenges, j))
+            .sum()
+    });
+    for &threads in threads {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let (a, b, g) = fixture.cores();
+            let mut a = Recorded {
+                inner: a,
+                messages: Vec::new(),
+            };
+            let mut b = Recorded {
+                inner: b,
+                messages: Vec::new(),
+            };
+            let mut g = Recorded {
+                inner: g,
+                messages: Vec::new(),
+            };
+            let (proved, proof) = prove(&mut [&mut a, &mut b, &mut g], &prelude);
+            assert_eq!(a.messages, oracle[0].messages);
+            assert_eq!(b.messages, oracle[1].messages);
+            assert_eq!(g.messages, oracle[2].messages);
+            assert_eq!(proved, expected);
+            assert_eq!(proof, expected_proof);
+            let columns = column_pass(fixture.trace.source().rows(), &proved.challenges).unwrap();
+            assert_eq!(columns, expected_columns);
+            let chunks = [
+                a.inner.final_values().unwrap(),
+                b.inner.final_values().unwrap(),
+            ];
+            fixture.assert_columns(
+                &proved.challenges,
+                &columns,
+                &chunks,
+                g.inner.final_values().unwrap(),
+                &proved,
+            );
+            verify(&prelude, &proved, &proof);
+            if dense_bits {
+                let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_b175);
+                let rho = point(8, &mut rng);
+                let dense: Vec<_> = fixture
+                    .trace
+                    .source()
+                    .rows()
+                    .iter()
+                    .flat_map(|row| {
+                        (0..256)
+                            .map(move |y| F128::from_raw(u128::from((row[y / 64] >> (y % 64)) & 1)))
+                    })
+                    .collect();
+                let opening: Vec<_> = rho.iter().chain(&proved.challenges).copied().collect();
+                assert_eq!(
+                    columns
+                        .iter()
+                        .enumerate()
+                        .map(|(y, &c)| eq(&rho, y) * c)
+                        .sum::<F128>(),
+                    mle_at(&dense, &opening).unwrap()
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn tail_end_to_end_matches_committed_bits_and_verifies() {
+    acceptance(8, &[1], true);
+}
+
+#[test]
+fn tail_multichunk_rounds_and_passes_match_one_oracle_on_each_pool() {
+    acceptance(13, &[1, 12], false);
+}
+
+#[test]
+fn tail_small_domains_match_definitions() {
+    for log_t in [1, 2] {
+        acceptance(log_t, &[1, 12], true);
+    }
+}
+
+fn measure_rounds(
+    core: &mut dyn ProveRounds<F128>,
+    mut claim: F128,
+    challenges: &[F128],
+    threads: usize,
+) {
+    let measurement = AllocationMeasurement::begin();
+    for (round, &r) in challenges.iter().enumerate() {
+        let message = core
+            .prove_round(round.checked_sub(1).map(|i| challenges[i]), round, claim)
+            .unwrap();
+        claim = message.evaluate(r);
+    }
+    core.finish_rounds(*challenges.last().unwrap()).unwrap();
+    let stats = measurement.finish();
+    assert!(
+        stats.allocs <= 16 * challenges.len() + 64 + threads * RAYON_WORKER_ALLOWANCE.allocs,
+        "{} allocations",
+        stats.allocs
+    );
+}
+
+#[test]
+fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
+    for (threads, log_t) in [(1, 8), (1, 14), (1, 17), (12, 14), (12, 17)] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_scoped(
+                |thread| thread.run(),
+                |pool| {
+                    let fixture = pool.install(|| Fixture::new(log_t));
+                    let map = map();
+                    let challenges = vec![F128::from_raw(79); log_t];
+                    let allowance = threads * RAYON_WORKER_ALLOWANCE.bytes;
+                    let allocs = threads * RAYON_WORKER_ALLOWANCE.allocs;
+                    assert!(
+                        log_t != 17 || CycleChunks::new(log_t, 0).unwrap().ranges().len() >= 32
+                    );
+                    let _ = pool.broadcast(|_| ());
+                    let baseline = CountingAllocator::live_bytes();
+                    let measurement = AllocationMeasurement::begin();
+                    let tables = pool
+                        .install(|| g_pass_digits(&fixture.trace, &map, &fixture.weights).unwrap());
+                    let stats = measurement.finish();
+                    let output = tables.capacity() * size_of::<Vec<F128>>()
+                        + tables
+                            .iter()
+                            .map(|table| table.capacity() * size_of::<F128>())
+                            .sum::<usize>();
+                    assert!(stats.allocs <= 256 + allocs);
+                    assert!((output..=output + allowance).contains(&stats.final_bytes));
+                    drop(tables);
+                    assert!((baseline..=baseline + allowance)
+                        .contains(&CountingAllocator::live_bytes()));
+                    for terms in &fixture.terms {
+                        let baseline = CountingAllocator::live_bytes();
+                        let measurement = AllocationMeasurement::begin();
+                        let weight = pool.install(|| combined_weight(log_t, terms).unwrap());
+                        let stats = measurement.finish();
+                        assert!(stats.allocs <= 256 + allocs);
+                        assert!((weight.capacity() * size_of::<F128>()
+                            ..=weight.capacity() * size_of::<F128>() + allowance)
+                            .contains(&stats.final_bytes));
+                        drop(weight);
+                        assert!((baseline..=baseline + allowance)
+                            .contains(&CountingAllocator::live_bytes()));
+                    }
+                    pool.install(|| {
+                        let (mut a, mut b, mut g) = fixture.cores();
+                        let claims = fixture.definition.claims();
+                        measure_rounds(&mut a, claims[0], &challenges, threads);
+                        measure_rounds(&mut b, claims[1], &challenges, threads);
+                        measure_rounds(&mut g, claims[2], &challenges, threads);
+                    });
+                    let baseline = CountingAllocator::live_bytes();
+                    let measurement = AllocationMeasurement::begin();
+                    let columns = pool.install(|| {
+                        column_pass(fixture.trace.source().rows(), &challenges).unwrap()
+                    });
+                    let stats = measurement.finish();
+                    assert_eq!(columns.len(), 256);
+                    assert!(stats.allocs <= 256 + allocs);
+                    assert!(
+                        stats.peak_bytes
+                            <= 256 * 16 + threads * 8192 * 16 + (1 << log_t) * 16 + allowance
+                    );
+                    assert!(stats.final_bytes <= allowance);
+                    assert!((baseline..=baseline + allowance)
+                        .contains(&CountingAllocator::live_bytes()));
+                },
+            )
+            .unwrap();
+    }
+}

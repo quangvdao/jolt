@@ -131,17 +131,17 @@ impl<const K: usize> Groups<K> {
 
 impl<const K: usize> GroupViews<'_, K> {
     #[inline(always)]
-    fn add(
-        output: &mut [[F128; 4]; 256],
+    #[expect(
+        clippy::expect_used,
+        reason = "compiled destinations are distinct and below four"
+    )]
+    fn destinations<'a>(
+        output: &'a mut [[F128; 256]; 4],
         destinations: &[usize; K],
-        sums: &[[F128; K]],
-        len: usize,
-    ) {
-        for (output, values) in output[..len].iter_mut().zip(sums) {
-            for (&destination, &sum) in destinations.iter().zip(values) {
-                output[destination & 3] += sum;
-            }
-        }
+    ) -> [&'a mut [F128; 256]; K] {
+        output
+            .get_disjoint_mut(*destinations)
+            .expect("distinct output columns")
     }
     #[inline(always)]
     #[expect(
@@ -150,21 +150,28 @@ impl<const K: usize> GroupViews<'_, K> {
     )]
     fn fixed<const W: usize, I: Fn(usize) -> usize>(
         table: &[[F128; K]],
-        sums: &mut [[F128; K]],
+        output: &mut [&mut [F128; 256]; K],
+        len: usize,
         index: I,
     ) {
         let table: &[[F128; K]; W] = table.try_into().expect("fixed table width");
-        for (cycle, sums) in sums.iter_mut().enumerate() {
-            for (sum, value) in sums.iter_mut().zip(table[index(cycle) & (W - 1)]) {
-                *sum += value;
+        for cycle in 0..len.min(256) {
+            let values = table[index(cycle) & (W - 1)];
+            for (destination, value) in output.iter_mut().zip(values) {
+                destination[cycle] += value;
             }
         }
     }
-    fn indexed<I: Fn(usize) -> usize>(table: &[[F128; K]], sums: &mut [[F128; K]], index: I) {
+    fn indexed<I: Fn(usize) -> usize>(
+        table: &[[F128; K]],
+        output: &mut [&mut [F128; 256]; K],
+        len: usize,
+        index: I,
+    ) {
         macro_rules! widths {
             ($($width:literal),*) => {
                 match table.len() {
-                    $($width => Self::fixed::<$width, _>(table, sums, index),)*
+                    $($width => Self::fixed::<$width, _>(table, output, len, index),)*
                     _ => {},
                 }
             };
@@ -176,12 +183,12 @@ impl<const K: usize> GroupViews<'_, K> {
         source: &S,
         start: usize,
         len: usize,
-        output: &mut [[F128; 4]; 256],
+        output: &mut [[F128; 256]; 4],
     ) {
         for group in &self.words {
-            let mut sums = [[ZERO; K]; 256];
+            let mut destinations = Self::destinations(output, &group.destinations);
             for range in &group.ranges {
-                for (cycle, sums) in sums[..len].iter_mut().enumerate() {
+                for cycle in 0..len.min(256) {
                     let bytes = source.trace_word(range.word, start + cycle).to_le_bytes();
                     let mut value = [ZERO; K];
                     for (table, byte) in range.tables.iter().zip(bytes) {
@@ -189,26 +196,24 @@ impl<const K: usize> GroupViews<'_, K> {
                             *sum += value;
                         }
                     }
-                    for (sum, value) in sums.iter_mut().zip(value) {
-                        *sum += value;
+                    for (destination, value) in destinations.iter_mut().zip(value) {
+                        destination[cycle] += value;
                     }
                 }
             }
-            Self::add(output, &group.destinations, &sums, len);
         }
         for group in &self.indicators {
-            let mut sums = [[ZERO; K]; 256];
+            let mut destinations = Self::destinations(output, &group.destinations);
             for range in &group.ranges {
-                Self::indexed(range.table, &mut sums[..len], |cycle| {
+                Self::indexed(range.table, &mut destinations, len, |cycle| {
                     source.digit(range.column, start + cycle).unwrap_or(0) & range.mask
                 });
             }
-            Self::add(output, &group.destinations, &sums, len);
         }
         for group in &self.flags {
-            let mut sums = [[ZERO; K]; 256];
+            let mut destinations = Self::destinations(output, &group.destinations);
             for range in &group.ranges {
-                Self::indexed(range.table, &mut sums[..len], |cycle| {
+                Self::indexed(range.table, &mut destinations, len, |cycle| {
                     let mut mask = 0;
                     for (bit, &column) in range.columns[..range.count].iter().enumerate() {
                         mask |= usize::from(source.digit(column, start + cycle).is_some()) << bit;
@@ -216,7 +221,6 @@ impl<const K: usize> GroupViews<'_, K> {
                     mask & range.mask
                 });
             }
-            Self::add(output, &group.destinations, &sums, len);
         }
     }
 }
@@ -251,7 +255,7 @@ impl Pass<'_> {
                 let mut tiles = outputs.each_mut().map(|output| output.chunks_mut(256));
                 let mut offset = 0;
                 while offset < chunk_len {
-                    let mut output = [[ZERO; 4]; 256];
+                    let mut output = [[ZERO; 256]; 4];
                     let len = 256.min(chunk_len - offset);
                     self.one
                         .accumulate(source, start + offset, len, &mut output);
@@ -263,47 +267,8 @@ impl Pass<'_> {
                         .accumulate(source, start + offset, len, &mut output);
                     let mut targets: [&mut [F128]; N] =
                         std::array::from_fn(|slot| tiles[slot].next().expect("complete tile"));
-                    match targets.as_mut_slice() {
-                        [a] => {
-                            for (a, value) in a.iter_mut().zip(&output[..len]) {
-                                *a = value[0];
-                            }
-                        }
-                        [a, b] => {
-                            for ((a, b), value) in
-                                a.iter_mut().zip(b.iter_mut()).zip(&output[..len])
-                            {
-                                *a = value[0];
-                                *b = value[1];
-                            }
-                        }
-                        [a, b, c] => {
-                            for (((a, b), c), value) in a
-                                .iter_mut()
-                                .zip(b.iter_mut())
-                                .zip(c.iter_mut())
-                                .zip(&output[..len])
-                            {
-                                *a = value[0];
-                                *b = value[1];
-                                *c = value[2];
-                            }
-                        }
-                        [a, b, c, d] => {
-                            for ((((a, b), c), d), value) in a
-                                .iter_mut()
-                                .zip(b.iter_mut())
-                                .zip(c.iter_mut())
-                                .zip(d.iter_mut())
-                                .zip(&output[..len])
-                            {
-                                *a = value[0];
-                                *b = value[1];
-                                *c = value[2];
-                                *d = value[3];
-                            }
-                        }
-                        _ => {}
+                    for (target, column) in targets.iter_mut().zip(&output) {
+                        target.copy_from_slice(&column[..len]);
                     }
                     offset += len;
                 }

@@ -60,6 +60,8 @@
 //! reductions and the first four binds, including materialisation. Compact
 //! source and family construction are outside its timer. It is a separate
 //! diagnostic, not a share of the fused product rounds or an additive split.
+//! Its per-sample input refresh copies a validated group, reported as
+//! `_input_clone` with `clone_ns`, rather than a new validation/preparation.
 
 pub mod allocator;
 pub mod arithmetic;
@@ -352,6 +354,7 @@ impl PhaseTimes {
 /// A case's record name, phase names, total membership and optional requirement.
 /// Supplemental phases must not also enter the total when they overlap a primary.
 pub struct Case<V> {
+    pub preparation: &'static str,
     pub name: String,
     pub variant: V,
     pub phases: Vec<String>,
@@ -363,6 +366,7 @@ impl<V> Case<V> {
     pub fn core(name: &str, variant: V, extra: &[&str]) -> Self {
         Self {
             name: name.to_owned(),
+            preparation: "preparation",
             variant,
             phases: ["construct", "rounds", "finish", "extract"]
                 .into_iter()
@@ -614,7 +618,12 @@ where
                     let summary = Sample::phase(&preparation, 0, cycles as f64);
                     let (peak_bytes, final_bytes, allocs) = Sample::allocations(&preparation);
                     if final_bytes != 0 || allocs != 0 {
-                        println!("{}_preparation/{}/{log_t}/{threads} prepare_ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs} loaded_machine=true", case.name, profile.name(), summary.median, summary.min, summary.max, options.samples);
+                        let metric = if case.preparation == "input_clone" {
+                            "clone_ns"
+                        } else {
+                            "prepare_ns"
+                        };
+                        println!("{}_{}/{}/{log_t}/{threads} {metric}={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs} loaded_machine=true", case.name, case.preparation, profile.name(), summary.median, summary.min, summary.max, options.samples);
                     }
                     let divisor = cycles as f64;
                     let phases = (0..case.phases.len())

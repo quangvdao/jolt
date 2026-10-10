@@ -515,6 +515,39 @@ fn small_cycle_domains_and_zero_weights_match_defining_sum() {
 }
 
 #[test]
+fn one_cycle_dense_weight_has_literal_zero_round_values() {
+    let source = Arc::new(UniformColumns {
+        trace: SyntheticTrace::new(SynthProfile::UniformDigits, 1, 1, 0xc8_0011).unwrap(),
+        columns: 1,
+        top_bits: 2,
+        missing: false,
+        cycles_override: Some(1),
+    });
+    let group = ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![vec![0]],
+            optional: vec![],
+        },
+    )
+    .unwrap()
+    .1
+    .present
+    .remove(0);
+    let core = ChunkProductCore::new(
+        group,
+        vec![vec![F128::from_raw(2), F128::from_raw(4)]],
+        ChunkWeight::Dense(vec![F128::from_raw(7)]),
+    )
+    .unwrap();
+    assert_eq!(core.num_rounds(), 0);
+    assert_eq!(
+        core.final_values().unwrap(),
+        (F128::from_raw(7), vec![F128::from_raw(15)])
+    );
+}
+
+#[test]
 fn later_zero_equality_prefix_matches_defining_sum() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0009);
     let source = columns(4, 2, 2, false);

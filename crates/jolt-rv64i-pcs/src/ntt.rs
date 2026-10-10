@@ -17,15 +17,21 @@ use jolt_rv64i_verifier::whir::error::{checked_product, try_vec, WhirError, Whir
 use rayon::prelude::*;
 
 trait CodeSymbol: Ring + Copy + Send + Sync {
+    const FUSE_LAYERS: bool;
+
     fn scale(self, twiddle: F64) -> Self;
 }
 impl CodeSymbol for F64 {
+    const FUSE_LAYERS: bool = true;
+
     #[inline]
     fn scale(self, twiddle: F64) -> Self {
         self * twiddle
     }
 }
 impl CodeSymbol for F192 {
+    const FUSE_LAYERS: bool = false;
+
     #[inline]
     fn scale(self, twiddle: F64) -> Self {
         self.mul_base(twiddle)
@@ -97,14 +103,9 @@ impl<'a> Encoder<'a> {
         let len = checked_product(WhirPart::Leaves, &[self.code_len, 2])?;
         let mut out = try_vec(WhirPart::Leaves, len)?;
         out.resize(len, F64::zero());
-        out.par_chunks_mut(words).for_each(|block| {
-            for (row, target) in rows.iter().zip(block.chunks_exact_mut(4)) {
-                for (slot, word) in target.iter_mut().zip(row) {
-                    *slot = F64::from_raw(*word);
-                }
-            }
+        self.initialize(&mut out, word_lanes, |index| {
+            F64::from_raw(rows[index / 4][index % 4])
         });
-        self.forward(&mut out, word_lanes);
         Ok(out)
     }
 
@@ -125,19 +126,67 @@ impl<'a> Encoder<'a> {
         out.resize(self.code_len, F::zero());
         out.par_chunks_mut(self.message_len)
             .for_each(|block| block.copy_from_slice(message));
-        self.forward(&mut out, self.lanes);
+        self.forward(&mut out, self.lanes, self.c);
         Ok(out)
     }
 
-    fn forward<F: CodeSymbol>(&self, data: &mut [F], lanes: usize) {
+    fn initialize<F: CodeSymbol>(
+        &self,
+        data: &mut [F],
+        lanes: usize,
+        read: impl Fn(usize) -> F + Sync,
+    ) {
+        let block_len = self.message_positions * lanes;
+        data.par_chunks_mut(block_len)
+            .enumerate()
+            .for_each(|(replica, block)| {
+                let base = replica * self.message_positions;
+                if self.c < 3 {
+                    for (index, value) in block.iter_mut().enumerate() {
+                        *value = read(index);
+                    }
+                    self.local_layers(block, lanes, base, self.c);
+                } else {
+                    let twiddles = self.radix8_twiddles(self.c - 1, base);
+                    let stride = block_len / 8;
+                    Self::radix8_tiles(block, true, |offset, mut rows| {
+                        for (slab, row) in rows.iter_mut().enumerate() {
+                            for (index, value) in row.iter_mut().enumerate() {
+                                *value = read(slab * stride + offset + index);
+                            }
+                        }
+                        Self::radix8(&mut rows, &twiddles);
+                    });
+                }
+            });
+        self.forward(data, lanes, self.c.saturating_sub(3));
+    }
+
+    fn forward<F: CodeSymbol>(&self, data: &mut [F], lanes: usize, remaining: usize) {
+        if remaining == 0 {
+            return;
+        }
         let bytes_per_position = lanes * std::mem::size_of::<F>();
         let cache_positions = ((1 << 20) / bytes_per_position).max(1);
         let cache_log = cache_positions.ilog2() as usize;
         let parallel_log = (self.code_positions / rayon::current_num_threads().next_power_of_two())
             .max(1)
             .ilog2() as usize;
-        let local_layers = self.c.min(cache_log).min(parallel_log);
-        for l in (local_layers..self.c).rev() {
+        let local_layers = remaining.min(cache_log).min(parallel_log);
+        let mut top_layers = remaining;
+        while F::FUSE_LAYERS && top_layers >= local_layers + 3 {
+            let run_positions = 1usize << top_layers;
+            data.par_chunks_mut(run_positions * lanes)
+                .enumerate()
+                .for_each(|(run, block)| {
+                    let twiddles = self.radix8_twiddles(top_layers - 1, run * run_positions);
+                    Self::radix8_tiles(block, true, |_, mut rows| {
+                        Self::radix8(&mut rows, &twiddles);
+                    });
+                });
+            top_layers -= 3;
+        }
+        for l in (local_layers..top_layers).rev() {
             let run_positions = 1usize << (l + 1);
             data.par_chunks_mut(run_positions * lanes)
                 .enumerate()
@@ -154,19 +203,121 @@ impl<'a> Encoder<'a> {
             .enumerate()
             .for_each(|(window, data)| {
                 let base = window * window_positions;
-                for l in (0..local_layers).rev() {
-                    let run_positions = 1usize << (l + 1);
-                    for (run, block) in data.chunks_mut(run_positions * lanes).enumerate() {
-                        let twiddle = self.table.w_hat(l, (base + run * run_positions) as u32);
-                        let (top, bot) = block.split_at_mut(block.len() / 2);
-                        Self::butterfly(top, bot, twiddle);
-                    }
-                }
+                self.local_layers(data, lanes, base, local_layers);
             });
+    }
+
+    fn local_layers<F: CodeSymbol>(
+        &self,
+        data: &mut [F],
+        lanes: usize,
+        base: usize,
+        remaining: usize,
+    ) {
+        if F::FUSE_LAYERS && remaining >= 3 {
+            let twiddles = self.radix8_twiddles(remaining - 1, base);
+            Self::radix8_tiles(data, false, |_, mut rows| {
+                Self::radix8(&mut rows, &twiddles);
+            });
+            let child_positions = 1usize << (remaining - 3);
+            for (child, block) in data.chunks_mut(child_positions * lanes).enumerate() {
+                self.local_layers(block, lanes, base + child * child_positions, remaining - 3);
+            }
+            return;
+        }
+        for l in (0..remaining).rev() {
+            let run_positions = 1usize << (l + 1);
+            for (run, block) in data.chunks_mut(run_positions * lanes).enumerate() {
+                let twiddle = self.table.w_hat(l, (base + run * run_positions) as u32);
+                let (top, bot) = block.split_at_mut(block.len() / 2);
+                Self::butterfly(top, bot, twiddle);
+            }
+        }
+    }
+
+    fn radix8_twiddles(&self, l: usize, base: usize) -> [F64; 7] {
+        let half = 1usize << l;
+        let quarter = half / 2;
+        [
+            self.table.w_hat(l, base as u32),
+            self.table.w_hat(l - 1, base as u32),
+            self.table.w_hat(l - 1, (base + half) as u32),
+            self.table.w_hat(l - 2, base as u32),
+            self.table.w_hat(l - 2, (base + quarter) as u32),
+            self.table.w_hat(l - 2, (base + half) as u32),
+            self.table.w_hat(l - 2, (base + half + quarter) as u32),
+        ]
+    }
+
+    fn radix8_tiles<F: CodeSymbol>(
+        block: &mut [F],
+        parallel: bool,
+        visit: impl Fn(usize, [&mut [F]; 8]) + Sync,
+    ) {
+        let stride = block.len() / 8;
+        let (r0, rest) = block.split_at_mut(stride);
+        let (r1, rest) = rest.split_at_mut(stride);
+        let (r2, rest) = rest.split_at_mut(stride);
+        let (r3, rest) = rest.split_at_mut(stride);
+        let (r4, rest) = rest.split_at_mut(stride);
+        let (r5, rest) = rest.split_at_mut(stride);
+        let (r6, r7) = rest.split_at_mut(stride);
+        let tile = ((32 << 10) / (8 * std::mem::size_of::<F>())).max(1);
+        if parallel {
+            r0.par_chunks_mut(tile)
+                .zip(r1.par_chunks_mut(tile))
+                .zip(r2.par_chunks_mut(tile))
+                .zip(r3.par_chunks_mut(tile))
+                .zip(r4.par_chunks_mut(tile))
+                .zip(r5.par_chunks_mut(tile))
+                .zip(r6.par_chunks_mut(tile))
+                .zip(r7.par_chunks_mut(tile))
+                .enumerate()
+                .for_each(|(i, (((((((r0, r1), r2), r3), r4), r5), r6), r7))| {
+                    visit(i * tile, [r0, r1, r2, r3, r4, r5, r6, r7]);
+                });
+        } else {
+            for (i, (((((((r0, r1), r2), r3), r4), r5), r6), r7)) in r0
+                .chunks_mut(tile)
+                .zip(r1.chunks_mut(tile))
+                .zip(r2.chunks_mut(tile))
+                .zip(r3.chunks_mut(tile))
+                .zip(r4.chunks_mut(tile))
+                .zip(r5.chunks_mut(tile))
+                .zip(r6.chunks_mut(tile))
+                .zip(r7.chunks_mut(tile))
+                .enumerate()
+            {
+                visit(i * tile, [r0, r1, r2, r3, r4, r5, r6, r7]);
+            }
+        }
+    }
+
+    #[inline]
+    fn radix8<F: CodeSymbol>(rows: &mut [&mut [F]; 8], t: &[F64; 7]) {
+        let [r0, r1, r2, r3, r4, r5, r6, r7] = rows;
+        Self::butterfly(r0, r4, t[0]);
+        Self::butterfly(r1, r5, t[0]);
+        Self::butterfly(r2, r6, t[0]);
+        Self::butterfly(r3, r7, t[0]);
+        Self::butterfly(r0, r2, t[1]);
+        Self::butterfly(r1, r3, t[1]);
+        Self::butterfly(r4, r6, t[2]);
+        Self::butterfly(r5, r7, t[2]);
+        Self::butterfly(r0, r1, t[3]);
+        Self::butterfly(r2, r3, t[4]);
+        Self::butterfly(r4, r5, t[5]);
+        Self::butterfly(r6, r7, t[6]);
     }
 
     #[inline]
     fn butterfly<F: CodeSymbol>(top: &mut [F], bot: &mut [F], twiddle: F64) {
+        if F::FUSE_LAYERS && twiddle.is_zero() {
+            for (top, bot) in top.iter().zip(bot) {
+                *bot += *top;
+            }
+            return;
+        }
         for (top, bot) in top.iter_mut().zip(bot) {
             let new_top = *top + bot.scale(twiddle);
             *bot += new_top;
@@ -605,6 +756,69 @@ mod tests {
                         .filter(|l| w & (1 << l) != 0)
                         .fold(F64::one(), |p, l| p * table.w_hat(l, x as u32));
                     assert_eq!(row[19], coefficient.mul_base(basis));
+                    assert!(row.iter().enumerate().all(|(u, v)| u == 19 || v.is_zero()));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn fused_global_passes_match_sampled_polynomial_values() {
+        use jolt_field::Field;
+
+        let c = 17;
+        let d = 18;
+        let w = (1usize << 13) | (1 << 12) | (1 << 11) | (1 << 3) | 1;
+        let table = DomainTable::new(c, d).unwrap();
+        let positions = [
+            0usize, 1, 9, 127, 128, 1023, 1024, 2047, 2048, 16383, 16384, 65535, 65536, 131_072,
+            262_143,
+        ];
+        let subspace = |l: usize, x: usize| {
+            (0..1usize << l).fold(F64::one(), |p, root| p * F64::from_raw((x ^ root) as u64))
+        };
+        let selected_bits = [0, 3, 11, 12, 13];
+        let inverses = selected_bits.map(|l| subspace(l, 1 << l).inverse().unwrap());
+        let basis = positions.map(|x| {
+            selected_bits
+                .iter()
+                .zip(&inverses)
+                .fold(F64::one(), |p, (&l, &inverse)| p * subspace(l, x) * inverse)
+        });
+        let coefficient = F192::from_base_fn(|i| F64::from_raw([3, 5, 9][i]));
+
+        for threads in [1, 12] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let lanes = 16;
+                let mut message = vec![F192::zero(); (1 << c) * lanes];
+                message[w * lanes + 7] = coefficient;
+                let code = Encoder::new(&table, c, d, lanes)
+                    .unwrap()
+                    .encode_extension(&message)
+                    .unwrap();
+                for (&x, &basis) in positions.iter().zip(&basis) {
+                    let row = &code[x * lanes..(x + 1) * lanes];
+                    assert_eq!(row[7], coefficient.mul_base(basis));
+                    assert!(row.iter().enumerate().all(|(u, v)| u == 7 || v.is_zero()));
+                }
+                drop(code);
+                drop(message);
+
+                let lanes = 32;
+                let word_lanes = 2 * lanes;
+                let mut rows = vec![[0u64; 4]; (1 << c) * word_lanes / 4];
+                rows[(w * word_lanes + 19) / 4][19 % 4] = 3;
+                let code = Encoder::new(&table, c, d, lanes)
+                    .unwrap()
+                    .encode_rows(&rows)
+                    .unwrap();
+                for (&x, &basis) in positions.iter().zip(&basis) {
+                    let row = &code[x * word_lanes..(x + 1) * word_lanes];
+                    assert_eq!(row[19], F64::from_raw(3) * basis);
                     assert!(row.iter().enumerate().all(|(u, v)| u == 19 || v.is_zero()));
                 }
             });

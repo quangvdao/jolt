@@ -5,6 +5,28 @@ use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use rayon::ThreadPoolBuilder;
 
 #[test]
+fn cycle_split_matches_literal_low_first_halves_through_binds() {
+    for (log_t, expected) in [
+        (1, vec![(1, 0, 2), (0, 0, 1)]),
+        (2, vec![(1, 1, 2), (0, 1, 1), (0, 0, 1)]),
+        (3, vec![(2, 1, 4), (1, 1, 2), (0, 1, 1), (0, 0, 1)]),
+    ] {
+        for (round, (low, high, block_len)) in expected.into_iter().enumerate() {
+            let chunks = CycleChunks::new(log_t, round).unwrap();
+            assert_eq!(chunks.low_bits(), low);
+            assert_eq!(chunks.high_bits(), high);
+            assert_eq!(chunks.block_len(), block_len);
+        }
+    }
+    for (round, low, high, block_len) in [(0, 4, 3, 16), (1, 3, 3, 8)] {
+        let chunks = CycleChunks::new(7, round).unwrap();
+        assert_eq!(chunks.low_bits(), low);
+        assert_eq!(chunks.high_bits(), high);
+        assert_eq!(chunks.block_len(), block_len);
+    }
+}
+
+#[test]
 fn chunks_cover_whole_equality_blocks_independently_of_the_pool() {
     let one = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let twelve = ThreadPoolBuilder::new().num_threads(12).build().unwrap();

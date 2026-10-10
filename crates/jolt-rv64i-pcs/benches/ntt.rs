@@ -6,6 +6,8 @@
 //! order. Comparison CSV reports medians, minima, maxima, and paired ratios.
 //! Samples include output allocation, first touch and the call-scoped domain;
 //! later levels share one table. `--load` reports uptime outside measurement.
+//! `--arithmetic --iterations 8000000 --samples 5` measures fully reduced
+//! K multiplication and E-by-K scaling throughput on independent register chains.
 
 use jolt_field::{ExtField, Zero};
 use jolt_field::{F192, F64};
@@ -149,6 +151,8 @@ struct Options {
     compare: Option<PathBuf>,
     load: bool,
     copy: bool,
+    arithmetic: bool,
+    iterations: usize,
 }
 impl Options {
     fn parse() -> Result<Self, Box<dyn Error>> {
@@ -159,6 +163,8 @@ impl Options {
             compare: None,
             load: false,
             copy: true,
+            arithmetic: false,
+            iterations: 8_000_000,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -174,11 +180,18 @@ impl Options {
                 }
                 "--load" => options.load = true,
                 "--no-copy" => options.copy = false,
+                "--arithmetic" => options.arithmetic = true,
+                "--iterations" => {
+                    options.iterations = args.next().ok_or("missing iterations")?.parse()?;
+                }
                 _ => return Err(format!("unknown argument {arg}").into()),
             }
         }
-        if options.samples == 0 || options.threads.contains(&0) {
-            return Err("samples and threads must be positive".into());
+        if options.samples == 0 || options.iterations == 0 || options.threads.contains(&0) {
+            return Err("samples, iterations and threads must be positive".into());
+        }
+        if options.arithmetic && options.compare.is_some() {
+            return Err("arithmetic and executable comparison are separate measurements".into());
         }
         if options.sizes.iter().any(|t| ![20, 22].contains(t)) {
             return Err("log-t must select 20 or 22".into());
@@ -389,12 +402,84 @@ fn report_load() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[inline(never)]
+fn reduced_products<const N: usize>(iterations: usize, seed: u64) -> Duration {
+    let mut rng = Words(black_box(seed));
+    let mut state: [F64; N] = std::array::from_fn(|_| F64::from_raw(rng.gen()));
+    let factors: [F64; N] = black_box(std::array::from_fn(|_| F64::from_raw(rng.gen())));
+    let start = Instant::now();
+    for _ in 0..black_box(iterations) {
+        for (value, factor) in state.iter_mut().zip(&factors) {
+            *value *= *factor;
+        }
+    }
+    let _result = black_box(state);
+    start.elapsed()
+}
+
+#[inline(never)]
+fn extension_scalings<const N: usize>(iterations: usize, seed: u64) -> Duration {
+    let mut rng = Words(black_box(seed));
+    let mut state: [F192; N] =
+        std::array::from_fn(|_| F192::from_base_fn(|_| F64::from_raw(rng.gen())));
+    let factors: [F64; N] = black_box(std::array::from_fn(|_| F64::from_raw(rng.gen())));
+    let start = Instant::now();
+    for _ in 0..black_box(iterations) {
+        for (value, factor) in state.iter_mut().zip(&factors) {
+            *value = value.mul_base(*factor);
+        }
+    }
+    let _result = black_box(state);
+    start.elapsed()
+}
+
+#[expect(
+    clippy::print_stdout,
+    reason = "arithmetic throughput CSV is benchmark output"
+)]
+fn report_arithmetic(options: &Options) {
+    type ArithmeticCase = (&'static str, usize, fn(usize, u64) -> Duration);
+    let cases: [ArithmeticCase; 5] = [
+        ("K-reduced-product", 1, reduced_products::<1>),
+        ("K-reduced-product", 4, reduced_products::<4>),
+        ("K-reduced-product", 8, reduced_products::<8>),
+        ("E-by-K-scale", 4, extension_scalings::<4>),
+        ("E-by-K-scale", 8, extension_scalings::<8>),
+    ];
+    println!("# one thread; dependent chains are mutually independent; products include reduction");
+    println!("operation,chains,iterations,operations,K-products,median_ms,min_ms,max_ms,median_ns/operation,min_ns/operation,median_ns/K-product,min_ns/K-product");
+    for (operation, chains, run) in cases {
+        let _warm = black_box(run(options.iterations, 0x6172_6974_686d));
+        let mut times: Vec<_> = (0..options.samples)
+            .map(|sample| {
+                milliseconds(run(
+                    options.iterations,
+                    black_box(0x6172_6974_686d + sample as u64),
+                ))
+            })
+            .collect();
+        let (median, min, max) = stats(&mut times);
+        let operations = options.iterations as f64 * chains as f64;
+        let k_products = operations
+            * if operation == "E-by-K-scale" {
+                3.0
+            } else {
+                1.0
+            };
+        println!("{operation},{chains},{},{operations:.0},{k_products:.0},{median:.6},{min:.6},{max:.6},{:.6},{:.6},{:.6},{:.6}",
+            options.iterations, median * 1e6 / operations, min * 1e6 / operations,
+            median * 1e6 / k_products, min * 1e6 / k_products);
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
     if options.load {
         report_load()?;
     }
-    if let Some(baseline) = &options.compare {
+    if options.arithmetic {
+        report_arithmetic(&options);
+    } else if let Some(baseline) = &options.compare {
         compare(&options, baseline)?;
     } else {
         report(&options)?;

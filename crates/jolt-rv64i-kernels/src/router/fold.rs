@@ -356,6 +356,8 @@ pub struct FoldOutput {
 #[inline]
 fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
     if bytes {
+        let storage: &mut [F128; BucketPlacement::Byte.word_entries()] =
+            storage.try_into().expect("whole byte word");
         for position in 0..ByteBuckets::POSITIONS_PER_WORD {
             let base = BucketPlacement::Byte.position_offset(position);
             storage[base + (word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] +=

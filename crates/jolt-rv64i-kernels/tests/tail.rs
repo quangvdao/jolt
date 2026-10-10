@@ -18,7 +18,7 @@ use jolt_rv64i_kernels::column_pass::column_pass;
 use jolt_rv64i_kernels::oracle::{mle_at, round_polynomial};
 use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_kernels::reduction::{g_pass_digits, ReductionCore, ReductionLeg};
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, ValidatedTrace};
+use jolt_rv64i_kernels::source::{CycleSource, PrepareRequest, PresentGroup, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, BooleanHypercube, ClearProof, ClearSumcheckRecorder,
@@ -92,6 +92,7 @@ impl Definition {
 
 struct Fixture {
     trace: Arc<ValidatedTrace<SyntheticTrace>>,
+    groups: [PresentGroup; 2],
     points: [Vec<Vec<F128>>; 2],
     terms: [Vec<ChunkWeightTerm>; 2],
     weights: Vec<Vec<F128>>,
@@ -102,7 +103,16 @@ impl Fixture {
     fn new(log_t: usize) -> Self {
         let source =
             Arc::new(SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0x7a11).unwrap());
-        let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source)).unwrap());
+        let (trace, groups) = ValidatedTrace::prepare(
+            Arc::clone(&source),
+            PrepareRequest {
+                present: vec![(0..5).collect(), (5..10).collect()],
+                optional: vec![],
+            },
+        )
+        .unwrap();
+        let trace = Arc::new(trace);
+        let groups = groups.present.try_into().unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(0x7a11_5eed);
         let points =
             std::array::from_fn(|_| (0..5).map(|_| point(4, &mut rng)).collect::<Vec<_>>());
@@ -207,6 +217,7 @@ impl Fixture {
         }
         Self {
             trace,
+            groups,
             points,
             terms,
             weights,
@@ -231,11 +242,7 @@ impl Fixture {
         let [first, second] = weights;
         let chunk = |member: usize, weight| {
             ChunkProductCore::new(
-                DigitColumns::from_validated(
-                    Arc::clone(&self.trace),
-                    (5 * member..5 * member + 5).collect(),
-                )
-                .unwrap(),
+                self.groups[member].clone(),
                 self.points[member].clone(),
                 ChunkWeight::Dense(weight),
             )

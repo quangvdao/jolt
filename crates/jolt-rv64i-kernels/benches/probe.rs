@@ -69,10 +69,10 @@
 //!
 //! Lookup and bucket records price their calibration loops, rather than library
 //! lift or bucket calls; partitioned scatter and pool merges call the library.
-//! Column bucket updates use 32 row bytes and 128 KiB per worker. Fold updates
+//! Column bucket updates use 32 row bytes and 131,584 bytes per worker. Fold updates
 //! mirror fold_pass's five cycle banks: five Variant words, seven chunk buckets
 //! and combined flags, plus active Shift, Memory, Compare and Branch words.
-//! Layouts occupy 10.383/11.477/19.133 MiB per worker. Requested hot shares are
+//! Layouts occupy 10.423/11.521/19.207 MiB per worker. Requested hot shares are
 //! remapped once at construction; timing reads a selector byte, without remapping.
 //! Bucket read-out uses those same layouts: 128 reads per byte bit, eight per
 //! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
@@ -112,6 +112,7 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use jolt_rv64i_kernels::packed::buckets::{BucketPlacement, ByteBuckets, NibbleBuckets};
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
 use jolt_rv64i_kernels::router::fold::FoldCalibration;
@@ -268,7 +269,9 @@ impl Lookup {
     ) -> usize {
         let visited = match source.profile() {
             SynthProfile::Local => source.bytecode_rows() / 16,
-            SynthProfile::AllRows | SynthProfile::UniformDigits => source.bytecode_rows(),
+            SynthProfile::AllRows | SynthProfile::UniformDigits | SynthProfile::SmallValues => {
+                source.bytecode_rows()
+            }
         }
         .max(1)
         .min(CycleSource::cycles(source));
@@ -797,7 +800,10 @@ impl Bucket {
         threads: usize,
     ) -> Result<Self, ProbeError> {
         let fold = layout.calibration()?;
-        let entries = fold.as_ref().map_or(32 * 256, FoldCalibration::entries);
+        let entries = fold.as_ref().map_or(
+            4 * BucketPlacement::Byte.word_entries(),
+            FoldCalibration::entries,
+        );
         let calibration = fold.as_ref().map(BucketCalibration::new).transpose()?;
         let selectors: Vec<u8> = match layout {
             BucketLayout::Column => Vec::new(),
@@ -879,7 +885,9 @@ impl Bucket {
                         BucketLayout::Column => {
                             for (word, &value) in source.rows()[cycle].iter().enumerate() {
                                 for (byte, value) in value.to_le_bytes().into_iter().enumerate() {
-                                    buckets[(word * 8 + byte) * 256 + usize::from(value)] += weight;
+                                    buckets[BucketPlacement::Byte.position_offset(
+                                        word * ByteBuckets::POSITIONS_PER_WORD + byte,
+                                    ) + usize::from(value)] += weight;
                                 }
                             }
                         }
@@ -981,14 +989,18 @@ fn bucket_word(
     by_byte: bool,
     weight: F128,
 ) {
+    let placement = BucketPlacement::from_bytes(by_byte);
+    let base = base + slot * placement.word_entries();
     if by_byte {
         for (position, value) in word.to_le_bytes().into_iter().enumerate() {
-            buckets[base + (slot * 8 + position) * 256 + usize::from(value)] += weight;
+            buckets[base + placement.position_offset(position) + usize::from(value)] += weight;
         }
     } else {
-        for position in 0..16 {
-            let value = ((word >> (position * 4)) & 15) as usize;
-            buckets[base + (slot * 16 + position) * 16 + value] += weight;
+        for position in 0..NibbleBuckets::POSITIONS_PER_WORD {
+            let value = ((word >> (position * NibbleBuckets::BITS_PER_POSITION))
+                & (NibbleBuckets::ENTRIES_PER_POSITION - 1) as u64)
+                as usize;
+            buckets[base + placement.position_offset(position) + value] += weight;
         }
     }
 }
@@ -1209,30 +1221,38 @@ struct Readout {
 }
 
 impl Readout {
-    fn word(specs: &mut Vec<ReadSpec>, base: usize, words: usize, bits: usize) {
+    fn word(specs: &mut Vec<ReadSpec>, base: usize, words: usize, by_byte: bool) {
+        let placement = BucketPlacement::from_bytes(by_byte);
+        let bits = if by_byte {
+            ByteBuckets::BITS_PER_POSITION
+        } else {
+            NibbleBuckets::BITS_PER_POSITION
+        };
         let width = 1 << bits;
-        for position in 0..words * 64 / bits {
-            for bit in 0..bits {
-                specs.push(ReadSpec {
-                    base: base + position * width,
-                    width,
-                    bit: Some(bit),
-                });
+        for word in 0..words {
+            for position in 0..64 / bits {
+                for bit in 0..bits {
+                    specs.push(ReadSpec {
+                        base: base
+                            + word * placement.word_entries()
+                            + placement.position_offset(position),
+                        width,
+                        bit: Some(bit),
+                    });
+                }
             }
         }
     }
 
     fn new(layout: BucketLayout) -> Result<Self, ProbeError> {
         let calibration = layout.calibration()?;
-        let entries = calibration
-            .as_ref()
-            .map_or(32 * 256, FoldCalibration::entries);
-        let offsets = calibration
-            .as_ref()
-            .map_or([0; 5], FoldCalibration::offsets);
+        let entries = calibration.as_ref().map_or(
+            4 * BucketPlacement::Byte.word_entries(),
+            FoldCalibration::entries,
+        );
         let mut specs = Vec::new();
         match layout {
-            BucketLayout::Column => Self::word(&mut specs, 0, 4, 8),
+            BucketLayout::Column => Self::word(&mut specs, 0, 4, true),
             BucketLayout::Fold { byte_selectors, .. } => {
                 let fold = calibration.as_ref().ok_or_else(|| ProbeError::Case {
                     unit: "readout".to_owned(),
@@ -1243,7 +1263,7 @@ impl Readout {
                 for selector in 0..selectors[0] {
                     let by_byte = selector < byte_selectors;
                     let base = fold.variant_base(selector)?;
-                    Self::word(&mut specs, base, word_sets[0], if by_byte { 8 } else { 4 });
+                    Self::word(&mut specs, base, word_sets[0], by_byte);
                     for digit in 0..7 {
                         for value in 1..if digit < 5 { 16 } else { 8 } {
                             specs.push(ReadSpec {
@@ -1266,8 +1286,15 @@ impl Readout {
                         bit: None,
                     });
                 }
-                for (shape, &offset) in offsets.iter().enumerate().skip(1) {
-                    Self::word(&mut specs, offset, selectors[shape] * word_sets[shape], 4);
+                for shape in 1..selectors.len() {
+                    for selector in 0..selectors[shape] {
+                        Self::word(
+                            &mut specs,
+                            fold.shape_base(shape, selector)?,
+                            word_sets[shape],
+                            false,
+                        );
+                    }
                 }
                 for selector in 0..selectors[3] {
                     specs.push(ReadSpec {

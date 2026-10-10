@@ -1,5 +1,5 @@
-//! Complete folds on all_rows. The runner reports preparation in construction
-//! and the entire fold in extraction; this pass has no sum-check rounds.
+//! Complete folds on all_rows and small_values. The runner reports preparation
+//! in construction and the entire fold in extraction; this pass has no sum-check rounds.
 
 pub mod support;
 
@@ -139,7 +139,12 @@ impl FoldBench {
     )]
     fn report_diagnostics(&self) {
         let d = &self.diagnostics;
-        println!("fold/scratch/{}/{}/{}/cycle cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} chunk_weight_scratch_bytes_per_worker=0 scatter_buffer_bytes={} plan_bytes={} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", d.byte_count, d.log_t, d.threads, d.cycle_bucket_bytes, d.row_bucket_bytes, d.scatter_bytes, d.plan_bytes, d.updates, d.updates*0.6, d.row_model_ns, d.merge_model_ns);
+        let profile = if self.trace.source().profile() == SynthProfile::AllRows {
+            String::new()
+        } else {
+            format!("{}/", self.trace.source().profile().name())
+        };
+        println!("fold/scratch/{profile}{}/{}/{}/cycle cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} chunk_weight_scratch_bytes_per_worker=0 scatter_buffer_bytes={} plan_bytes={} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", d.byte_count, d.log_t, d.threads, d.cycle_bucket_bytes, d.row_bucket_bytes, d.scatter_bytes, d.plan_bytes, d.updates, d.updates*0.6, d.row_model_ns, d.merge_model_ns);
     }
 }
 
@@ -166,7 +171,7 @@ fn main() -> Result<(), RunnerError> {
         ),
     ];
     let _ = run_cases(
-        &[SynthProfile::AllRows],
+        &[SynthProfile::AllRows, SynthProfile::SmallValues],
         &cases,
         Ok::<_, RunnerError>,
         |source, &bytes, _, times| {
@@ -198,14 +203,16 @@ fn main() -> Result<(), RunnerError> {
         },
         |(core, _), _| core.report_diagnostics(),
         |record, _, &bytes| {
-            if bytes == FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT && record.threads == 1 {
+            let all_rows = record.id.contains("/all_rows/");
+            if all_rows && bytes == FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT && record.threads == 1 {
                 record.print_requirement(
                     &format!("fold_pass/all_rows/{}/1", record.log_t),
                     3,
                     if record.log_t == 22 { 100.0 } else { 138.0 },
                 );
             }
-            println!("fold/pass_phases/{}/{}/{}/cycle fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6} loaded_machine=true", bytes, record.log_t, record.threads, record.phases[4].median, record.phases[5].median, record.phases[6].median, record.phases[7].median);
+            let profile = if all_rows { "" } else { "small_values/" };
+            println!("fold/pass_phases/{profile}{}/{}/{}/cycle fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6} loaded_machine=true", bytes, record.log_t, record.threads, record.phases[4].median, record.phases[5].median, record.phases[6].median, record.phases[7].median);
         },
     )?;
     Ok(())

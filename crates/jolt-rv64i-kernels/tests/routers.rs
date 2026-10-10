@@ -24,7 +24,7 @@ use jolt_rv64i_kernels::router::shape::{
     SelectorFactor, SlotVariable, WordSlot,
 };
 use jolt_rv64i_kernels::router::short::RouterShortCore;
-use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
+use jolt_rv64i_kernels::source::{CycleSource, OptionalGroup, PrepareRequest, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, BooleanHypercube, ClearProof, ClearSumcheckRecorder,
@@ -499,6 +499,21 @@ fn short_seventeen_slots_match_defining_sum_final_values_and_verify() {
             .sum::<F128>()));
 }
 
+fn optional_group<S: CycleSource>(
+    trace: &ValidatedTrace<S>,
+    shapes: &[RouterShape],
+) -> OptionalGroup {
+    let (_, mut groups) = ValidatedTrace::prepare(
+        Arc::clone(trace.source()),
+        PrepareRequest {
+            present: vec![],
+            optional: vec![RoutersCycleCore::columns(shapes)],
+        },
+    )
+    .unwrap();
+    groups.optional.remove(0)
+}
+
 fn prove_cycle_fixture<S: CycleSource>(
     trace: &ValidatedTrace<S>,
     shapes: &[RouterShape],
@@ -509,7 +524,14 @@ fn prove_cycle_fixture<S: CycleSource>(
 ) {
     let lifted = source_lift(trace, shapes, x).unwrap();
     assert_eq!(lifted.source_tables, definition.sources);
-    let core = RoutersCycleCore::new(trace, shapes, r_cycle, x, lifted.source_tables).unwrap();
+    let core = RoutersCycleCore::new(
+        optional_group(trace, shapes),
+        shapes,
+        r_cycle,
+        x,
+        lifted.source_tables,
+    )
+    .unwrap();
     let mut members: Vec<_> = core
         .members()
         .into_iter()
@@ -753,7 +775,14 @@ fn factor_supported_on_one_side_has_literal_cubic() {
     let x = [ZERO; 6];
     let lifted = source_lift(&trace, &shapes, &x).unwrap();
     assert_eq!(lifted.source_tables, [vec![ONE, ZERO]]);
-    let core = RoutersCycleCore::new(&trace, &shapes, &[t], &x, lifted.source_tables).unwrap();
+    let core = RoutersCycleCore::new(
+        optional_group(&trace, &shapes),
+        &shapes,
+        &[t],
+        &x,
+        lifted.source_tables,
+    )
+    .unwrap();
     let mut members = core.members();
     let message = members[0].prove_round(None, 0, ZERO).unwrap();
     assert_eq!(message.coefficients(), [ZERO, ONE + t, t, ONE]);
@@ -861,8 +890,14 @@ fn cycle_scalar_becoming_zero_and_short_idle_zero_match_definitions() {
     );
     assert_eq!(short.final_values().unwrap()[0].1, ZERO);
     let challenges = vec![ONE + r_cycle[0], F128::from_raw(109), F128::from_raw(127)];
-    let core =
-        RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, definition.sources.clone()).unwrap();
+    let core = RoutersCycleCore::new(
+        optional_group(&trace, &shapes),
+        &shapes,
+        &r_cycle,
+        &x,
+        definition.sources.clone(),
+    )
+    .unwrap();
     let mut member = core.members().remove(0);
     let mut claim = definition.claims(&shapes, &x)[0];
     for round in 0..3 {
@@ -949,7 +984,13 @@ fn malformed_router_sources_and_points_return_named_errors() {
     let mut source_tables = vec![vec![ZERO; 8]; 5];
     source_tables[0].truncate(4);
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, source_tables),
+        RoutersCycleCore::new(
+            optional_group(&trace, &shapes),
+            &shapes,
+            &r_cycle,
+            &x,
+            source_tables
+        ),
         Err(RouterError::TableLength {
             expected: 8,
             actual: 4,
@@ -957,14 +998,26 @@ fn malformed_router_sources_and_points_return_named_errors() {
         })
     ));
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &shapes, &[ZERO; 4], &x, vec![vec![ZERO; 8]; 5]),
+        RoutersCycleCore::new(
+            optional_group(&trace, &shapes),
+            &shapes,
+            &[ZERO; 4],
+            &x,
+            vec![vec![ZERO; 8]; 5]
+        ),
         Err(RouterError::PointLength {
             expected: 3,
             actual: 4
         })
     ));
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x[..16], vec![vec![ZERO; 8]; 5]),
+        RoutersCycleCore::new(
+            optional_group(&trace, &shapes),
+            &shapes,
+            &r_cycle,
+            &x[..16],
+            vec![vec![ZERO; 8]; 5]
+        ),
         Err(RouterError::PointLength {
             expected: 17,
             actual: 16
@@ -1069,12 +1122,6 @@ fn malformed_router_sources_and_points_return_named_errors() {
             route: vec![],
         })];
         assert_eq!(source_lift(&trace, &invalid, &x).err().unwrap(), expected);
-        assert_eq!(
-            RoutersCycleCore::new(&trace, &invalid, &r_cycle, &x, vec![vec![ZERO; 8]])
-                .err()
-                .unwrap(),
-            expected
-        );
     }
 }
 
@@ -1174,9 +1221,14 @@ fn router_pipeline_two_and_four_chunks_match_one_oracle_per_size_on_one_and_twel
                 {
                     assert_eq!(*table, trace_lifts[word]);
                 }
-                let core =
-                    RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, lifted.source_tables)
-                        .unwrap();
+                let core = RoutersCycleCore::new(
+                    optional_group(&trace, &shapes),
+                    &shapes,
+                    &r_cycle,
+                    &x,
+                    lifted.source_tables,
+                )
+                .unwrap();
                 let mut members = core.members();
                 let mut claims = definition.claims(&shapes, &x);
                 for (round, expected) in cycle_messages.iter().enumerate() {
@@ -1310,7 +1362,7 @@ fn router_lift_claims_and_core_allocation_bounds_hold_through_thirty_two_chunks(
                 })
                 .collect();
             let core =
-                RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, lifted.source_tables).unwrap();
+                RoutersCycleCore::new(optional_group(&trace, &shapes), &shapes, &r_cycle, &x, lifted.source_tables).unwrap();
             let mut members = core.members();
             let mut claims = claims;
             let measurement = AllocationMeasurement::begin();
@@ -1438,7 +1490,7 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
         })
     ));
     let core = RoutersCycleCore::new(
-        &trace,
+        optional_group(&trace, &mixed[..1]),
         &mixed[..1],
         &[ZERO],
         &[ZERO; 6],
@@ -1450,10 +1502,17 @@ fn malformed_router_shape_collections_and_unfinished_values_return_errors() {
         Err(RouterError::Unfinished)
     ));
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &[], &[ZERO], &[], vec![]),
+        RoutersCycleCore::new(optional_group(&trace, &[]), &[], &[ZERO], &[], vec![]),
         Err(RouterError::EmptyShapes)
     ));
-    assert!(RoutersCycleCore::new(&trace, &mixed[..1], &[ZERO], &[ZERO; 6], vec![]).is_err());
+    assert!(RoutersCycleCore::new(
+        optional_group(&trace, &mixed[..1]),
+        &mixed[..1],
+        &[ZERO],
+        &[ZERO; 6],
+        vec![]
+    )
+    .is_err());
 }
 
 struct WideColumns {
@@ -1504,7 +1563,7 @@ impl CycleSource for WideColumns {
 }
 
 #[test]
-fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
+fn router_dimension_group_width_and_empty_cycle_point_are_rejected() {
     let width = usize::BITS as usize - 5;
     let trace = ValidatedTrace::new(Arc::new(WideColumns { width })).unwrap();
     let shapes = vec![tiny_shape(
@@ -1518,7 +1577,7 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     assert!(
         matches!(source_lift(&trace, &shapes, &[ZERO; 6]), Err(RouterError::Dimension { variables }) if variables == width)
     );
-    let trace = ValidatedTrace::new(Arc::new(WideColumns { width: 8 })).unwrap();
+    let trace = ValidatedTrace::new(Arc::new(WideColumns { width: 7 })).unwrap();
     let shapes = vec![shape(RouterShapeRequest {
         slots: 14,
         bank: vec![WordSlot::Zero],
@@ -1531,11 +1590,17 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
         route: vec![],
     })];
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &shapes, &[ZERO], &[ZERO; 14], vec![vec![ZERO; 2]]),
-        Err(RouterError::FactorCapacity {
+        RoutersCycleCore::new(
+            optional_group(&trace, &shapes),
+            &shapes,
+            &[ZERO],
+            &[ZERO; 14],
+            vec![vec![ZERO; 2]]
+        ),
+        Err(RouterError::GroupWidth {
             column: 1,
-            bound: 7,
-            width: 8
+            expected: 8,
+            actual: 7
         })
     ));
     let trace = ValidatedTrace::new(Arc::new(TinyTrace {
@@ -1545,8 +1610,73 @@ fn router_dimension_compact_width_and_empty_cycle_point_are_rejected() {
     .unwrap();
     let shapes = vec![tiny_shape(WordSlot::Zero, 6, vec![])];
     assert!(matches!(
-        RoutersCycleCore::new(&trace, &shapes, &[], &[ZERO; 6], vec![vec![ZERO]]),
+        RoutersCycleCore::new(
+            optional_group(&trace, &shapes),
+            &shapes,
+            &[],
+            &[ZERO; 6],
+            vec![vec![ZERO]]
+        ),
         Err(RouterError::Round(RoundError::EmptyPoint))
+    ));
+}
+
+#[test]
+fn cycle_group_column_order_and_cycles_are_checked_against_factors_and_tables() {
+    let source = Arc::new(WideColumns { width: 1 });
+    let shapes = vec![
+        shape(RouterShapeRequest {
+            slots: 8,
+            bank: vec![WordSlot::Zero],
+            factors: vec![
+                SelectorFactor {
+                    column: 1,
+                    slots: vec![6]
+                },
+                SelectorFactor {
+                    column: 1,
+                    slots: vec![7]
+                },
+                SelectorFactor {
+                    column: 0,
+                    slots: vec![]
+                },
+            ],
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![],
+        });
+        2
+    ];
+    assert_eq!(RoutersCycleCore::columns(&shapes), vec![1, 1, 0]);
+    let (_, mut groups) = ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![],
+            optional: vec![vec![0, 1, 1], vec![1, 1, 0]],
+        },
+    )
+    .unwrap();
+    let ordered = groups.optional.pop().unwrap();
+    let reordered = groups.optional.pop().unwrap();
+    assert!(matches!(
+        RoutersCycleCore::new(reordered, &shapes, &[ZERO], &[ZERO; 8], vec![vec![ZERO; 2]; 2]),
+        Err(RouterError::GroupColumns { expected, actual })
+            if expected == vec![1, 1, 0] && actual == vec![0, 1, 1]
+    ));
+    assert!(matches!(
+        RoutersCycleCore::new(
+            ordered,
+            &shapes,
+            &[ZERO],
+            &[ZERO; 8],
+            vec![vec![ZERO; 4]; 2]
+        ),
+        Err(RouterError::TableLength {
+            table: "router source",
+            expected: 2,
+            actual: 4
+        })
     ));
 }
 
@@ -1562,8 +1692,14 @@ fn cycle_members_reject_disagreeing_round_and_final_challenges_without_consuming
     let x = [ZERO; 6];
     let challenges = [F128::from_raw(211), F128::from_raw(227)];
     let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
-    let core =
-        RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, definition.sources.clone()).unwrap();
+    let core = RoutersCycleCore::new(
+        optional_group(&trace, &shapes),
+        &shapes,
+        &r_cycle,
+        &x,
+        definition.sources.clone(),
+    )
+    .unwrap();
     let mut members = core.members();
     let mut claims = definition.claims(&shapes, &x);
     assert!(members[0].finish_rounds(challenges[0]).is_err());
@@ -1788,7 +1924,14 @@ fn cycle_subset_members_match_definitions_with_dropped_and_undriven_handles() {
     let challenges = point(8, &mut rng);
     let definition = Definition::new(source.as_ref(), &shapes, &r_cycle, &x);
     let lifted = source_lift(&trace, &shapes, &x).unwrap();
-    let core = RoutersCycleCore::new(&trace, &shapes, &r_cycle, &x, lifted.source_tables).unwrap();
+    let core = RoutersCycleCore::new(
+        optional_group(&trace, &shapes),
+        &shapes,
+        &r_cycle,
+        &x,
+        lifted.source_tables,
+    )
+    .unwrap();
     let mut members = core.members().into_iter();
     drop(members.next().unwrap());
     let mut first = members.next().unwrap();

@@ -1,7 +1,6 @@
 //! Standalone lazy-column diagnostics; these are not a share of fused products.
 
 use std::hint::black_box;
-use std::sync::Arc;
 use std::time::Duration;
 
 use jolt_field::F128;
@@ -9,13 +8,12 @@ use jolt_kernels::optimized::lazy_ra::{ChunkIndexSource, LazyFoldedRa, LazyRaErr
 use jolt_rv64i_kernels::chunk_product::ChunkProductError;
 use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use jolt_rv64i_kernels::round::eq::eq_table;
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{PrepareRequest, PresentGroup, SourceError, ValidatedTrace};
 use jolt_rv64i_kernels::synth::SynthProfile;
-use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use thiserror::Error;
 
-use super::{run_cases, Case, Clock, RunnerError};
+use super::{run_prepared_cases, Case, Clock, RunnerError};
 
 #[derive(Debug, Error)]
 pub enum GatherError {
@@ -31,74 +29,20 @@ pub enum GatherError {
 
 /// Present row-major digits, validated and compacted outside the gather timer.
 #[derive(Clone)]
-pub struct CompactDigits {
-    digits: Vec<u8>,
-    bits: [usize; 7],
-    d: usize,
-    cycles: usize,
-}
-
-impl CompactDigits {
-    pub fn new<S: CycleSource>(columns: &DigitColumns<S>) -> Result<Self, GatherError> {
-        let cycles = columns.cycles();
-        let d = columns.num_polys();
-        if !(1..=7).contains(&d) {
-            return Err(ChunkProductError::Columns { columns: d }.into());
-        }
-        let bits = std::array::from_fn(|column| {
-            if column < d {
-                columns.source().bits(columns.columns()[column])
-            } else {
-                0
-            }
-        });
-        for (column, &bits) in bits.iter().take(d).enumerate() {
-            if bits > 8 {
-                return Err(ChunkProductError::ColumnWidth { column, bits }.into());
-            }
-        }
-        let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)?;
-        let mut digits = unsafe_allocate_zero_vec(cycles * d);
-        let missing = digits
-            .par_chunks_mut(geometry.chunk_len() * d)
-            .enumerate()
-            .find_map_first(|(chunk, digits)| {
-                let start = chunk * geometry.chunk_len();
-                for (offset, row) in digits.chunks_exact_mut(d).enumerate() {
-                    for (column, digit) in row.iter_mut().enumerate() {
-                        let cycle = start + offset;
-                        match columns.index(column, cycle) {
-                            Some(index) => *digit = index as u8,
-                            None => return Some(ChunkProductError::MissingDigit { column, cycle }),
-                        }
-                    }
-                }
-                None
-            });
-        if let Some(error) = missing {
-            return Err(error.into());
-        }
-        Ok(Self {
-            digits,
-            bits,
-            d,
-            cycles,
-        })
-    }
-}
+pub struct CompactDigits(PresentGroup);
 
 impl ChunkIndexSource for CompactDigits {
     fn num_polys(&self) -> usize {
-        self.d
+        self.0.num_polys()
     }
     fn cycles(&self) -> usize {
-        self.cycles
+        self.0.cycles()
     }
     fn index(&self, column: usize, cycle: usize) -> Option<usize> {
-        Some(usize::from(self.digits[cycle * self.d + column]))
+        self.0.index(column, cycle)
     }
     fn index_bound(&self, column: usize) -> Option<usize> {
-        Some(1 << self.bits[column])
+        self.0.index_bound(column)
     }
 }
 
@@ -166,25 +110,32 @@ pub fn run_gathers(
             threshold: None,
         })
         .collect();
-    let _ = run_cases(
+    let _ = run_prepared_cases(
         profiles,
         &cases,
         |source| {
-            let trace = Arc::new(ValidatedTrace::new(source)?);
-            groups
-                .iter()
-                .map(|(_, group)| {
-                    let columns = DigitColumns::from_validated(Arc::clone(&trace), group.clone())?;
-                    CompactDigits::new(&columns)
-                })
-                .collect::<Result<Vec<_>, GatherError>>()
+            let (_, groups) = ValidatedTrace::prepare(
+                source,
+                PrepareRequest {
+                    present: groups.iter().map(|(_, group)| group.clone()).collect(),
+                    optional: vec![],
+                },
+            )?;
+            Ok::<_, GatherError>(
+                groups
+                    .present
+                    .into_iter()
+                    .map(CompactDigits)
+                    .collect::<Vec<_>>(),
+            )
         },
-        |sources, &index, challenges, times| {
+        |sources, &index| Ok::<_, GatherError>(sources[index].clone()),
+        |_, source, &index, challenges, times| {
             let tables = points(index)
                 .iter()
                 .map(|point| eq_table(point, None))
                 .collect();
-            let sample = measure_lazy_gathers(sources[index].clone(), tables, challenges)?;
+            let sample = measure_lazy_gathers(source, tables, challenges)?;
             times.set(0, sample.duration);
             let _ = black_box(&sample.columns);
             Ok::<_, GatherError>(sample)

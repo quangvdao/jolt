@@ -1,16 +1,80 @@
 //! Views of caller-owned bucket arrays, indexed by position then value.
 //!
-//! A nibble position occupies 16 consecutive elements; a byte position occupies
-//! 256. A set for one selector value and `words` word slots occupies
-//! `words * 16 * 16` nibble elements (or `words * 8 * 256` byte elements).
-//! Several sets are concatenated in selector order, then word-slot order, then
-//! position order. A caller splits its scratch array at those set boundaries
-//! before constructing the views. The column pass uses 32 byte positions,
-//! exactly 8,192 elements. Digit histograms occupy separate contiguous ranges.
-//! Array merging is owned by [`super::pool::ScratchPool::merge`].
+//! # Placement
+//!
+//! A store to one table and a load from another whose addresses agree in
+//! their low 12 bits are treated by the processor as dependent until both
+//! addresses are resolved. A pass that adds one weight to several tables at
+//! the *same value* (the zero bytes of a small word above all) pays for
+//! every such pair, so tables that one word set updates together are placed
+//! off the 4,096-byte stride. [`BucketPlacement`] is the one owner of that
+//! placement: one padding element after each 256 elements (4,096 bytes of
+//! `F128`).
+//!
+//! - Byte positions stride by 257 elements. Two entries agree modulo 4,096
+//!   bytes exactly when `Δposition + Δvalue = 0 (mod 256)`. The column pass
+//!   has 32 positions and the largest bank of byte words 72, so equal values
+//!   never agree within either.
+//! - Nibble words stride by 257 elements, their 16 positions at `16 * p`.
+//!   Two entries agree exactly when `Δword + 16 * Δposition + Δvalue = 0
+//!   (mod 256)`. A set has at most nine words, so `|Δword| <= 8` and
+//!   `|Δposition| <= 15`, and at equal value both differences are zero. Four
+//!   padding elements would not do: `4 * Δword + 16 * Δposition = 0` at
+//!   `(4, -1)`.
+//!
+//! The law covers the positions of the column pass and the words of one
+//! selector's set, and `equal_value_tables_do_not_alias` checks exactly
+//! that. It does not cover two sets that one cycle writes (one per shape),
+//! nor a set against the digit and flag tables that follow it: a nibble
+//! word takes one of the sixteen residue classes of its base modulo 16
+//! elements, so only a layout that assigned those classes across every
+//! shape at once could, and the fold has none. Unequal values can agree in
+//! either form.
+//!
+//! The borrowed views below are dense value domains, excluding padding.
+//! Digit histograms occupy separate contiguous ranges. Array merging is owned
+//! by [`super::pool::ScratchPool::merge`].
 
 use jolt_field::F128;
 use thiserror::Error;
+
+/// Placement of word buckets in scratch, excluding padding from value domains.
+#[derive(Debug, Clone, Copy)]
+pub enum BucketPlacement {
+    Nibble,
+    Byte,
+}
+
+impl BucketPlacement {
+    /// Select the word encoding used by a fold selector value.
+    pub const fn from_bytes(bytes: bool) -> Self {
+        if bytes {
+            Self::Byte
+        } else {
+            Self::Nibble
+        }
+    }
+
+    /// Scratch elements occupied by one word, including block padding.
+    pub const fn word_entries(self) -> usize {
+        match self {
+            Self::Nibble => Self::padded(NibbleBuckets::ELEMENTS_PER_WORD),
+            Self::Byte => Self::padded(ByteBuckets::ELEMENTS_PER_WORD),
+        }
+    }
+
+    /// Offset of a position within a word; byte positions also index whole passes.
+    pub const fn position_offset(self, position: usize) -> usize {
+        match self {
+            Self::Nibble => position * NibbleBuckets::ENTRIES_PER_POSITION,
+            Self::Byte => Self::padded(position * ByteBuckets::ENTRIES_PER_POSITION),
+        }
+    }
+
+    const fn padded(elements: usize) -> usize {
+        elements + elements / (4096 / std::mem::size_of::<F128>())
+    }
+}
 
 /// Invalid bucket geometry or an index outside a checked view.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

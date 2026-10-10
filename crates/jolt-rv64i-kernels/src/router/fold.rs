@@ -2,7 +2,7 @@
 
 use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
 mod readout;
-use crate::packed::buckets::{ByteBuckets, DigitHistogram, NibbleBuckets};
+use crate::packed::buckets::{BucketPlacement, ByteBuckets, DigitHistogram, NibbleBuckets};
 use crate::packed::pool::ScratchPool;
 use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
@@ -48,13 +48,6 @@ pub struct FoldLayout {
     readout_shapes: Vec<ReadoutShape>,
 }
 
-const fn word_entries(bytes: bool) -> usize {
-    if bytes {
-        ByteBuckets::ELEMENTS_PER_WORD
-    } else {
-        NibbleBuckets::ELEMENTS_PER_WORD
-    }
-}
 fn storage_add(total: &mut usize, added: usize) -> Result<(), RouterError> {
     *total = total
         .checked_add(added)
@@ -66,7 +59,9 @@ fn storage_add(total: &mut usize, added: usize) -> Result<(), RouterError> {
 }
 
 const fn word_sets(selectors: usize, words: usize, bytes: usize) -> usize {
-    words * (bytes * word_entries(true) + (selectors - bytes) * word_entries(false))
+    words
+        * (bytes * BucketPlacement::Byte.word_entries()
+            + (selectors - bytes) * BucketPlacement::Nibble.word_entries())
 }
 
 impl FoldLayout {
@@ -176,18 +171,19 @@ impl FoldLayout {
                     &mut entries,
                     words
                         .len()
-                        .checked_mul(word_entries(bytes))
+                        .checked_mul(BucketPlacement::from_bytes(bytes).word_entries())
                         .ok_or(RouterError::Dimension {
                             variables: usize::BITS as usize,
                         })?,
                 )?;
                 storage_add(
                     &mut row_entries,
-                    row_words.len().checked_mul(word_entries(bytes)).ok_or(
-                        RouterError::Dimension {
+                    row_words
+                        .len()
+                        .checked_mul(BucketPlacement::from_bytes(bytes).word_entries())
+                        .ok_or(RouterError::Dimension {
                             variables: usize::BITS as usize,
-                        },
-                    )?,
+                        })?,
                 )?;
             }
             debug_assert_eq!(
@@ -360,13 +356,15 @@ pub struct FoldOutput {
 #[inline]
 fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
     if bytes {
-        let mut buckets = ByteBuckets::new(storage).expect("whole byte positions");
-        for position in buckets.positions_mut() {
-            position[(word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
+        for position in 0..ByteBuckets::POSITIONS_PER_WORD {
+            let base = BucketPlacement::Byte.position_offset(position);
+            storage[base + (word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] +=
+                weight;
             word >>= ByteBuckets::BITS_PER_POSITION;
         }
     } else {
-        let mut buckets = NibbleBuckets::new(storage).expect("whole nibble positions");
+        let mut buckets = NibbleBuckets::new(&mut storage[..NibbleBuckets::ELEMENTS_PER_WORD])
+            .expect("whole nibble positions");
         for position in buckets.positions_mut() {
             position[(word & (NibbleBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
             word >>= NibbleBuckets::BITS_PER_POSITION;
@@ -586,7 +584,7 @@ impl<S: CycleSource> CyclePass<'_, S> {
                         for (index, (shape, sl)) in shapes.iter().zip(&layout.shapes).enumerate() {
                             if let Some(h) = shape.selector(source, cycle, false) {
                                 let bytes = sl.bytes(h);
-                                let size = word_entries(bytes);
+                                let size = BucketPlacement::from_bytes(bytes).word_entries();
                                 let base = sl.bases[h];
                                 for ((_, word), storage) in sl.words.iter().zip(
                                     scratch[base..base + sl.words.len() * size]
@@ -693,7 +691,7 @@ impl<S: CycleSource> RowPass<'_, S> {
                     for &(shape, sl) in &row_shapes {
                         if let Some(h) = shape.selector(source, row, true) {
                             let bytes = sl.bytes(h);
-                            let size = word_entries(bytes);
+                            let size = BucketPlacement::from_bytes(bytes).word_entries();
                             let base = sl.row_bases[h];
                             for (&(_, word), storage) in sl.row_words.iter().zip(
                                 scratch[base..base + sl.row_words.len() * size]
@@ -823,7 +821,7 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
         }
         for h in 0..sl.selectors {
             let bytes = sl.bytes(h);
-            let size = word_entries(bytes);
+            let size = BucketPlacement::from_bytes(bytes).word_entries();
             let total = if rows {
                 word_total(buckets, sl.row_bases[h], bytes)
             } else if let Some(base) = sl.totals {
@@ -880,19 +878,24 @@ fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "checked word storage contains each complete position"
+)]
 fn read_word(buckets: &[F128], base: usize, bytes: bool, output: &mut [F128]) {
     if bytes {
-        for (position, output) in buckets[base..base + ByteBuckets::ELEMENTS_PER_WORD]
-            .as_chunks::<{ ByteBuckets::ENTRIES_PER_POSITION }>()
+        for (position, output) in output
+            .as_chunks_mut::<{ ByteBuckets::BITS_PER_POSITION }>()
             .0
-            .iter()
-            .zip(
-                output
-                    .as_chunks_mut::<{ ByteBuckets::BITS_PER_POSITION }>()
-                    .0,
-            )
+            .iter_mut()
+            .enumerate()
         {
-            *output = ByteBuckets::position_bits(position);
+            let offset = base + BucketPlacement::Byte.position_offset(position);
+            *output = ByteBuckets::position_bits(
+                buckets[offset..offset + ByteBuckets::ENTRIES_PER_POSITION]
+                    .try_into()
+                    .expect("byte position"),
+            );
         }
     } else {
         for (position, output) in buckets[base..base + NibbleBuckets::ELEMENTS_PER_WORD]

@@ -24,6 +24,13 @@
 //! 90% in a 64-word window. Register writes occur on three quarters of cycles.
 //! Uniform digits have no trace words and every column is independent of the
 //! bytecode row; all digits are present and uniform over their bit width.
+//!
+//! | Profile | Value-word distribution | Other fields |
+//! |---|---|---|
+//! | `local`, `all_rows` | Uniform 64-bit words | Locality described above |
+//! | `uniform_digits` | Zero trace words, uniform 64-bit Imm | Independent uniform digits |
+//! | `small_values` | Rs1Value, Rs2Value, RdPreValue, RamReadValue and Imm each choose 0, 8, 16, 32 or 64 bits with equal probability, then a uniform word of that width | Identical to `all_rows` at the same seed |
+//!
 //! Fixed chunks of 4,096 cycles use separate ChaCha20 streams indexed by the
 //! chunk, making generation independent of the rayon pool.
 
@@ -66,6 +73,7 @@ pub enum SynthProfile {
     Local,
     AllRows,
     UniformDigits,
+    SmallValues,
 }
 
 impl SynthProfile {
@@ -74,6 +82,7 @@ impl SynthProfile {
             Self::Local => "local",
             Self::AllRows => "all_rows",
             Self::UniformDigits => "uniform_digits",
+            Self::SmallValues => "small_values",
         }
     }
 }
@@ -143,6 +152,11 @@ impl SyntheticTrace {
             .for_each(|(chunk, rows)| {
                 let mut rng = seeded_rng(seed);
                 rng.set_stream((chunk as u64) | (1_u64 << 63));
+                let mut values_rng = (profile == SynthProfile::SmallValues).then(|| {
+                    let mut rng = seeded_rng(seed);
+                    rng.set_stream((chunk as u64) | (3_u64 << 62));
+                    rng
+                });
                 for (offset, row) in rows.iter_mut().enumerate() {
                     let index = chunk * GENERATION_CHUNK + offset;
                     let class = rng.next_u32() % 100;
@@ -184,13 +198,18 @@ impl SyntheticTrace {
                     row.selectors = [PRESENT | variant, shift, access, key, branch, store];
                     let pc = (index as u64) * 4;
                     row.words = [rng.next_u64(), pc + 4, pc.wrapping_add(rng.next_u64()), pc];
+                    if let Some(rng) = &mut values_rng {
+                        row.words[0] = small_value(rng);
+                    }
                 }
             });
         let mut rows = vec![[0; 4]; count];
         let mut cycles = vec![Cycle::default(); count];
         let visited = match profile {
             SynthProfile::Local => (bytecode_rows / 16).max(1),
-            SynthProfile::AllRows | SynthProfile::UniformDigits => bytecode_rows,
+            SynthProfile::AllRows | SynthProfile::UniformDigits | SynthProfile::SmallValues => {
+                bytecode_rows
+            }
         };
         let row_offset = seed as usize & (bytecode_rows - 1);
         cycles
@@ -200,6 +219,11 @@ impl SyntheticTrace {
             .for_each(|(chunk, (cycles, rows))| {
                 let mut rng = seeded_rng(seed);
                 rng.set_stream(chunk as u64);
+                let mut values_rng = (profile == SynthProfile::SmallValues).then(|| {
+                    let mut rng = seeded_rng(seed);
+                    rng.set_stream((chunk as u64) | (1_u64 << 62));
+                    rng
+                });
                 for (offset, (cycle, row)) in cycles.iter_mut().zip(rows).enumerate() {
                     let j = chunk * GENERATION_CHUNK + offset;
                     let k = (row_offset + j % visited) & (bytecode_rows - 1);
@@ -234,6 +258,11 @@ impl SyntheticTrace {
                         cycle.digits[20] = if rng.next_u32() & 1 == 0 { 0 } else { PRESENT };
                         for word in &mut cycle.words[..4] {
                             *word = rng.next_u64();
+                        }
+                        if let Some(rng) = &mut values_rng {
+                            for word in &mut cycle.words[..4] {
+                                *word = small_value(rng);
+                            }
                         }
                         cycle.words[4] = bytecode
                             [(row_offset + (j + 1) % visited) & (bytecode_rows - 1)]
@@ -411,4 +440,16 @@ fn seeded_rng(seed: u64) -> ChaCha20Rng {
     let mut bytes = [0; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
     ChaCha20Rng::from_seed(bytes)
+}
+
+fn small_value(rng: &mut ChaCha20Rng) -> u64 {
+    let widths = [0, 8, 16, 32, 64];
+    let choice = loop {
+        let choice = rng.next_u32();
+        if choice != u32::MAX {
+            break choice as usize % widths.len();
+        }
+    };
+    let width = widths[choice];
+    rng.next_u64() & u64::MAX.checked_shr(64 - width).unwrap_or(0)
 }

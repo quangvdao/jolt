@@ -435,15 +435,42 @@ pub fn seeded_challenges() -> [F128; 256] {
 /// Prepares once per source/size and executes interleaved cases on warmed pools.
 /// The returned measured state stays alive until allocation counters stop.
 /// `prepare` and disposal of its result are outside all sample intervals.
-#[expect(
-    clippy::print_stdout,
-    reason = "source preparation is a separate benchmark record"
-)]
 pub fn run_cases<P, R, E, V>(
     profiles: &[SynthProfile],
     cases: &[Case<V>],
     prepare: impl Fn(Arc<SyntheticTrace>) -> Result<P, E> + Sync,
     measure: impl Fn(&P, &V, &[F128], &mut PhaseTimes) -> Result<R, E> + Sync,
+    inspect: impl Fn(&R, &mut PhaseTimes) + Sync,
+    report: impl Fn(&Record, &P, &V) + Sync,
+) -> Result<Vec<Record>, RunnerError>
+where
+    P: Send + Sync,
+    V: Sync,
+    E: StdError,
+{
+    run_prepared_cases(
+        profiles,
+        cases,
+        prepare,
+        |_, _| Ok(()),
+        |fixture, (), variant, point, times| measure(fixture, variant, point, times),
+        inspect,
+        report,
+    )
+}
+
+/// Refreshes consuming inputs as fixture work before each allocation interval.
+/// Their preparation has its own record; the four core phases exclude it.
+#[expect(
+    clippy::print_stdout,
+    reason = "preparation records are benchmark output"
+)]
+pub fn run_prepared_cases<P, Q, R, E, V>(
+    profiles: &[SynthProfile],
+    cases: &[Case<V>],
+    prepare: impl Fn(Arc<SyntheticTrace>) -> Result<P, E> + Sync,
+    prepare_sample: impl Fn(&P, &V) -> Result<Q, E> + Sync,
+    measure: impl Fn(&P, Q, &V, &[F128], &mut PhaseTimes) -> Result<R, E> + Sync,
     inspect: impl Fn(&R, &mut PhaseTimes) + Sync,
     report: impl Fn(&Record, &P, &V) + Sync,
 ) -> Result<Vec<Record>, RunnerError>
@@ -481,6 +508,10 @@ where
                     .iter()
                     .map(|_| Vec::with_capacity(options.samples))
                     .collect();
+                let mut preparations: Vec<Vec<Sample>> = cases
+                    .iter()
+                    .map(|_| Vec::with_capacity(options.samples))
+                    .collect();
                 collect_samples(
                     cases.len(),
                     options.samples,
@@ -490,27 +521,55 @@ where
                         };
                         pool.install(|| {
                             let measurement = AllocationMeasurement::begin();
-                            let state =
-                                measure(&prepared.0, &cases[index].variant, &point, &mut times)
-                                    .map_err(|error| RunnerError::Core {
-                                        message: error.to_string(),
-                                    })?;
+                            let clock = Clock::start();
+                            let input = prepare_sample(&prepared.0, &cases[index].variant)
+                                .map_err(|error| RunnerError::Core {
+                                    message: error.to_string(),
+                                })?;
+                            let preparation_ns = clock.elapsed().as_nanos() as f64;
+                            let preparation_allocation = measurement.finish();
+                            let measurement = AllocationMeasurement::begin();
+                            let state = measure(
+                                &prepared.0,
+                                input,
+                                &cases[index].variant,
+                                &point,
+                                &mut times,
+                            )
+                            .map_err(|error| RunnerError::Core {
+                                message: error.to_string(),
+                            })?;
                             let allocation = measurement.finish();
                             inspect(&state, &mut times);
                             drop(state);
-                            Ok(Sample {
-                                times: times
-                                    .times
-                                    .into_iter()
-                                    .map(|time| time.as_nanos() as f64)
-                                    .collect(),
-                                allocation,
-                            })
+                            Ok((
+                                Sample {
+                                    times: times
+                                        .times
+                                        .into_iter()
+                                        .map(|time| time.as_nanos() as f64)
+                                        .collect(),
+                                    allocation,
+                                },
+                                Sample {
+                                    times: vec![preparation_ns],
+                                    allocation: preparation_allocation,
+                                },
+                            ))
                         })
                     },
-                    |index, sample| collected[index].push(sample),
+                    |index, (sample, preparation)| {
+                        collected[index].push(sample);
+                        preparations[index].push(preparation);
+                    },
                 )?;
-                for (case, samples) in cases.iter().zip(collected) {
+                for ((case, samples), preparation) in cases.iter().zip(collected).zip(preparations)
+                {
+                    let summary = Sample::phase(&preparation, 0, cycles as f64);
+                    let (peak_bytes, final_bytes, allocs) = Sample::allocations(&preparation);
+                    if final_bytes != 0 || allocs != 0 {
+                        println!("{}_preparation/{}/{log_t}/{threads} prepare_ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs} loaded_machine=true", case.name, profile.name(), summary.median, summary.min, summary.max, options.samples);
+                    }
                     let divisor = cycles as f64;
                     let phases = (0..case.phases.len())
                         .map(|phase| Sample::phase(&samples, phase, divisor))
@@ -604,11 +663,14 @@ pub struct BatchRun {
 }
 
 /// Four-phase entry for real batches, including source-scoped preparation.
-pub fn run_batch<P, C, O, E>(
+pub fn run_batch<P, Q, C, O, E>(
     profiles: &[SynthProfile],
     case: Case<()>,
-    prepare: impl Fn(Arc<SyntheticTrace>) -> Result<P, E> + Sync,
-    construct: impl Fn(&P, &mut PhaseTimes) -> Result<C, E> + Sync,
+    preparation: (
+        impl Fn(Arc<SyntheticTrace>) -> Result<P, E> + Sync,
+        impl Fn(&P) -> Result<Q, E> + Sync,
+    ),
+    construct: impl Fn(&P, Q, &mut PhaseTimes) -> Result<C, E> + Sync,
     prove: impl Fn(&mut C, &mut PhaseTimes) -> Result<BatchRun, E> + Sync,
     extract: impl Fn(&C, &[F128], &mut PhaseTimes) -> Result<O, E> + Sync,
     report: impl Fn(&Record, &P) + Sync,
@@ -617,13 +679,15 @@ where
     P: Send + Sync,
     E: StdError,
 {
-    let _ = run_cases(
+    let (prepare, prepare_sample) = preparation;
+    let _ = run_prepared_cases(
         profiles,
         &[case],
         prepare,
-        |fixture, (), _, times| {
+        |fixture, ()| prepare_sample(fixture),
+        |fixture, input, (), _, times| {
             let clock = Clock::start();
-            let mut core = construct(fixture, times)?;
+            let mut core = construct(fixture, input, times)?;
             times.set(0, clock.elapsed());
             let batch = prove(&mut core, times)?;
             times.set(1, batch.rounds);
@@ -926,13 +990,22 @@ where
     let pools = warmed_pools(&options.threads)?;
     for (threads, pool) in &pools {
         for &log_t in &options.log_t {
+            let selected = |name: &str| {
+                options.units.is_empty()
+                    || options.units.iter().any(|unit| {
+                        unit == name || (unit == "validate" && name.starts_with("validate_"))
+                    })
+            };
+            if !options.units.is_empty() && !cases.iter().any(|(name, _)| selected(name)) {
+                continue;
+            }
             let source = pool
                 .install(|| prepare(log_t))
                 .map_err(|error| RunnerError::Core {
                     message: error.to_string(),
                 })?;
             for &(name, requirement) in cases {
-                if !options.units.is_empty() && !options.units.iter().any(|unit| unit == name) {
+                if !selected(name) {
                     continue;
                 }
                 let mut samples = Vec::with_capacity(options.samples);

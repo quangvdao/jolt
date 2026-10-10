@@ -209,7 +209,7 @@ macro_rules! batch_geometry {
 
             /// Reads the symbolic members in generated order from dimensions alone.
             /// Allocates only the member list; invalid placement windows return a typed verifier error.
-            pub fn geometry_for(log_T: usize, layout: &::jolt_rv64i_arith::Layout)
+            pub(crate) fn geometry_for(log_T: usize, layout: &::jolt_rv64i_arith::Layout)
                 -> Result<::jolt_sumcheck::BatchPrelude<F>, ::jolt_verifier::VerifierError> {
                 use ::jolt_claims::SymbolicSumcheck as _;
                 use $crate::proof::DimensionedRelation as _;

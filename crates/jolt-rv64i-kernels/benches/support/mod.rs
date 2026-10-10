@@ -628,10 +628,12 @@ where
                     println!("machinery/{name}/{log_t}/{threads}  {:.6}", pass.median);
                 }
                 if !plans.is_empty() {
-                    println!(
-                        "machinery/{name}_plan/{log_t}/{threads} construct_ns={:.6}",
-                        Summary::new(plans).median
-                    );
+                    let construction_ns = Summary::new(plans).median;
+                    if let Some((plan_bytes, _)) = memory {
+                        println!("machinery/{name}_plan/{log_t}/{threads} construct_ns={construction_ns:.6} plan_bytes={plan_bytes}");
+                    } else {
+                        println!("machinery/{name}_plan/{log_t}/{threads} construct_ns={construction_ns:.6}");
+                    }
                 }
                 println!("machinery/{name}_construction/{log_t}/{threads} construct_ns={:.6} peak_bytes={peak_bytes} final_bytes={final_bytes} allocs={allocs}", construction.median);
                 println!("machinery/{name}_pass/{log_t}/{threads} pass_min_ns={:.6} pass_max_ns={:.6} samples={} peak_bytes={pass_peak_bytes} final_bytes={pass_final_bytes} allocs={pass_allocs}", pass.min, pass.max, options.samples);

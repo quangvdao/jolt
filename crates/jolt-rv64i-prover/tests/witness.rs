@@ -20,9 +20,11 @@ use jolt_rv64i_prover::{
     commitment::transparent::TransparentBits,
     error::{FactField, Rv64iProverError},
     plane::Rv64iWitness,
-    reference::views::{base_word, ram_val_final, BaseWord},
+    reference::views::{base_word_with_lift, ram_val_final_with_lift, BaseWord},
 };
-use jolt_rv64i_verifier::{preprocessing::VerifierPreprocessing, statement::CheckedInputs};
+use jolt_rv64i_verifier::{
+    points::WordLift, preprocessing::VerifierPreprocessing, statement::CheckedInputs,
+};
 use std::sync::Arc;
 use support::replay::State;
 
@@ -92,36 +94,14 @@ fn facts_match_the_arithmetisation_replay_and_keep_nonaccess_ram_reads() {
         (0, 0, 0)
     );
     assert_eq!(rebuilt.words[0].ram_read_value, 0x3412);
-    let word = base_word(&rebuilt, BaseWord::RamReadValue, &[F128::zero(); 6]).unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::zero());
-    let word = base_word(
-        &rebuilt,
-        BaseWord::RamReadValue,
-        &[
-            F128::zero(),
-            F128::one(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::zero());
-    let word = base_word(
-        &rebuilt,
-        BaseWord::RamReadValue,
-        &[
-            F128::one(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-            F128::zero(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(word.evaluate(&[F128::zero(); 6]), F128::one());
+    let read_bit = |point: [F128; 6]| {
+        let lift = WordLift::new(&point).unwrap();
+        base_word_with_lift(&rebuilt, BaseWord::RamReadValue, &lift).evaluate(&[F128::zero(); 6])
+    };
+    let (zero, one) = (F128::zero(), F128::one());
+    assert_eq!(read_bit([zero; 6]), zero);
+    assert_eq!(read_bit([zero, one, zero, zero, zero, zero]), zero);
+    assert_eq!(read_bit([one, zero, zero, zero, zero, zero]), one);
 }
 
 #[test]
@@ -297,7 +277,7 @@ fn output_check_names_the_first_public_word_and_rejects_layout_mismatch() {
         })
     ));
     assert!(matches!(
-        ram_val_final(&wrong_ram, &[F128::zero(); 6]),
+        ram_val_final_with_lift(&wrong_ram, &WordLift::new(&[F128::zero(); 6]).unwrap()),
         Err(Rv64iProverError::FinalRamLength {
             expected: 32,
             found: 31

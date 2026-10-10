@@ -97,15 +97,6 @@ pub fn chunk_in_field<F: JoltField>(
     }
     Ok(Polynomial::new(values))
 }
-/// Extends a replayed word at a six-coordinate low-variable-first bit point over cycle variables.
-/// Returns a point-dimension error unless the bit point has six coordinates.
-pub fn base_word(
-    witness: &Rv64iWitness,
-    word: BaseWord,
-    point: &[F128],
-) -> Result<Polynomial<F128>, Rv64iProverError> {
-    Ok(base_word_with_lift(witness, word, &WordLift::new(point)?))
-}
 /// Extends a replayed word using weights prepared once for its bit point.
 pub fn base_word_with_lift(
     witness: &Rv64iWitness,
@@ -134,15 +125,6 @@ fn fetched(witness: &Rv64iWitness, cycle: usize) -> Result<&BytecodeRow, Rv64iPr
         .and_then(|i| witness.bytecode.rows().get(i))
         .filter(|r| r.variant.is_some())
         .ok_or(Rv64iProverError::InvalidBytecode { cycle, index })
-}
-/// Extends a fetched row's 64-bit column at a six-coordinate low-variable-first bit point over cycles.
-/// The caller selects one of its four word columns; invalid fetches and bit dimensions return errors.
-pub fn bytecode_word(
-    witness: &Rv64iWitness,
-    column: BytecodeColumn,
-    point: &[F128],
-) -> Result<Polynomial<F128>, Rv64iProverError> {
-    bytecode_word_with_lift(witness, column, &WordLift::new(point)?)
 }
 /// Extends a fetched word using prepared bit weights; invalid fetches return an error.
 pub fn bytecode_word_with_lift(
@@ -388,14 +370,6 @@ pub fn ram_val_with_lift(
         }
     }
     Ok(Polynomial::new(values))
-}
-/// Extends retained final RAM over low-variable-first address variables at a fixed bit point.
-/// Returns an error for a final-RAM length inconsistent with the layout or a bit point without six coordinates.
-pub fn ram_val_final(
-    witness: &Rv64iWitness,
-    point: &[F128],
-) -> Result<Polynomial<F128>, Rv64iProverError> {
-    ram_val_final_with_lift(witness, &WordLift::new(point)?)
 }
 /// Extends retained final RAM using prepared bit weights; inconsistent final-RAM lengths return an error.
 pub fn ram_val_final_with_lift(

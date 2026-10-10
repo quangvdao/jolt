@@ -376,9 +376,6 @@ impl RouteTensors {
         Ok(sum)
     }
 }
-pub(crate) fn equality_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    points::equality_table(point)
-}
 struct Builder<'a> {
     layout: &'a Layout,
     entries: [BTreeSet<RouteEntry>; 5],

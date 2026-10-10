@@ -70,13 +70,15 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
             actual: y.len(),
         });
     }
-    let mut result = F::zero();
-    let mut prefix = F::one();
-    for (&left, &right) in x.iter().zip(y).rev() {
-        result += prefix * (F::one() + left) * right;
-        prefix *= F::one() + left + right;
-    }
-    Ok(result)
+    Ok(x.iter().zip(y).fold(F::zero(), |less, (x, y)| {
+        if y.is_zero() {
+            (F::one() + *x) * less
+        } else if *y == F::one() {
+            F::one() + *x + *x * less
+        } else {
+            (F::one() + *x) * *y + (F::one() + *x + *y) * less
+        }
+    }))
 }
 
 pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
@@ -89,10 +91,13 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
-/// Reuses the 64 bit-equality weights for addition-only word evaluations.
+/// A word lift against one reusable 64-entry bit equality table.
+/// Evaluating a word sums the weights of its set bits without multiplying.
+#[derive(Clone)]
 pub struct WordLift<F: JoltField> {
-    weights: Vec<F>,
+    weights: [F; 64],
 }
+
 impl<F: JoltField> WordLift<F> {
     pub fn new(point: &[F]) -> Result<Self, PointsError> {
         if point.len() != 6 {
@@ -101,10 +106,16 @@ impl<F: JoltField> WordLift<F> {
                 actual: point.len(),
             });
         }
-        Ok(Self {
-            weights: eq_table(point)?,
-        })
+        let weights =
+            eq_table(point)?
+                .try_into()
+                .map_err(|values: Vec<F>| PointsError::Dimension {
+                    expected: 64,
+                    actual: values.len(),
+                })?;
+        Ok(Self { weights })
     }
+
     pub fn evaluate(&self, word: u64) -> F {
         self.weights
             .iter()
@@ -114,6 +125,7 @@ impl<F: JoltField> WordLift<F> {
             .sum()
     }
 }
+
 pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
     Ok(WordLift::new(point)?.evaluate(word))
 }
@@ -269,10 +281,9 @@ mod tests {
         let point = seeded(&mut seed, 6);
         let word = 0xf023_51a5_4802_7feb;
         let table = (0..64).map(|i| F128::from_u64((word >> i) & 1)).collect();
-        assert_eq!(
-            lift(word, &point).unwrap(),
-            Polynomial::new(table).evaluate(&to_high_to_low(&point))
-        );
+        let expected = Polynomial::new(table).evaluate(&to_high_to_low(&point));
+        assert_eq!(lift(word, &point).unwrap(), expected);
+        assert_eq!(WordLift::new(&point).unwrap().evaluate(word), expected);
     }
 
     #[test]

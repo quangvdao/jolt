@@ -55,5 +55,9 @@ name = "routers"
 required-features = ["test-utils"]
 
 [[test]]
+name = "read_checking"
+required-features = ["test-utils"]
+
+[[test]]
 name = "val_evaluation"
 required-features = ["test-utils"]

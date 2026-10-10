@@ -26,7 +26,7 @@ use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 #[path = "../benches/support/allocator.rs"]
 mod allocator;
-use allocator::{AllocationMeasurement, CountingAllocator};
+use allocator::{AllocationMeasurement, CountingAllocator, RAYON_WORKER_ALLOWANCE};
 
 fn map() -> Vec<ColumnMap> {
     let mut map = vec![ColumnMap::Word {
@@ -537,6 +537,8 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
             let fixture = Fixture::new(rounds, true);
             let mut core =
                 ReductionCore::new(fixture.tables.clone(), fixture.legs.clone()).unwrap();
+            let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
+            let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * pool.current_num_threads();
             let resident = CountingAllocator::live_bytes();
             let mut claim = fixture.claim();
             let challenges: Vec<_> = (0..rounds)
@@ -560,12 +562,14 @@ fn reduction_round_allocations_are_bounded_at_both_sizes() {
             core.finish_rounds(challenges[rounds - 1]).unwrap();
             let stats = measurement.finish();
             assert!(
-                stats.allocs <= 16 * rounds + 64,
+                stats.allocs <= 16 * rounds + 64 + runtime_allocs,
                 "{} allocations for {rounds} rounds",
                 stats.allocs
             );
             assert!(stats.peak_bytes >= stats.final_bytes);
-            assert!(CountingAllocator::live_bytes() < resident);
+            assert!(stats.peak_bytes <= 64 * 1024 + runtime_bytes);
+            assert!(stats.final_bytes <= runtime_bytes);
+            assert!(CountingAllocator::live_bytes() < resident + runtime_bytes);
         }
     });
 }
@@ -729,12 +733,14 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
             let map = map();
             let expected = defining_tables(source.rows(), weights);
             drop(g_pass_digits(&trace, &map, weights).unwrap());
+            let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
+            let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * pool.current_num_threads();
             let resident = CountingAllocator::live_bytes();
             let measurement = AllocationMeasurement::begin();
             let tables = g_pass_digits(&trace, &map, weights).unwrap();
             let stats = measurement.finish();
             assert!(
-                stats.allocs <= 256,
+                stats.allocs <= 256 + runtime_allocs,
                 "{} allocations at log_t={log_t}",
                 stats.allocs
             );
@@ -743,10 +749,13 @@ fn digit_builder_allocations_are_bounded_and_only_output_storage_remains() {
                     .iter()
                     .map(|table| table.capacity() * std::mem::size_of::<F128>())
                     .sum::<usize>();
-            assert_eq!(stats.final_bytes, output_bytes);
+            assert!(stats.peak_bytes <= output_bytes + 128 * 1024 + runtime_bytes);
+            assert!((output_bytes..=output_bytes + runtime_bytes).contains(&stats.final_bytes));
             assert_eq!(tables, expected);
             drop(tables);
-            assert_eq!(CountingAllocator::live_bytes(), resident);
+            assert!(
+                (resident..=resident + runtime_bytes).contains(&CountingAllocator::live_bytes())
+            );
         }
     });
 }

@@ -727,6 +727,79 @@ fn tail_allocations_and_scratch_are_bounded_and_passes_release_storage() {
 }
 
 #[test]
+fn tail_pass_allocation_counts_do_not_grow_with_chunk_count() {
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let _ = pool.broadcast(|_| {
+        rayon::join(
+            || {
+                let _ = rayon::yield_now();
+            },
+            || (),
+        )
+    });
+    let sizes = [14, 18];
+    let chunks = sizes.map(|log_t| CycleChunks::new(log_t, 0).unwrap().ranges().len());
+    assert!(chunks[1] >= 4 * chunks[0]);
+    let base = pool.install(|| Fixture::new(8));
+    let map = SyntheticTrace::column_map();
+    let traces = sizes.map(|log_t| {
+        pool.install(|| {
+            let source =
+                Arc::new(SyntheticTrace::new(SynthProfile::Local, log_t, 256, 0x7a11).unwrap());
+            ValidatedTrace::new(source).unwrap()
+        })
+    });
+    let terms = sizes.map(|log_t| {
+        let mut terms = base.terms.clone();
+        for term in terms.iter_mut().flatten() {
+            let point = match term {
+                ChunkWeightTerm::Eq { point, .. } | ChunkWeightTerm::Next { point, .. } => point,
+            };
+            point.resize(log_t, point[0]);
+        }
+        terms
+    });
+    let points = sizes.map(|log_t| vec![F128::from_raw(79); log_t]);
+    let names = [
+        "g_pass_digits",
+        "combined_weight_five",
+        "combined_weight_two",
+        "column_pass",
+    ];
+    // Fixed map/support/term counts and one scratch loan give size-independent
+    // kernel counts. Only Rayon's named per-worker bookkeeping may add calls.
+    let fixed_growth = RAYON_WORKER_ALLOWANCE.allocs * pool.current_num_threads();
+    for sample in 0..8 {
+        let mut counts = [[0; 4]; 2];
+        let order = if sample % 2 == 0 { [0, 1] } else { [1, 0] };
+        for index in order {
+            let measurement = AllocationMeasurement::begin();
+            let tables =
+                pool.install(|| g_pass_digits(&traces[index], &map, &base.weights).unwrap());
+            counts[index][0] = measurement.finish().allocs;
+            drop(tables);
+            for member in 0..2 {
+                let measurement = AllocationMeasurement::begin();
+                let weight =
+                    pool.install(|| combined_weight(sizes[index], &terms[index][member]).unwrap());
+                counts[index][member + 1] = measurement.finish().allocs;
+                drop(weight);
+            }
+            let measurement = AllocationMeasurement::begin();
+            let columns = pool
+                .install(|| column_pass(traces[index].source().rows(), &points[index]).unwrap());
+            counts[index][3] = measurement.finish().allocs;
+            let _ = std::hint::black_box(columns);
+        }
+        for (pass, name) in names.iter().enumerate() {
+            assert!(counts[1][pass] <= counts[0][pass] + fixed_growth,
+                "{name}: {} to {} allocations for {} to {} chunks; fixed growth limit {fixed_growth}",
+                counts[0][pass], counts[1][pass], chunks[0], chunks[1]);
+        }
+    }
+}
+
+#[test]
 fn tail_first_multichunk_pair_round_matches_the_oracle_on_each_pool() {
     acceptance(14, &[1, 12], false, &[false]);
 }

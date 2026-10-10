@@ -7,7 +7,7 @@ use jolt_program::{
         RegisterState, RegisterWrite, SourceTraceError, SourceTraceRow, TraceError, TraceInputs,
         TraceOutput,
     },
-    image::decode_elf,
+    image::{decode_elf, decode_elf_with_mode, DecodeMode},
     ProgramError,
 };
 use jolt_riscv::{SourceInstructionKind as Kind, RV64I};
@@ -107,11 +107,19 @@ struct TextSections {
     second_address: u64,
 }
 
+struct ExtraSection {
+    section_type: u32,
+    address: u64,
+    bytes: Vec<u8>,
+}
+
 struct Fixture {
     words: Vec<u32>,
     expected: Vec<SourceTraceRow>,
     inputs: TraceInputs,
     text_sections: Option<TextSections>,
+    extra_section: Option<ExtraSection>,
+    decode_mode: DecodeMode,
 }
 
 impl Fixture {
@@ -120,6 +128,8 @@ impl Fixture {
             words: Vec::new(),
             expected: Vec::new(),
             text_sections: None,
+            extra_section: None,
+            decode_mode: DecodeMode::Strict,
             inputs: TraceInputs::new(
                 Vec::new(),
                 Vec::new(),
@@ -247,6 +257,21 @@ impl Fixture {
             elf[60..62].copy_from_slice(&(count + 1).to_le_bytes());
             elf.extend_from_slice(&second_header);
         }
+        if let Some(section) = &self.extra_section {
+            // ELF64 SHF_ALLOC = 2. The extra header is appended to the section
+            // table, followed by its file-backed bytes.
+            let mut header = [0u8; 64];
+            header[4..8].copy_from_slice(&section.section_type.to_le_bytes());
+            header[8..16].copy_from_slice(&2u64.to_le_bytes());
+            header[16..24].copy_from_slice(&section.address.to_le_bytes());
+            header[24..32].copy_from_slice(&(elf.len() as u64 + 64).to_le_bytes());
+            header[32..40].copy_from_slice(&(section.bytes.len() as u64).to_le_bytes());
+            header[48..56].copy_from_slice(&1u64.to_le_bytes());
+            let count = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+            elf[60..62].copy_from_slice(&(count + 1).to_le_bytes());
+            elf.extend_from_slice(&header);
+            elf.extend_from_slice(&section.bytes);
+        }
         JoltProgram::from_elf_bytes_with_profile(elf, RV64I)
     }
 
@@ -260,28 +285,36 @@ impl Fixture {
     ) -> TraceOutput<OwnedTrace<SourceTraceRow>> {
         let program = self.program();
         let output = SourceTracerBackend::with_row_capacity(self.expected.len())
+            .with_decode_mode(self.decode_mode)
             .trace(&program, self.inputs.clone())
             .unwrap();
         assert_eq!(output.trace.rows(), self.expected);
-        check_replay(&program, &self.inputs, &output);
+        check_replay_with_mode(&program, &self.inputs, &output, self.decode_mode);
         if !output.device.panic {
             check_lockstep_with_reference_panic(
                 &program,
                 &self.inputs,
                 output.trace.rows(),
                 expected_reference_panic,
+                self.decode_mode,
             );
         }
         output
     }
 
-    fn error(self, expected: SourceTraceError) {
+    fn backend_error(&self, expected: SourceTraceError) {
         let program = self.program();
         let error = SourceTracerBackend::default()
+            .with_decode_mode(self.decode_mode)
             .trace(&program, self.inputs.clone())
             .unwrap_err();
         assert!(matches!(error, TraceError::SourceTrace(actual) if actual == expected));
-        let mut execution = SourceExecution::new(&program, self.inputs).unwrap();
+    }
+
+    fn error(self, expected: SourceTraceError) {
+        self.backend_error(expected);
+        let program = self.program();
+        let mut execution = SourceExecution::new(&program, self.inputs, self.decode_mode).unwrap();
         let mut rows = Vec::with_capacity(self.words.len());
         for _ in 0..=self.words.len() {
             let cpu = execution.emulator.get_cpu();
@@ -321,8 +354,20 @@ fn check_replay(
     inputs: &TraceInputs,
     output: &TraceOutput<OwnedTrace<SourceTraceRow>>,
 ) {
-    let image = decode_elf(program.elf_bytes(), RV64I).unwrap();
-    let mut memory: BTreeMap<u64, u8> = image.memory_init.into_iter().collect();
+    check_replay_with_mode(program, inputs, output, DecodeMode::Strict);
+}
+
+fn check_replay_with_mode(
+    program: &JoltProgram,
+    inputs: &TraceInputs,
+    output: &TraceOutput<OwnedTrace<SourceTraceRow>>,
+    mode: DecodeMode,
+) {
+    let image = decode_elf_with_mode(program.elf_bytes(), RV64I, mode).unwrap();
+    let mut memory = BTreeMap::new();
+    for (address, byte) in image.memory_init {
+        memory.insert(address, byte);
+    }
     let layout = MemoryLayout::new(&inputs.memory_config);
     for (start, bytes) in [
         (layout.input_start, &inputs.inputs),
@@ -391,7 +436,7 @@ fn check_replay(
 }
 
 fn check_lockstep(program: &JoltProgram, inputs: &TraceInputs, expected: &[SourceTraceRow]) {
-    check_lockstep_with_reference_panic(program, inputs, expected, false);
+    check_lockstep_with_reference_panic(program, inputs, expected, false, DecodeMode::Strict);
 }
 
 fn check_lockstep_with_reference_panic(
@@ -399,8 +444,9 @@ fn check_lockstep_with_reference_panic(
     inputs: &TraceInputs,
     expected: &[SourceTraceRow],
     expected_reference_panic: bool,
+    mode: DecodeMode,
 ) {
-    let mut source = SourceExecution::new(program, inputs.clone()).unwrap();
+    let mut source = SourceExecution::new(program, inputs.clone(), mode).unwrap();
     let mut reference = create_emulator(
         program.elf_bytes(),
         None,
@@ -1529,6 +1575,349 @@ fn text_span() {
         InstructionTable::new(&instructions),
         Err(SourceTraceError::ProgramTextTooLarge { span: 0x1000_0004 })
     ));
+}
+
+#[test]
+fn data_words_inside_executable_sections() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![
+        0x0000_0297,
+        0x0102_b303,
+        0x0000_0013,
+        0x00c0_006f,
+        0x8000_0018,
+        0,
+        HALT,
+    ];
+    f.expected = vec![
+        SourceTraceRow::new(
+            0,
+            ENTRY,
+            ENTRY + 4,
+            registers(None, None, Some((5, 0, ENTRY))),
+            RamAccess::NoOp,
+        ),
+        SourceTraceRow::new(
+            1,
+            ENTRY + 4,
+            ENTRY + 8,
+            registers(Some((5, ENTRY)), None, Some((6, 0, ENTRY + 24))),
+            read(ENTRY + 16, ENTRY + 24),
+        ),
+        SourceTraceRow::new(
+            2,
+            ENTRY + 8,
+            ENTRY + 12,
+            registers(Some((0, 0)), None, Some((0, 0, 0))),
+            RamAccess::NoOp,
+        ),
+        SourceTraceRow::new(
+            3,
+            ENTRY + 12,
+            ENTRY + 24,
+            registers(None, None, Some((0, 0, 0))),
+            RamAccess::NoOp,
+        ),
+        SourceTraceRow::new(
+            4,
+            ENTRY + 24,
+            ENTRY + 24,
+            registers(None, None, Some((0, 0, 0))),
+            RamAccess::NoOp,
+        ),
+    ];
+    f.complete();
+}
+
+#[test]
+fn fetching_a_data_hole_fails() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![
+        0x0000_0297,
+        0x0102_b303,
+        0x0000_0013,
+        0x0000_0013,
+        0x8000_0018,
+        0,
+        HALT,
+    ];
+    f.error(SourceTraceError::PcOutsideProgram { pc: ENTRY + 16 });
+}
+
+#[test]
+fn default_decode_mode_rejects_data_in_executable_sections() {
+    let mut f = Fixture::new();
+    f.words = vec![
+        0x0000_0297,
+        0x0102_b303,
+        0x0000_0013,
+        0x00c0_006f,
+        0x8000_0018,
+        0,
+        HALT,
+    ];
+    let program = f.program();
+    for mut backend in [
+        SourceTracerBackend::default(),
+        SourceTracerBackend::with_row_capacity(5),
+    ] {
+        assert!(matches!(
+            backend.trace(&program, f.inputs.clone()),
+            Err(TraceError::Program(ProgramError::IllegalCompressedInstruction {
+                address
+            })) if address == ENTRY + 16
+        ));
+    }
+}
+
+#[test]
+fn an_image_containing_only_a_data_pointer_has_no_entry_instruction() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![0x8000_0010, 0];
+    f.backend_error(SourceTraceError::PcOutsideProgram { pc: 0x8000_0000 });
+}
+
+#[test]
+fn stores_to_data_holes_change_their_memory_bytes() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![
+        0x0000_0297,
+        0x0052_b823,
+        0x0102_b303,
+        0x00c0_006f,
+        0x8000_0018,
+        0,
+        0x0000_006f,
+    ];
+    f.expected = vec![
+        SourceTraceRow::new(
+            0,
+            0x8000_0000,
+            0x8000_0004,
+            registers(None, None, Some((5, 0, 0x8000_0000))),
+            RamAccess::NoOp,
+        ),
+        SourceTraceRow::new(
+            1,
+            0x8000_0004,
+            0x8000_0008,
+            registers(Some((5, 0x8000_0000)), Some((5, 0x8000_0000)), None),
+            write(0x8000_0010, 0x8000_0018, 0x8000_0000),
+        ),
+        SourceTraceRow::new(
+            2,
+            0x8000_0008,
+            0x8000_000c,
+            registers(Some((5, 0x8000_0000)), None, Some((6, 0, 0x8000_0000))),
+            read(0x8000_0010, 0x8000_0000),
+        ),
+        SourceTraceRow::new(
+            3,
+            0x8000_000c,
+            0x8000_0018,
+            registers(None, None, Some((0, 0, 0))),
+            RamAccess::NoOp,
+        ),
+        SourceTraceRow::new(
+            4,
+            0x8000_0018,
+            0x8000_0018,
+            registers(None, None, Some((0, 0, 0))),
+            RamAccess::NoOp,
+        ),
+    ];
+    f.complete();
+}
+
+#[test]
+fn a_store_overlapping_a_hole_and_an_instruction_is_rejected() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![
+        0x0000_0297,
+        0x0052_b823,
+        0x0102_b303,
+        0x00c0_006f,
+        0x8000_0018,
+        0x0000_0013,
+        0x0000_006f,
+    ];
+    f.backend_error(SourceTraceError::StoreToProgramText {
+        pc: 0x8000_0004,
+        address: 0x8000_0010,
+    });
+}
+
+#[test]
+fn a_later_note_over_text_must_match_loaded_ram() {
+    for mode in [DecodeMode::Strict, DecodeMode::DataHoles] {
+        let mut f = Fixture::new();
+        f.decode_mode = mode;
+        f.words = vec![0x0080_006f, 0, 0x0000_006f];
+        f.extra_section = Some(ExtraSection {
+            section_type: 7,
+            address: 0x8000_0004,
+            bytes: vec![0x13, 0, 0, 0],
+        });
+        f.backend_error(SourceTraceError::ImageMismatch {
+            address: 0x8000_0004,
+        });
+    }
+}
+
+#[test]
+fn a_zero_note_over_zero_text_keeps_the_two_rows() {
+    for mode in [DecodeMode::Strict, DecodeMode::DataHoles] {
+        let mut f = Fixture::new();
+        f.decode_mode = mode;
+        f.words = vec![0x0080_006f, 0, 0x0000_006f];
+        f.extra_section = Some(ExtraSection {
+            section_type: 7,
+            address: 0x8000_0004,
+            bytes: vec![0, 0, 0, 0],
+        });
+        f.expected = vec![
+            SourceTraceRow::new(
+                0,
+                0x8000_0000,
+                0x8000_0008,
+                registers(None, None, Some((0, 0, 0))),
+                RamAccess::NoOp,
+            ),
+            SourceTraceRow::new(
+                1,
+                0x8000_0008,
+                0x8000_0008,
+                registers(None, None, Some((0, 0, 0))),
+                RamAccess::NoOp,
+            ),
+        ];
+        f.complete();
+    }
+}
+
+#[test]
+fn a_later_loadable_section_over_zero_text_keeps_the_two_rows() {
+    for mode in [DecodeMode::Strict, DecodeMode::DataHoles] {
+        let mut f = Fixture::new();
+        f.decode_mode = mode;
+        f.words = vec![0x0080_006f, 0, 0x0000_006f];
+        f.extra_section = Some(ExtraSection {
+            section_type: 1,
+            address: 0x8000_0004,
+            bytes: vec![0x13, 0, 0, 0],
+        });
+        f.expected = vec![
+            SourceTraceRow::new(
+                0,
+                0x8000_0000,
+                0x8000_0008,
+                registers(None, None, Some((0, 0, 0))),
+                RamAccess::NoOp,
+            ),
+            SourceTraceRow::new(
+                2,
+                0x8000_0008,
+                0x8000_0008,
+                registers(None, None, Some((0, 0, 0))),
+                RamAccess::NoOp,
+            ),
+        ];
+        let output = f.complete();
+        assert_eq!(
+            output.final_memory.unwrap().bytes,
+            [(0, 0x6f), (2, 0x80), (4, 0x13), (8, 0x6f)],
+        );
+    }
+}
+
+#[test]
+fn a_loadable_section_at_index_zero_is_ram_outside_the_decoded_image() {
+    for mode in [DecodeMode::Strict, DecodeMode::DataHoles] {
+        let mut f = Fixture::new();
+        f.decode_mode = mode;
+        f.words = vec![0x0000_006f];
+        let mut elf = f.program().elf_bytes().to_vec();
+        let shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let text_offset = elf[shoff + 64 + 24..shoff + 64 + 32].to_vec();
+        elf[shoff + 4..shoff + 8].copy_from_slice(&1u32.to_le_bytes());
+        elf[shoff + 16..shoff + 24].copy_from_slice(&0x8000_0100u64.to_le_bytes());
+        elf[shoff + 24..shoff + 32].copy_from_slice(&text_offset);
+        elf[shoff + 32..shoff + 40].copy_from_slice(&1u64.to_le_bytes());
+        let image = decode_elf_with_mode(&elf, RV64I, mode).unwrap();
+        assert_eq!(
+            image.memory_init,
+            [
+                (0x8000_0000, 0x6f),
+                (0x8000_0001, 0),
+                (0x8000_0002, 0),
+                (0x8000_0003, 0),
+            ],
+        );
+        let emulator = create_emulator(
+            &elf,
+            None,
+            &f.inputs.inputs,
+            &f.inputs.untrusted_advice,
+            &f.inputs.trusted_advice,
+            &f.inputs.memory_config,
+            None,
+        );
+        assert_eq!(emulator.get_cpu().mmu.memory.memory.get_byte(0x100), 0x6f);
+        let program = JoltProgram::from_elf_bytes_with_profile(elf, RV64I);
+        assert!(matches!(
+            SourceExecution::new(&program, f.inputs, mode),
+            Err(TraceError::SourceTrace(SourceTraceError::ImageMismatch {
+                address: 0x8000_0100,
+            }))
+        ));
+    }
+}
+
+#[test]
+fn a_later_note_over_data_holes_must_match_loaded_ram() {
+    let mut f = Fixture::new();
+    f.decode_mode = DecodeMode::DataHoles;
+    f.words = vec![
+        0x0000_0297,
+        0x0102_b303,
+        0x0000_0013,
+        0x00c0_006f,
+        0x8000_0018,
+        0,
+        0x0000_006f,
+    ];
+    f.extra_section = Some(ExtraSection {
+        section_type: 7,
+        address: 0x8000_0010,
+        bytes: vec![0xff; 8],
+    });
+    f.backend_error(SourceTraceError::ImageMismatch {
+        address: 0x8000_0010,
+    });
+}
+
+#[test]
+fn decoded_bytes_outside_ram_are_compared_with_zero() {
+    for mode in [DecodeMode::Strict, DecodeMode::DataHoles] {
+        let mut f = Fixture::new();
+        f.decode_mode = mode;
+        f.halt();
+        f.extra_section = Some(ExtraSection {
+            section_type: 7,
+            address: 0x8001_0000,
+            bytes: vec![0x42],
+        });
+        f.backend_error(SourceTraceError::ImageMismatch {
+            address: 0x8001_0000,
+        });
+        f.extra_section.as_mut().unwrap().bytes[0] = 0;
+        f.complete();
+    }
 }
 
 mod stress;

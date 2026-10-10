@@ -3318,6 +3318,8 @@ dependencies = [
  "jolt-program",
  "jolt-prover",
  "jolt-riscv",
+ "jolt-rv64i-arith",
+ "jolt-rv64i-trace",
  "jolt-sdk",
  "jolt-tracer-x86",
  "jolt-transcript",
@@ -3325,6 +3327,7 @@ dependencies = [
  "libc",
  "postcard",
  "rand 0.8.7",
+ "rayon",
  "rust-code-analysis",
  "schemars 1.2.2",
  "serde",
@@ -3795,6 +3798,22 @@ dependencies = [
  "rand 0.8.7",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "jolt-rv64i-trace"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "jolt-program",
+ "jolt-riscv",
+ "jolt-rv64i-arith",
+ "jolt-rv64i-prover",
+ "jolt-rv64i-verifier",
+ "object 0.40.0",
+ "rayon",
+ "thiserror 2.0.20",
+ "tracer",
 ]
 
 [[package]]

@@ -1,0 +1,35 @@
+[package]
+name = "jolt-rv64i-trace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "RV64I execution traces to cycle facts"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+emulator = ["dep:tracer"]
+arch-check = ["emulator", "dep:jolt-rv64i-prover", "dep:jolt-rv64i-verifier", "dep:object"]
+
+[dependencies]
+jolt-rv64i-arith.workspace = true
+jolt-program = { workspace = true, features = ["image"] }
+jolt-riscv.workspace = true
+common = { workspace = true, features = ["std"] }
+rayon.workspace = true
+thiserror.workspace = true
+tracer = { workspace = true, optional = true, features = ["std"] }
+jolt-rv64i-prover = { workspace = true, optional = true, features = ["test-utils"] }
+jolt-rv64i-verifier = { workspace = true, optional = true }
+object = { workspace = true, optional = true }
+
+[[bin]]
+name = "rv64i-arch-check"
+required-features = ["arch-check"]
+
+[dev-dependencies]
+tracer = { workspace = true, features = ["std", "test-utils"] }
+jolt-rv64i-prover = { workspace = true, features = ["test-utils"] }
+jolt-rv64i-verifier.workspace = true

@@ -11,6 +11,7 @@ jolt-verifier = { workspace = true }
 jolt-dory = { workspace = true }
 jolt-crypto = { workspace = true }
 jolt-program = { workspace = true, features = ["serialization"] }
+jolt-rv64i-trace.workspace = true
 jolt-tracer-x86 = { workspace = true }
 jolt-riscv = { workspace = true, features = ["serialization"] }
 jolt-field = { workspace = true }
@@ -53,6 +54,8 @@ jolt-eval-macros = { path = "macros" }
 libc = "0.2"
 
 [dev-dependencies]
+jolt-rv64i-arith.workspace = true
+rayon.workspace = true
 criterion = { workspace = true }
 iai-callgrind.workspace = true
 iai-callgrind-runner.workspace = true
@@ -95,6 +98,10 @@ harness = false
 
 [[bench]]
 name = "prover_time_sha2_chain"
+harness = false
+
+[[bench]]
+name = "rv64i_trace_adapt"
 harness = false
 
 [[bench]]

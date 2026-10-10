@@ -7,7 +7,8 @@ use super::telemetry::{
 };
 use super::{
     OptimizationObjective, BIND_HIGH_TO_LOW, BIND_LOW_TO_HIGH, COGNITIVE_COMPLEXITY, HALSTEAD_BUGS,
-    LLOC, MUL_I128, MUL_I64, MUL_U128, MUL_U64, NAIVE_SORT_TIME, SOURCE_TRACE_GEN,
+    LLOC, MUL_I128, MUL_I64, MUL_U128, MUL_U64, NAIVE_SORT_TIME, RV64I_TRACE_ADAPT,
+    SOURCE_TRACE_GEN,
 };
 
 /// A concrete objective function that the optimizer minimizes.
@@ -41,6 +42,7 @@ impl ObjectiveFunction {
             MINIMIZE_MUL_U128,
             MINIMIZE_MUL_I128,
             MINIMIZE_SOURCE_TRACE_GEN,
+            MINIMIZE_RV64I_TRACE_ADAPT,
             MINIMIZE_MODULAR_PROVER_TIME,
             MINIMIZE_MODULAR_COMMIT_TIME,
             MINIMIZE_MODULAR_ROUND_LOOP_TIME,
@@ -124,6 +126,12 @@ pub const MINIMIZE_MUL_U128: ObjectiveFunction = ObjectiveFunction {
     name: "minimize_mul_u128",
     inputs: &[MUL_U128],
     evaluate: |m, _| m.get(&MUL_U128).copied().unwrap_or(f64::INFINITY),
+};
+
+pub const MINIMIZE_RV64I_TRACE_ADAPT: ObjectiveFunction = ObjectiveFunction {
+    name: "minimize_rv64i_trace_adapt",
+    inputs: &[RV64I_TRACE_ADAPT],
+    evaluate: |m, _| m.get(&RV64I_TRACE_ADAPT).copied().unwrap_or(f64::INFINITY),
 };
 
 pub const MINIMIZE_SOURCE_TRACE_GEN: ObjectiveFunction = ObjectiveFunction {

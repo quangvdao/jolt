@@ -367,6 +367,35 @@ fn source_matches_committed_columns_words_and_weighted_sum() {
 }
 
 #[test]
+fn bulk_digits_match_scalar_encoding_and_zero_wrong_lengths() {
+    for witness in witnesses() {
+        let source = WitnessSource::new(&witness).unwrap();
+        let columns = source.digit_columns();
+        for cycles in [0..source.cycles(), 3..17, 11..61] {
+            let len = cycles.len() * columns;
+            let mut output = vec![u16::MAX; len];
+            source.digits(cycles.clone(), &mut output);
+            for (cycle, row) in cycles.clone().zip(output.chunks_exact(columns)) {
+                for (column, &found) in row.iter().enumerate() {
+                    let expected = source.digit(column, cycle).map_or(0, |digit| {
+                        digit.saturating_add(1).min(usize::from(u16::MAX)) as u16
+                    });
+                    assert_eq!(found, expected, "cycle {cycle}, column {column}");
+                }
+            }
+            for wrong_len in [len - 1, len + 1] {
+                let mut output = vec![u16::MAX; wrong_len];
+                source.digits(cycles.clone(), &mut output);
+                assert!(output.iter().all(|&slot| slot == 0));
+            }
+        }
+        let mut output = [u16::MAX; 7];
+        source.digits(0..usize::MAX, &mut output);
+        assert_eq!(output, [0; 7]);
+    }
+}
+
+#[test]
 fn shared_source_enforces_group_ownership_and_shared_lifetimes() {
     let (_, _, witness) = support::counting_loop();
     let columns = WitnessColumns::new(&witness.layout);

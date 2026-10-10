@@ -8,6 +8,7 @@ use jolt_rv64i_arith::Layout;
 use jolt_transcript::Transcript;
 use jolt_verifier::{stages::relations::SumcheckBatch, VerifierError};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::ram_output_check::{RamOutputCheck, RamOutputCheckOutputClaims};
 use super::ram_read_checking::{RamReadChecking, RamReadCheckingOutputClaims};
@@ -32,7 +33,7 @@ impl<F: JoltField> Stage4Sumchecks<F> {
         layout: &Layout,
         r_bit: Vec<F>,
         r_3: Vec<F>,
-        io: PublicIoMemory,
+        io: impl Into<Arc<PublicIoMemory>>,
         transcript: &mut T,
     ) -> Result<Self, PointsError> {
         let registers_read_checking = RegistersReadChecking::new(r_bit.clone(), r_3.clone())?;
@@ -92,7 +93,7 @@ pub fn verify<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
         checked.layout(),
         bit.to_vec(),
         cycle.to_vec(),
-        checked.io().clone(),
+        Arc::clone(checked.shared_io()),
         transcript,
     )
     .map_err(term_error)?;

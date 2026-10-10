@@ -12,16 +12,22 @@ use jolt_field::JoltField;
 use jolt_program::preprocess::PublicIoMemory;
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use jolt_verifier::VerifierError;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RamOutputCheck<F: JoltField> {
     symbolic: RamOutputCheckSymbolic,
     tau: Vec<F>,
     r_bit: Vec<F>,
-    io: PublicIoMemory,
+    io: Arc<PublicIoMemory>,
 }
 impl<F: JoltField> RamOutputCheck<F> {
-    pub fn new(tau: Vec<F>, r_bit: Vec<F>, io: PublicIoMemory) -> Result<Self, PointsError> {
+    pub fn new(
+        tau: Vec<F>,
+        r_bit: Vec<F>,
+        io: impl Into<Arc<PublicIoMemory>>,
+    ) -> Result<Self, PointsError> {
+        let io = io.into();
         if r_bit.len() != 6 {
             return Err(PointsError::Dimension {
                 expected: 6,

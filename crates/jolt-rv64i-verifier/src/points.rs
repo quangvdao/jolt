@@ -8,7 +8,7 @@
 
 use jolt_field::JoltField;
 use jolt_poly::EqPlusOnePolynomial;
-use jolt_rv64i_arith::Chunk;
+use jolt_rv64i_arith::{BitsRow, Chunk};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -248,10 +248,28 @@ impl<F: JoltField> ChunkWeights<F> {
                 actual: point.len(),
             });
         }
+        let mut weights = eq_table(point)?;
+        if let Some((zero, differences)) = weights.split_first_mut() {
+            for difference in differences {
+                *difference -= *zero;
+            }
+        }
         Ok(Self {
             descriptor,
-            weights: eq_table(point)?,
+            weights,
         })
+    }
+
+    /// Evaluates the affine selector from packed indicators, including rows with
+    /// multiple indicators set, without field multiplications.
+    pub fn evaluate_packed(&self, row: &BitsRow) -> F {
+        let stored = self.descriptor.stored(row);
+        self.weights
+            .iter()
+            .enumerate()
+            .filter(|(digit, _)| *digit == 0 || stored & (1_u16 << (digit - 1)) != 0)
+            .map(|(_, weight)| *weight)
+            .sum()
     }
 
     /// Reconstructs digit zero from the stored indicators; missing columns return an error.
@@ -270,7 +288,7 @@ impl<F: JoltField> ChunkWeights<F> {
                 index: digit,
                 variables,
             })?;
-            Ok(sum + (weight - zero) * *value)
+            Ok(sum + weight * *value)
         })
     }
 }
@@ -285,6 +303,21 @@ mod tests {
     use super::*;
     use jolt_field::{One, Ring, Zero, F128};
     use jolt_poly::Polynomial;
+
+    #[test]
+    fn packed_chunk_preserves_affine_multiple_indicators() {
+        let chunk = Chunk::new(63, 2).unwrap();
+        let weights = ChunkWeights::new(chunk, &[F128::from_raw(2), F128::from_raw(4)]).unwrap();
+        for (row, literal) in [
+            ([0, 0, 0, 0], 15),
+            ([1_u64 << 63, 0, 0, 0], 10),
+            ([0, 1, 0, 0], 12),
+            ([0, 2, 0, 0], 8),
+            ([1_u64 << 63, 1, 0, 0], 9),
+        ] {
+            assert_eq!(weights.evaluate_packed(&row), F128::from_raw(literal));
+        }
+    }
 
     fn vertex(index: usize, variables: usize) -> Vec<F128> {
         (0..variables)

@@ -4,7 +4,7 @@
 use crate::{error::Rv64iProverError, plane::Rv64iWitness};
 use jolt_field::{JoltField, One, Zero, F128};
 use jolt_poly::Polynomial;
-use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk, BITS_COLUMNS};
+use jolt_rv64i_arith::{BytecodeColumn, BytecodeRow, Chunk};
 use jolt_rv64i_verifier::points::{eq_index, ChunkWeights, WordLift};
 
 /// One of the five replayed cycle words, extended over its 64 bit indices.
@@ -91,20 +91,9 @@ pub fn chunk_in_field<F: JoltField>(
     point: &[F],
 ) -> Result<Polynomial<F>, Rv64iProverError> {
     let weights = ChunkWeights::new(chunk, point)?;
-    let mut columns = [F::zero(); BITS_COLUMNS];
     let mut values = Vec::with_capacity(witness.bits.len());
     for bits in witness.bits.iter() {
-        for (column, value) in columns.iter_mut().enumerate() {
-            *value = if bits
-                .get(column / 64)
-                .is_some_and(|word| (word >> (column % 64)) & 1 != 0)
-            {
-                F::one()
-            } else {
-                F::zero()
-            };
-        }
-        values.push(weights.evaluate(&columns)?);
+        values.push(weights.evaluate_packed(bits));
     }
     Ok(Polynomial::new(values))
 }

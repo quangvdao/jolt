@@ -16,6 +16,82 @@ pub const RAYON_WORKER_ALLOWANCE: AllocationAllowance = AllocationAllowance {
     bytes: 64 + 48,
 };
 
+const RECORD_CAPACITY: usize = 4096;
+static RECORD_THRESHOLD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static RECORD_PHASE: AtomicUsize = AtomicUsize::new(0);
+static RECORD_COUNT: AtomicUsize = AtomicUsize::new(0);
+static RECORDS: [AtomicEntry; RECORD_CAPACITY] = [const { AtomicEntry::new() }; RECORD_CAPACITY];
+
+struct AtomicEntry {
+    size: AtomicUsize,
+    phase: AtomicUsize,
+}
+impl AtomicEntry {
+    const fn new() -> Self {
+        Self {
+            size: AtomicUsize::new(0),
+            phase: AtomicUsize::new(0),
+        }
+    }
+}
+
+// The allocator is also included by private integration-test modules that use
+// totals only. Keep the inventory entry points reachable in those consumers.
+const _: fn(usize) = CountingAllocator::begin;
+const _: fn(usize) = CountingAllocator::phase;
+const _: fn() = CountingAllocator::stop;
+const _: fn() -> usize = CountingAllocator::overflow;
+const _: fn() = || {
+    let _ = CountingAllocator::entries();
+};
+
+/// Lock-free inventory interface. Begin and read only while measured workers
+/// are idle; stop after joining measured work, before reading the entries.
+impl CountingAllocator {
+    pub fn begin(threshold: usize) {
+        RECORD_COUNT.store(0, Ordering::Relaxed);
+        RECORD_PHASE.store(0, Ordering::Relaxed);
+        RECORD_THRESHOLD.store(threshold, Ordering::Relaxed);
+    }
+
+    pub fn phase(phase: usize) {
+        RECORD_PHASE.store(phase, Ordering::Relaxed);
+    }
+
+    pub fn stop() {
+        RECORD_THRESHOLD.store(usize::MAX, Ordering::Relaxed);
+    }
+
+    pub fn overflow() -> usize {
+        RECORD_COUNT
+            .load(Ordering::Relaxed)
+            .saturating_sub(RECORD_CAPACITY)
+    }
+
+    pub fn entries() -> impl Iterator<Item = (usize, usize)> {
+        let count = RECORD_COUNT.load(Ordering::Relaxed).min(RECORD_CAPACITY);
+        RECORDS[..count].iter().map(|entry| {
+            (
+                entry.size.load(Ordering::Relaxed),
+                entry.phase.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    fn record(size: usize) {
+        if size < RECORD_THRESHOLD.load(Ordering::Relaxed) {
+            return;
+        }
+        let index = RECORD_COUNT.fetch_add(1, Ordering::Relaxed);
+        if let Some(entry) = RECORDS.get(index) {
+            entry.size.store(size, Ordering::Relaxed);
+            entry
+                .phase
+                .store(RECORD_PHASE.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+}
+
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -53,6 +129,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         if !pointer.is_null() {
             Self::added(layout.size());
             Self::allocation();
+            Self::record(layout.size());
         }
         pointer
     }
@@ -63,6 +140,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         if !pointer.is_null() {
             Self::added(layout.size());
             Self::allocation();
+            Self::record(layout.size());
         }
         pointer
     }
@@ -83,6 +161,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
                 let _ = LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
             }
             Self::allocation();
+            Self::record(new_size);
         }
         result
     }

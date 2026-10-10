@@ -313,6 +313,10 @@ pub struct Record {
 }
 
 impl Record {
+    pub fn improves_on(&self, default: &Self) -> bool {
+        default.total.median - self.total.median > default.total.spread() + self.total.spread()
+    }
+
     #[expect(
         clippy::print_stdout,
         reason = "interleaved comparison is benchmark output"

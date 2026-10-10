@@ -7,7 +7,7 @@
 //! Samples include output allocation, first touch and the call-scoped domain;
 //! later levels share one table. `--load` reports uptime outside measurement.
 //! `--arithmetic --iterations 8000000 --samples 5` measures fully reduced
-//! K multiplication and E-by-K scaling throughput on independent register chains.
+//! K multiplication and E-by-K scaling throughput on independent chains.
 
 use jolt_field::{ExtField, Zero};
 use jolt_field::{F192, F64};
@@ -322,7 +322,7 @@ fn child_sample(
     let mut rows = BTreeMap::new();
     for line in String::from_utf8(output.stdout)?.lines() {
         let fields: Vec<_> = line.split(',').collect();
-        if fields.len() == 15 && fields.first() == Some(&log_t.to_string().as_str()) {
+        if fields.len() == 14 && fields.first() == Some(&log_t.to_string().as_str()) {
             let _previous = rows.insert(fields[2].to_owned(), fields[6].parse()?);
         }
     }
@@ -403,14 +403,21 @@ fn report_load() -> Result<(), Box<dyn Error>> {
 }
 
 #[inline(never)]
-fn reduced_products<const N: usize>(iterations: usize, seed: u64) -> Duration {
+fn reduced_products<const N: usize, const SHARED: bool>(iterations: usize, seed: u64) -> Duration {
     let mut rng = Words(black_box(seed));
     let mut state: [F64; N] = std::array::from_fn(|_| F64::from_raw(rng.gen()));
-    let factors: [F64; N] = black_box(std::array::from_fn(|_| F64::from_raw(rng.gen())));
+    let common_factor = black_box(F64::from_raw(rng.gen()));
+    let factors: [F64; N] = black_box(std::array::from_fn(|_| {
+        if SHARED {
+            common_factor
+        } else {
+            F64::from_raw(rng.gen())
+        }
+    }));
     let start = Instant::now();
     for _ in 0..black_box(iterations) {
         for (value, factor) in state.iter_mut().zip(&factors) {
-            *value *= *factor;
+            *value *= if SHARED { common_factor } else { *factor };
         }
     }
     let _result = black_box(state);
@@ -439,10 +446,12 @@ fn extension_scalings<const N: usize>(iterations: usize, seed: u64) -> Duration 
 )]
 fn report_arithmetic(options: &Options) {
     type ArithmeticCase = (&'static str, usize, fn(usize, u64) -> Duration);
-    let cases: [ArithmeticCase; 5] = [
-        ("K-reduced-product", 1, reduced_products::<1>),
-        ("K-reduced-product", 4, reduced_products::<4>),
-        ("K-reduced-product", 8, reduced_products::<8>),
+    let cases: [ArithmeticCase; 7] = [
+        ("K-reduced-product", 1, reduced_products::<1, false>),
+        ("K-reduced-product", 4, reduced_products::<4, false>),
+        ("K-reduced-product", 8, reduced_products::<8, false>),
+        ("K-reduced-shared-product", 16, reduced_products::<16, true>),
+        ("K-reduced-shared-product", 24, reduced_products::<24, true>),
         ("E-by-K-scale", 4, extension_scalings::<4>),
         ("E-by-K-scale", 8, extension_scalings::<8>),
     ];

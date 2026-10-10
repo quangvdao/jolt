@@ -303,6 +303,9 @@ impl WitnessColumns {
     pub fn pos(&self, digit: usize) -> Option<usize> {
         self.pos.get(digit).copied()
     }
+    pub fn pos_digits(&self) -> usize {
+        self.pos.len()
+    }
     pub fn variant(&self) -> usize {
         self.variant
     }

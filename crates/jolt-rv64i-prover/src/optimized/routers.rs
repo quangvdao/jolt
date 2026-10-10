@@ -12,7 +12,7 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::UnivariatePoly;
-use jolt_rv64i_arith::Layout;
+use jolt_rv64i_arith::{Layout, WITNESS_COLUMNS};
 use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
 use jolt_rv64i_kernels::round::eq::eq_table;
 use jolt_rv64i_kernels::router::claims::claims_pass;
@@ -28,7 +28,8 @@ use jolt_rv64i_kernels::source::ValidatedTrace;
 use jolt_rv64i_verifier::ids::RouterCycleDerived;
 use jolt_rv64i_verifier::ids::{DerivedId, Router, RouterShortDerived};
 use jolt_rv64i_verifier::public::routes::{
-    bank, selector_slots, source_slots, BankWord, Factor, RouteTensors, ROUTERS,
+    bank, factor_bits, selector_slots, source_slots, BankWord, Factor, RouteTensors, ROUTERS,
+    SHORT_VARIABLES,
 };
 use jolt_rv64i_verifier::stages::stage3a::{
     RouterShort, RouterShortInputClaims, RouterShortOutputClaims,
@@ -77,7 +78,7 @@ fn factor_column(columns: &WitnessColumns, factor: Factor) -> Result<usize, Rout
         Factor::Variant => columns.variant(),
         Factor::Pos(digit) => columns.pos(usize::from(digit)).ok_or(RouterError::Column {
             column: usize::from(digit),
-            columns: 2,
+            columns: columns.pos_digits(),
         })?,
         Factor::ShiftKind => columns.shift_kind(),
         Factor::AccessKind => columns.access_kind(),
@@ -112,55 +113,28 @@ pub fn router_shapes(
                 entries.push(BitEntry::One);
                 words.extend(
                     entries
-                        .chunks(64)
+                        .chunks(u64::BITS as usize)
                         .map(|entries| WordSlot::Bits(entries.to_vec())),
                 );
             }
             words.resize(words.len().next_power_of_two(), WordSlot::Zero);
             let selectors = selector_slots(router);
-            let pos_width = |digit: u8| {
-                layout
-                    .pos_ra()
-                    .get(usize::from(digit))
-                    .map(|chunk| usize::from(chunk.bits()))
-                    .ok_or(RouterError::Column {
-                        column: usize::from(digit),
-                        columns: layout.pos_ra().len(),
-                    })
-            };
-            let mut pos_bits = 0;
-            for factor in description.factors {
-                if let Factor::Pos(digit) = *factor {
-                    pos_bits += pos_width(digit)?;
-                }
-            }
-            let kind_bits =
-                selectors
-                    .len()
-                    .checked_sub(pos_bits)
-                    .ok_or(RouterError::FactorWidth {
-                        column: 0,
-                        expected: pos_bits,
-                        actual: selectors.len(),
-                    })?;
             let mut start = 0;
             let mut factors = Vec::with_capacity(description.factors.len());
             for &factor in description.factors {
-                let width = match factor {
-                    Factor::Pos(digit) => pos_width(digit)?,
-                    Factor::Branch | Factor::ShouldBranch => 0,
-                    Factor::Variant | Factor::ShiftKind | Factor::AccessKind | Factor::KeyKind => {
-                        kind_bits
-                    }
-                };
+                let column = factor_column(columns, factor)?;
+                let width = factor_bits(factor, layout).map_err(|_| RouterError::Column {
+                    column,
+                    columns: columns.pos_digits(),
+                })?;
                 let end = start + width;
                 let slots = selectors.get(start..end).ok_or(RouterError::FactorWidth {
-                    column: factor_column(columns, factor)?,
+                    column,
                     expected: end,
                     actual: selectors.len(),
                 })?;
                 factors.push(SelectorFactor {
-                    column: factor_column(columns, factor)?,
+                    column,
                     slots: slots.to_vec(),
                 });
                 start = end;
@@ -177,11 +151,14 @@ pub fn router_shapes(
                     .collect()
             });
             RouterShape::new(RouterShapeRequest {
-                slots: 17,
+                slots: SHORT_VARIABLES,
                 bank: words,
                 factors,
-                word_slots: source_slots(router).get(6..).unwrap_or(&[]).to_vec(),
-                log_outputs: 10,
+                word_slots: source_slots(router)
+                    .get(u64::BITS.ilog2() as usize..)
+                    .unwrap_or(&[])
+                    .to_vec(),
+                log_outputs: WITNESS_COLUMNS.ilog2() as usize,
                 route,
             })
         })
@@ -375,7 +352,7 @@ impl VariantTerms {
         }
         let word_point: Vec<_> = shape.word_slots().iter().map(|&slot| x[slot]).collect();
         let word_weights = eq_table(&word_point, None);
-        let bit_weights = eq_table(&x[..6], None);
+        let bit_weights = eq_table(&x[..u64::BITS.ilog2() as usize], None);
         let words = bank(Router::Variant, layout)
             .words
             .iter()

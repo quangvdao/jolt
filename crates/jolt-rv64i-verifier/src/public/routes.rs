@@ -11,6 +11,9 @@ use jolt_rv64i_arith::{
 use std::collections::BTreeSet;
 use std::ops::Range;
 
+/// Number of variables in the common router short space.
+pub const SHORT_VARIABLES: usize = 17;
+
 pub const ROUTERS: [Router; 5] = [
     Router::Variant,
     Router::Shift,
@@ -45,6 +48,26 @@ pub enum Factor {
     KeyKind,
     Branch,
     ShouldBranch,
+}
+
+/// Width of a named selector factor, shared by tensor generation and shapes.
+pub fn factor_bits(factor: Factor, layout: &Layout) -> Result<usize, PointsError> {
+    Ok(match factor {
+        Factor::Variant => 6,
+        Factor::Pos(index) => layout
+            .pos_ra()
+            .get(usize::from(index))
+            .copied()
+            .ok_or(PointsError::Index {
+                index: usize::from(index),
+                variables: 1,
+            })?
+            .bits()
+            .into(),
+        Factor::ShiftKind | Factor::KeyKind => 3,
+        Factor::AccessKind => 4,
+        Factor::Branch | Factor::ShouldBranch => 0,
+    })
 }
 
 /// Words precede committed entries, which are followed by one constant.
@@ -134,9 +157,9 @@ pub fn idle_slots(router: Router) -> &'static [usize] {
     }
 }
 pub fn restriction<F: Copy>(router: Router, point: &[F]) -> Result<Vec<F>, PointsError> {
-    if point.len() != 17 {
+    if point.len() != SHORT_VARIABLES {
         return Err(PointsError::Dimension {
-            expected: 17,
+            expected: SHORT_VARIABLES,
             actual: point.len(),
         });
     }
@@ -145,7 +168,7 @@ pub fn restriction<F: Copy>(router: Router, point: &[F]) -> Result<Vec<F>, Point
         .chain(selector_slots(router))
         .map(|&slot| {
             point.get(slot).copied().ok_or(PointsError::Dimension {
-                expected: 17,
+                expected: SHORT_VARIABLES,
                 actual: point.len(),
             })
         })
@@ -153,20 +176,20 @@ pub fn restriction<F: Copy>(router: Router, point: &[F]) -> Result<Vec<F>, Point
 }
 /// Recovers the shared short point from the router with no idle coordinates.
 pub(crate) fn short_point<F: JoltField>(compare: &[F]) -> Result<Vec<F>, PointsError> {
-    if compare.len() != 17 {
+    if compare.len() != SHORT_VARIABLES {
         return Err(PointsError::Dimension {
-            expected: 17,
+            expected: SHORT_VARIABLES,
             actual: compare.len(),
         });
     }
-    let mut point = vec![F::zero(); 17];
+    let mut point = vec![F::zero(); SHORT_VARIABLES];
     for (slot, value) in source_slots(Router::Compare)
         .iter()
         .chain(selector_slots(Router::Compare))
         .zip(compare)
     {
         let target = point.get_mut(*slot).ok_or(PointsError::Dimension {
-            expected: 17,
+            expected: SHORT_VARIABLES,
             actual: *slot,
         })?;
         *target = *value;
@@ -487,7 +510,7 @@ impl RouteTensors {
         for slot in idle_slots(router) {
             sum *= F::one()
                 + *x.get(*slot).ok_or(PointsError::Dimension {
-                    expected: 17,
+                    expected: SHORT_VARIABLES,
                     actual: x.len(),
                 })?;
         }
@@ -530,23 +553,7 @@ impl Builder<'_> {
         let mut selector = 0;
         let mut shift = 0;
         for factor in bank(router, self.layout).factors {
-            let bits = match factor {
-                Factor::Variant => 6,
-                Factor::Pos(index) => self
-                    .layout
-                    .pos_ra()
-                    .get(usize::from(*index))
-                    .copied()
-                    .ok_or(PointsError::Index {
-                        index: usize::from(*index),
-                        variables: 1,
-                    })?
-                    .bits()
-                    .into(),
-                Factor::ShiftKind | Factor::KeyKind => 3,
-                Factor::AccessKind => 4,
-                Factor::Branch | Factor::ShouldBranch => 0,
-            };
+            let bits = factor_bits(*factor, self.layout)?;
             let value = values
                 .iter()
                 .find(|(entry, _)| entry == factor)

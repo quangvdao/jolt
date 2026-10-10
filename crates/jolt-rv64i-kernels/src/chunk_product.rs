@@ -27,6 +27,8 @@ pub enum ChunkWeight {
     /// Exactly one field element per cycle.
     Dense(Vec<F128>),
     /// `(coefficient, low-variable-first cycle point, weighted claim)`.
+    /// Honest weighted claims are required of the caller, not checked, and
+    /// detected by the verifier at its final evaluation check.
     EqTerms(Vec<(F128, Vec<F128>, F128)>),
     /// An equality term for `combined_weight`, not a core weight.
     Eq { coefficient: F128, point: Vec<F128> },
@@ -84,7 +86,7 @@ pub fn combined_weight(
     log_t: usize,
     terms: &[ChunkWeight],
 ) -> Result<Vec<F128>, ChunkProductError> {
-    if log_t >= usize::BITS as usize - 4 {
+    if log_t >= usize::BITS as usize - 5 {
         return Err(ChunkProductError::LogSize { log_t });
     }
     let low_bits = log_t.div_ceil(2);
@@ -251,7 +253,7 @@ impl<S: CycleSource> ChunkProductCore<S> {
                 } else {
                     vec![
                         F128Accumulator::default();
-                        geometry.len().div_ceil(geometry.chunk_len()) * terms.len() * 16
+                        geometry.len().div_ceil(geometry.chunk_len()) * terms.len() * 8
                     ]
                 };
                 WeightState::Terms { terms, scratch }
@@ -260,12 +262,23 @@ impl<S: CycleSource> ChunkProductCore<S> {
                 return Err(ChunkProductError::TermKind { term: 0 })
             }
         };
-        for column in 0..d {
-            for cycle in 0..cycles {
-                if columns.index(column, cycle).is_none() {
-                    return Err(ChunkProductError::MissingDigit { column, cycle });
+        let geometry =
+            CycleChunks::new(log_t, 0).map_err(|_| ChunkProductError::LogSize { log_t })?;
+        let missing = (0..geometry.len() / geometry.chunk_len())
+            .into_par_iter()
+            .find_map_first(|chunk| {
+                let start = chunk * geometry.chunk_len();
+                for cycle in start..start + geometry.chunk_len() {
+                    for column in 0..d {
+                        if columns.index(column, cycle).is_none() {
+                            return Some(ChunkProductError::MissingDigit { column, cycle });
+                        }
+                    }
                 }
-            }
+                None
+            });
+        if let Some(error) = missing {
+            return Err(error);
         }
         let columns = LazyFoldedRa::try_new(
             points.iter().map(|point| eq_table(point, None)).collect(),
@@ -390,52 +403,62 @@ impl<S: CycleSource> ChunkProductCore<S> {
             CycleChunks::new(self.log_t, round + 1).map_err(|_| missing("chunk round geometry"))?;
         let chunk_pairs = geometry.chunk_len();
         let columns = &self.columns;
-        let block_len = terms[0].eq.e_in_current_len();
-        let stride = terms.len() * 16;
+        let stride = terms.len() * 8;
         let reduced = match terms.len() {
             1 => stack_term_sums::<S, D, N, 1>(&self.columns, terms, geometry),
             2 => stack_term_sums::<S, D, N, 2>(&self.columns, terms, geometry),
             5 => stack_term_sums::<S, D, N, 5>(&self.columns, terms, geometry),
             _ => {
                 scratch.truncate(geometry.len().div_ceil(chunk_pairs) * stride);
-                let columns = &self.columns;
                 scratch
                     .par_chunks_mut(stride)
                     .enumerate()
-                    .for_each(|(chunk, scratch)| {
-                        scratch.fill(F128Accumulator::default());
+                    .for_each(|(chunk, output)| {
+                        let mut q_values = [[ZERO; 8]; 128];
+                        output.fill(F128Accumulator::default());
                         let start = chunk * chunk_pairs;
+                        let block_len = terms[0].eq.e_in_current_len();
+                        // Equality's outer factor is constant on the block, so
+                        // reducing tiles separately bounds stack use independently of m.
                         for block_start in (start..start + chunk_pairs).step_by(block_len) {
-                            for term_sums in scratch.chunks_exact_mut(16) {
-                                term_sums[8..].fill(F128Accumulator::default());
-                            }
-                            for offset in 0..block_len {
-                                let mut factors = [[ZERO; 2]; 8];
-                                let mut values = [(ZERO, ZERO); D];
-                                columns.lo_hi_all(block_start + offset, &mut values);
-                                for (factor, (lo, hi)) in factors[..D].iter_mut().zip(values) {
-                                    *factor = [lo, lo + hi];
-                                }
-                                let (left, right, groups) = product_points::<D, N>(&factors, D);
-                                let q: [F128; 8] = std::array::from_fn(|i| {
-                                    if i < N + 2 && groups > 1 {
-                                        left[i] * right[i]
-                                    } else {
-                                        left[i]
+                            for tile_start in (0..block_len).step_by(q_values.len()) {
+                                let tile_len = (block_len - tile_start).min(q_values.len());
+                                let tile = &mut q_values[..tile_len];
+                                for (offset, q) in tile.iter_mut().enumerate() {
+                                    let mut factors = [[ZERO; 2]; 8];
+                                    let mut values = [(ZERO, ZERO); D];
+                                    columns
+                                        .lo_hi_all(block_start + tile_start + offset, &mut values);
+                                    for (factor, (lo, hi)) in factors[..D].iter_mut().zip(values) {
+                                        *factor = [lo, lo + hi];
                                     }
-                                });
-                                for (term, sums) in terms.iter().zip(scratch.chunks_exact_mut(16)) {
-                                    let weight = term.eq.e_in_current()[offset];
+                                    let (left, right, groups) = product_points::<D, N>(&factors, D);
+                                    *q = std::array::from_fn(|i| {
+                                        if i < N + 2 && groups > 1 {
+                                            left[i] * right[i]
+                                        } else {
+                                            left[i]
+                                        }
+                                    });
+                                }
+                                for (term, partial) in terms.iter().zip(output.chunks_exact_mut(8))
+                                {
+                                    let weights =
+                                        &term.eq.e_in_current()[tile_start..tile_start + tile_len];
+                                    let mut inner = [F128Accumulator::default(); 8];
+                                    for (q, &weight) in tile.iter().zip(weights) {
+                                        for i in 0..N + 2 {
+                                            inner[i].fmadd(q[i], weight);
+                                        }
+                                    }
+                                    let outer = term.eq.e_out_current()[block_start / block_len];
+                                    let mut total = [F128Accumulator::default(); 8];
                                     for i in 0..N + 2 {
-                                        sums[8 + i].fmadd(q[i], weight);
+                                        total[i].fmadd(inner[i].reduce(), outer);
                                     }
-                                }
-                            }
-                            let block = block_start / block_len;
-                            for (term, sums) in terms.iter().zip(scratch.chunks_exact_mut(16)) {
-                                let outer = term.eq.e_out_current()[block];
-                                for i in 0..N + 2 {
-                                    sums[i].fmadd(sums[8 + i].reduce(), outer);
+                                    for (partial, total) in partial.iter_mut().zip(total) {
+                                        partial.merge(total);
+                                    }
                                 }
                             }
                         }
@@ -445,7 +468,7 @@ impl<S: CycleSource> ChunkProductCore<S> {
                         let mut sums = [F128Accumulator::default(); 8];
                         for chunk in scratch.chunks_exact(stride) {
                             for (sum, &partial) in
-                                sums.iter_mut().zip(&chunk[index * 16..index * 16 + 8])
+                                sums.iter_mut().zip(&chunk[index * 8..index * 8 + 8])
                             {
                                 sum.merge(partial);
                             }
@@ -466,20 +489,31 @@ impl<S: CycleSource> ChunkProductCore<S> {
                     .recover_q_one(sums[0], term.claim, || {
                         let inner = term.eq.e_in_current();
                         let outer = term.eq.e_out_current();
-                        let mut total = F128Accumulator::default();
-                        for (block, &out) in outer.iter().enumerate() {
-                            let mut sum = F128Accumulator::default();
-                            for (offset, &weight) in inner.iter().enumerate() {
-                                let row = block * inner.len() + offset;
-                                let mut product = columns.value(0, 2 * row + 1);
-                                for column in 1..D {
-                                    product *= columns.value(column, 2 * row + 1);
+                        outer
+                            .par_chunks(chunk_pairs / inner.len())
+                            .enumerate()
+                            .map(|(chunk, outer)| {
+                                let mut total = F128Accumulator::default();
+                                for (offset, &out) in outer.iter().enumerate() {
+                                    let block = chunk * (chunk_pairs / inner.len()) + offset;
+                                    let mut sum = F128Accumulator::default();
+                                    for (offset, &weight) in inner.iter().enumerate() {
+                                        let row = block * inner.len() + offset;
+                                        let mut product = columns.value(0, 2 * row + 1);
+                                        for column in 1..D {
+                                            product *= columns.value(column, 2 * row + 1);
+                                        }
+                                        sum.fmadd(product, weight);
+                                    }
+                                    total.fmadd(sum.reduce(), out);
                                 }
-                                sum.fmadd(product, weight);
-                            }
-                            total.fmadd(sum.reduce(), out);
-                        }
-                        total.reduce()
+                                total
+                            })
+                            .reduce(F128Accumulator::default, |mut left, right| {
+                                left.merge(right);
+                                left
+                            })
+                            .reduce()
                     })
                     .map_err(|actual| SumcheckError::RoundCheckFailed {
                         round,
@@ -573,41 +607,54 @@ fn merge_sums(
     left
 }
 
-#[inline]
+#[inline(always)]
+fn factor_points<const N: usize>(
+    factors: &[[F128; 2]; 8],
+    group: usize,
+    count: usize,
+) -> [F128; 8] {
+    let mut points = [ZERO; 8];
+    if 2 * group + 1 < count {
+        let q = quadratic(factors[2 * group], factors[2 * group + 1]);
+        points[0] = q[0];
+        points[1] = q[2];
+        points[2..2 + N].copy_from_slice(&quadratic_at_nodes(q)[..N]);
+    } else {
+        let linear = factors[2 * group];
+        points[0] = linear[0];
+        points[1] = linear[1];
+        points[2..2 + N].copy_from_slice(&linear_at_nodes(linear)[..N]);
+    }
+    points
+}
+
+#[inline(always)]
 fn product_points<const D: usize, const N: usize>(
     factors: &[[F128; 2]; 8],
     count: usize,
 ) -> ([F128; 8], [F128; 8], usize) {
-    let mut left = [ZERO; 8];
-    let mut right = [ZERO; 8];
     let groups = count.div_ceil(2);
-    for group in 0..groups {
-        let mut points = [ZERO; 8];
-        if 2 * group + 1 < count {
-            let q = quadratic(factors[2 * group], factors[2 * group + 1]);
-            points[0] = q[0];
-            points[1] = q[2];
-            points[2..2 + N].copy_from_slice(&quadratic_at_nodes(q)[..N]);
-        } else {
-            let linear = factors[2 * group];
-            points[0] = linear[0];
-            points[1] = linear[1];
-            points[2..2 + N].copy_from_slice(&linear_at_nodes(linear)[..N]);
-        }
-        if group == 0 {
-            left = points;
-        } else if group + 1 == groups {
-            right = points;
-        } else {
+    let mut left = factor_points::<N>(factors, 0, count);
+    let mut right = [ZERO; 8];
+    if groups > 1 {
+        right = factor_points::<N>(factors, 1, count);
+        if groups > 2 {
             for i in 0..N + 2 {
-                left[i] *= points[i];
+                left[i] *= right[i];
+            }
+            right = factor_points::<N>(factors, 2, count);
+            if groups > 3 {
+                for i in 0..N + 2 {
+                    left[i] *= right[i];
+                }
+                right = factor_points::<N>(factors, 3, count);
             }
         }
     }
     (left, right, groups)
 }
 
-#[inline]
+#[inline(always)]
 fn accumulate_product<const D: usize, const N: usize>(
     factors: &[[F128; 2]; 8],
     sums: &mut [F128Accumulator; 8],

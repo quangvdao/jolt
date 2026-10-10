@@ -425,6 +425,29 @@ fn eq_terms_rounds_final_values_and_proof_match_defining_sum_including_one_colum
 }
 
 #[test]
+fn general_eq_term_counts_match_defining_rounds_final_values_and_proof() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0005);
+    for (log_t, d, count) in [
+        (8, 1, 3),
+        (8, 1, 4),
+        (8, 1, 6),
+        (8, 5, 3),
+        (8, 5, 4),
+        (8, 5, 6),
+        (3, 2, 2000),
+    ] {
+        let source = columns(log_t, d, 2, false);
+        let points = (0..d)
+            .map(|column| random_point(source.source().bits(column), &mut rng))
+            .collect();
+        let terms = terms(log_t, count, false, &mut rng);
+        let fixture = Fixture::prove(source, points, &terms, true, false).unwrap();
+        fixture.assert_definition();
+        fixture.assert_changed_coefficient_rejected();
+    }
+}
+
+#[test]
 fn changed_eq_term_claim_is_rejected_for_every_column_count() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xc8_0004);
     for d in 1..=7 {
@@ -568,10 +591,12 @@ fn term_kind_rejects_a_table_in_builder_and_a_term_in_core() {
 
 #[test]
 fn log_size_rejects_an_unrepresentable_table() {
-    assert!(matches!(
-        combined_weight(usize::BITS as usize, &[]),
-        Err(ChunkProductError::LogSize { log_t }) if log_t == usize::BITS as usize
-    ));
+    for exponent in [usize::BITS as usize, usize::BITS as usize - 5] {
+        assert!(matches!(
+            combined_weight(exponent, &[]),
+            Err(ChunkProductError::LogSize { log_t }) if log_t == exponent
+        ));
+    }
 }
 
 #[test]

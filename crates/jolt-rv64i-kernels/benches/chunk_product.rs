@@ -9,13 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jolt_field::{Accumulator, F128Accumulator, F128};
+use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use jolt_poly::{Polynomial, UnivariatePoly};
 use jolt_rv64i_kernels::chunk_product::{
     combined_weight, ChunkProductCore, ChunkProductError, ChunkWeight, ChunkWeightTerm, EqTerm,
 };
 use jolt_rv64i_kernels::par::{CycleChunks, ParError};
 use jolt_rv64i_kernels::round::eq::eq_table;
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PresentGroup, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rayon::prelude::*;
@@ -26,7 +29,7 @@ use support::allocator::{
     AllocationAllowance, AllocationMeasurement, AllocationStats, RAYON_WORKER_ALLOWANCE,
 };
 use support::gather::run_gathers;
-use support::{core_rounds, run_cases, seeded_challenges, Case, Clock, RunnerError};
+use support::{core_rounds, run_prepared_cases, seeded_challenges, Case, Clock, RunnerError};
 
 #[derive(Debug, Error)]
 enum BenchError {
@@ -150,11 +153,7 @@ fn terms(log_t: usize, variant: Variant) -> Vec<ChunkWeightTerm> {
         .collect()
 }
 
-fn column_product(
-    columns: &DigitColumns<SyntheticTrace>,
-    tables: &[Vec<F128>],
-    cycle: usize,
-) -> F128 {
+fn column_product(columns: &PresentGroup, tables: &[Vec<F128>], cycle: usize) -> F128 {
     let first = columns
         .index(0, cycle)
         .map_or(F128::from_raw(0), |digit| tables[0][digit]);
@@ -171,7 +170,7 @@ fn column_product(
 }
 
 fn equality_claims<const M: usize>(
-    columns: &DigitColumns<SyntheticTrace>,
+    columns: &PresentGroup,
     tables: &[Vec<F128>],
     terms: &[EqTerm; M],
     geometry: CycleChunks,
@@ -220,8 +219,15 @@ fn equality_claims<const M: usize>(
 impl Prepared {
     fn new(source: Arc<SyntheticTrace>) -> Result<Self, BenchError> {
         let log_t = source.cycles().ilog2() as usize;
-        let trace = Arc::new(ValidatedTrace::new(source)?);
-        let columns = DigitColumns::from_validated(Arc::clone(&trace), (0..5).collect())?;
+        let (trace, mut groups) = ValidatedTrace::prepare(
+            source,
+            PrepareRequest {
+                present: vec![(0..5).collect()],
+                optional: vec![],
+            },
+        )?;
+        let trace = Arc::new(trace);
+        let columns = groups.present.remove(0);
         let tables: Vec<_> = digit_points()
             .iter()
             .map(|point| eq_table(point, None))
@@ -257,9 +263,12 @@ impl Prepared {
 }
 
 impl TimedCore {
-    fn new(prepared: &Prepared, variant: Variant) -> Result<(Self, F128), BenchError> {
+    fn new(
+        prepared: &Prepared,
+        columns: PresentGroup,
+        variant: Variant,
+    ) -> Result<(Self, F128), BenchError> {
         let log_t = prepared.trace.source().cycles().ilog2() as usize;
-        let columns = DigitColumns::from_validated(Arc::clone(&prepared.trace), (0..5).collect())?;
         let points = digit_points();
         let _geometry = CycleChunks::new(log_t, 0)?;
         let (weight, claim, combined) = match variant {
@@ -316,7 +325,14 @@ fn nine_term_allocation_core(
     source: Arc<SyntheticTrace>,
 ) -> Result<(ChunkProductCore, F128), BenchError> {
     let log_t = source.cycles().ilog2() as usize;
-    let columns = DigitColumns::new(source, (0..5).collect())?;
+    let (_, mut groups) = ValidatedTrace::prepare(
+        source,
+        PrepareRequest {
+            present: vec![(0..5).collect()],
+            optional: vec![],
+        },
+    )?;
+    let columns = groups.present.remove(0);
     let points = digit_points();
     let tables: Vec<_> = points.iter().map(|point| eq_table(point, None)).collect();
     let geometry = CycleChunks::new(log_t, 0)?;
@@ -378,7 +394,14 @@ fn measure_round_allocations(
             Variant::Dense
         };
         let prepared = Prepared::new(source)?;
-        let (core, claim) = TimedCore::new(&prepared, variant)?;
+        let (_, mut groups) = ValidatedTrace::prepare(
+            Arc::clone(prepared.trace.source()),
+            PrepareRequest {
+                present: vec![(0..5).collect()],
+                optional: vec![],
+            },
+        )?;
+        let (core, claim) = TimedCore::new(&prepared, groups.present.remove(0), variant)?;
         (core.inner, claim)
     };
     let challenges = seeded_challenges();
@@ -584,7 +607,7 @@ fn main() -> Result<(), RunnerError> {
         case
     })
     .collect();
-    let records = run_cases(
+    let records = run_prepared_cases(
         &[SynthProfile::UniformDigits],
         &cases,
         |source| {
@@ -592,10 +615,23 @@ fn main() -> Result<(), RunnerError> {
                 message: error.to_string(),
             })
         },
-        |prepared, &variant, challenges, times| {
+        |prepared, _| {
+            let (_, mut groups) = ValidatedTrace::prepare(
+                Arc::clone(prepared.trace.source()),
+                PrepareRequest {
+                    present: vec![(0..5).collect()],
+                    optional: vec![],
+                },
+            )
+            .map_err(|error| RunnerError::Core {
+                message: error.to_string(),
+            })?;
+            Ok(groups.present.remove(0))
+        },
+        |prepared, columns, &variant, challenges, times| {
             let start = Clock::start();
             let (mut core, claim) =
-                TimedCore::new(prepared, variant).map_err(|error| RunnerError::Core {
+                TimedCore::new(prepared, columns, variant).map_err(|error| RunnerError::Core {
                     message: error.to_string(),
                 })?;
             times.set(0, start.elapsed());

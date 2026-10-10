@@ -17,7 +17,9 @@ use jolt_rv64i_kernels::router::shape::{
     selector_counts, synthetic_router_shapes, RouterError, RouterShape,
 };
 use jolt_rv64i_kernels::router::short::RouterShortCore;
-use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{
+    CycleSource, OptionalGroup, PrepareRequest, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, ClearSumcheckRecorder, ProveRounds, SequentialRounds,
@@ -26,7 +28,7 @@ use jolt_sumcheck::{
 use jolt_transcript::{Blake2bTranscript, Transcript};
 use thiserror::Error;
 
-use support::{core_rounds, run_cases, Case, Clock, Record, RunnerError};
+use support::{core_rounds, run_prepared_cases, Case, Clock, Record, RunnerError};
 
 const HISTOGRAM_COLUMNS: [usize; 11] = [5, 6, 7, 8, 9, 10, 11, 12, 18, 19, 20];
 
@@ -52,10 +54,12 @@ struct Prepared {
     plan: ScatterPlan<SyntheticTrace>,
     layout: FoldLayout,
     r_cycle: Vec<F128>,
+    preparation: Duration,
 }
 
 struct RouterBench {
     prepared: Arc<Prepared>,
+    group: Option<OptionalGroup>,
     short: RouterShortCore,
     lifts: Option<RetainedWordLifts>,
     cycle_point: Vec<F128>,
@@ -66,7 +70,7 @@ struct RouterBench {
 }
 
 impl RouterBench {
-    fn new(prepared: Arc<Prepared>) -> Result<(Self, F128), BenchError> {
+    fn new(prepared: Arc<Prepared>, group: OptionalGroup) -> Result<(Self, F128), BenchError> {
         let start = Clock::start();
         let (fold, _) = prepared.layout.measure(
             &prepared.trace,
@@ -89,6 +93,7 @@ impl RouterBench {
         Ok((
             Self {
                 prepared,
+                group: Some(group),
                 short,
                 lifts: None,
                 cycle_point: Vec::new(),
@@ -155,7 +160,9 @@ impl ProveRounds<F128> for RouterBench {
             .map_err(|_| missing("short final values"))?;
         let start = Clock::start();
         let cycle = RoutersCycleCore::new(
-            &prepared.trace,
+            self.group
+                .take()
+                .ok_or_else(|| missing("router prepared group"))?,
             &prepared.shapes,
             &prepared.r_cycle,
             x,
@@ -228,12 +235,13 @@ fn missing(kind: &'static str) -> SumcheckError<F128> {
 }
 
 #[expect(clippy::print_stdout, reason = "model records are benchmark output")]
-fn report(record: &Record, bytes: usize, profile: SynthProfile) {
+fn report(record: &Record, bytes: usize, profile: SynthProfile, preparation: Duration) {
     let all_rows = profile == SynthProfile::AllRows;
     let profile_prefix = if all_rows { "" } else { "small_values/" };
     let log_t = record.log_t;
     let threads = record.threads;
     let cycles = (1_usize << log_t) as f64;
+    println!("routers_preparation/{profile_prefix}{bytes}/{log_t}/{threads} prepare_ns={:.6} loaded_machine=true", preparation.as_nanos() as f64 / cycles);
     let rho = (1_usize << 20) as f64 / cycles;
     let model = [
         70.13 + rho * 39.9 + 660_000.0 / cycles,
@@ -318,12 +326,21 @@ fn main() -> Result<(), RunnerError> {
         for case in &mut cases {
             case.threshold = (profile == SynthProfile::AllRows).then_some(threshold);
         }
-        records.extend(run_cases(
+        records.extend(run_prepared_cases(
             &[profile],
             &cases,
             |source| {
-                let trace = Arc::new(ValidatedTrace::new(source)?);
                 let shapes = synthetic_router_shapes()?;
+                let start = Clock::start();
+                let (trace, _) = ValidatedTrace::prepare(
+                    source,
+                    PrepareRequest {
+                        present: vec![],
+                        optional: vec![RoutersCycleCore::columns(&shapes)],
+                    },
+                )?;
+                let preparation = start.elapsed();
+                let trace = Arc::new(trace);
                 let counts = selector_counts(&trace, &shapes[0])?;
                 variants
                     .iter()
@@ -342,17 +359,26 @@ fn main() -> Result<(), RunnerError> {
                             plan,
                             layout,
                             r_cycle,
+                            preparation,
                         }))
                     })
                     .collect::<Result<Vec<_>, _>>()
             },
-            |prepared, &index, point, times| {
+            |prepared, &index| {
+                let (_, mut groups) = ValidatedTrace::prepare(
+                    Arc::clone(prepared[index].trace.source()),
+                    PrepareRequest {
+                        present: vec![],
+                        optional: vec![RoutersCycleCore::columns(&prepared[index].shapes)],
+                    },
+                )?;
+                Ok::<_, BenchError>(groups.optional.remove(0))
+            },
+            |prepared, group, &index, point, times| {
                 let start = Clock::start();
-                let (mut core, claim) =
-                    RouterBench::new(Arc::clone(&prepared[index])).map_err(|error| {
-                        RunnerError::Core {
-                            message: error.to_string(),
-                        }
+                let (mut core, claim) = RouterBench::new(Arc::clone(&prepared[index]), group)
+                    .map_err(|error| RunnerError::Core {
+                        message: error.to_string(),
                     })?;
                 times.set(0, start.elapsed());
                 let batch = core_rounds(&mut core, claim, point)?;
@@ -372,7 +398,14 @@ fn main() -> Result<(), RunnerError> {
                 times.set(11, core.cycle_setup);
                 times.set(12, core.short_finish);
             },
-            |record, _, &index| report(record, variants[index].1, profile),
+            |record, prepared, &index| {
+                report(
+                    record,
+                    variants[index].1,
+                    profile,
+                    prepared[index].preparation,
+                );
+            },
         )?);
     }
     for record in &records {

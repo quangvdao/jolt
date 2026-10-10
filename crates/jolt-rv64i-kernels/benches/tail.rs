@@ -13,7 +13,9 @@ use jolt_rv64i_kernels::reduction::{
     g_pass_digits, ColumnMap, ReductionCore, ReductionError, ReductionLeg,
 };
 use jolt_rv64i_kernels::round::eq::eq_table;
-use jolt_rv64i_kernels::source::{CycleSource, DigitColumns, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PreparedGroups, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
 use jolt_sumcheck::{
     prove_batch, BatchMember, BatchPrelude, ClearSumcheckRecorder, MemberFinish, MemberRound,
@@ -180,6 +182,7 @@ struct Tail {
 impl Tail {
     fn new(
         prepared: &Prepared,
+        mut groups: PreparedGroups,
         map: &[ColumnMap],
         weights: &[Vec<F128>],
         times: &mut PhaseTimes,
@@ -218,14 +221,14 @@ impl Tail {
             .collect();
         let start = Clock::start();
         let a = ChunkProductCore::new(
-            DigitColumns::from_validated(Arc::clone(&trace), (0..5).collect())?,
+            groups.present.remove(0),
             points(0),
             ChunkWeight::Dense(first),
         )?;
         times.set(7, start.elapsed());
         let start = Clock::start();
         let b = ChunkProductCore::new(
-            DigitColumns::from_validated(trace, (5..10).collect())?,
+            groups.present.remove(0),
             points(1),
             ChunkWeight::Dense(second),
         )?;
@@ -319,21 +322,34 @@ fn main() -> Result<(), RunnerError> {
     run_batch(
         &[SynthProfile::Local],
         case,
-        |source| {
-            let log_t = source.cycles().ilog2() as usize;
-            let geometry = CycleChunks::new(log_t, 0)?;
-            let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source))?);
-            let first = combined_weight(log_t, &terms(log_t, 0))?;
-            let second = combined_weight(log_t, &terms(log_t, 1))?;
-            Ok::<_, BenchError>(Prepared {
-                trace,
-                claims: [
-                    chunk_claim(&source, 0, &first, geometry),
-                    chunk_claim(&source, 1, &second, geometry),
-                ],
-            })
-        },
-        |prepared, times| Tail::new(prepared, &map, &weights, times),
+        (
+            |source| {
+                let log_t = source.cycles().ilog2() as usize;
+                let geometry = CycleChunks::new(log_t, 0)?;
+                let trace = Arc::new(ValidatedTrace::new(Arc::clone(&source))?);
+                let first = combined_weight(log_t, &terms(log_t, 0))?;
+                let second = combined_weight(log_t, &terms(log_t, 1))?;
+                Ok::<_, BenchError>(Prepared {
+                    trace,
+                    claims: [
+                        chunk_claim(&source, 0, &first, geometry),
+                        chunk_claim(&source, 1, &second, geometry),
+                    ],
+                })
+            },
+            |prepared| {
+                ValidatedTrace::prepare(
+                    Arc::clone(prepared.trace.source()),
+                    PrepareRequest {
+                        present: vec![(0..5).collect(), (5..10).collect()],
+                        optional: vec![],
+                    },
+                )
+                .map(|(_, groups)| groups)
+                .map_err(BenchError::from)
+            },
+        ),
+        |prepared, groups, times| Tail::new(prepared, groups, &map, &weights, times),
         Tail::prove,
         Tail::extract,
         |record, _| {

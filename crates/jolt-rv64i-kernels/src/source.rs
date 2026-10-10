@@ -345,7 +345,11 @@ impl CycleValidation<'_> {
             let row = source.bytecode_index(cycle);
             (row >= rows).then_some((cycle, 0, SourceError::BytecodeIndex { cycle, row, rows }))
         });
-        let end = fault.as_ref().map_or(cycles.end, |(cycle, _, _)| *cycle);
+        let end = fault
+            .as_ref()
+            .map_or(cycles.end, |(cycle, _, _)| *cycle)
+            .min(source.cycles());
+        let source_columns = source.digit_columns();
         macro_rules! scan {
             ($column:expr, $bound:expr, $matches:expr, $slots:expr, $store:expr, $present:expr) => {{
                 let column = $column;
@@ -381,6 +385,12 @@ impl CycleValidation<'_> {
         }
         macro_rules! column {
             ($column:expr, $bound:expr, $matches:expr) => {{
+                if $column >= source_columns {
+                    return Err(SourceError::Column {
+                        column: $column,
+                        columns: source_columns,
+                    });
+                }
                 let targets = &self.targets[$column];
                 match targets.as_slice() {
                     [] => scan!(
@@ -446,16 +456,17 @@ impl CycleValidation<'_> {
             column!(column, bound, |_, _| None);
         }
         for &(column, bound, cache) in &self.row_bytes {
-            column!(column, bound, |digit, cycle| {
+            column!(column, bound, |digit: Option<usize>, cycle| {
                 let row = source.bytecode_index(cycle);
-                (digit != cache[row].map(|value| usize::from(value.get()) - 1))
-                    .then_some(SourceError::RowDigit { column, cycle, row })
+                (digit.map_or(0, |value| value + 1)
+                    != cache[row].map_or(0, |value| usize::from(value.get())))
+                .then_some(SourceError::RowDigit { column, cycle, row })
             });
         }
         for &(column, bound, cache) in &self.row_words {
-            column!(column, bound, |digit, cycle| {
+            column!(column, bound, |digit: Option<usize>, cycle| {
                 let row = source.bytecode_index(cycle);
-                (digit != cache[row].map(|value| value.get() - 1))
+                (digit.map_or(0, |value| value + 1) != cache[row].map_or(0, NonZeroUsize::get))
                     .then_some(SourceError::RowDigit { column, cycle, row })
             });
         }
@@ -469,7 +480,7 @@ impl CycleValidation<'_> {
 /// Shared source whose dimensions, indices and every digit column are checked.
 /// Construction reads every row-based digit once and every cycle digit once.
 /// Temporary row caches are dropped before returning; the source owns its data.
-/// Fault order is: all rows before all cycles; rows ascending, then columns
+/// After dimension and request checks, fault order is: all rows before all cycles; rows ascending, then columns
 /// ascending; cycles ascending, then `BytecodeIndex`, then columns ascending,
 /// and within a column `Digit`, `RowDigit`, `MissingDigit`. Each column scan
 /// stops at its first fault; each chunk chooses the least cycle and rank, and
@@ -574,10 +585,10 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 SourceError::ValidationScratchSize {
                     name: "row chunk metadata",
                     len: chunk_count,
-                    element_size: size_of::<RowChunk<'_>>(),
+                    element_size: size_of::<(usize, RowChunk<'_>)>(),
                 },
             )?;
-            check_validation_size::<RowChunk<'_>>(descriptors, "row chunk metadata")?;
+            check_validation_size::<(usize, RowChunk<'_>)>(descriptors, "row chunk metadata")?;
             let column_count = row_digits.len();
             let mut chunks = Vec::with_capacity(descriptors);
             for RowColumn {
@@ -712,16 +723,10 @@ impl<S: CycleSource> ValidatedTrace<S> {
         if let Some(Err(error)) = error {
             return Err(error);
         }
-        Ok((
-            Self {
-                source,
-            },
-            groups,
-        ))
+        Ok((Self { source }, groups))
     }
 
     pub fn source(&self) -> &Arc<S> {
         &self.source
     }
 }
-

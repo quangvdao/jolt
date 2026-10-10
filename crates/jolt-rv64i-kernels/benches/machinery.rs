@@ -1,7 +1,9 @@
 //! Packed passes at log_t=20 and 22, five samples, on warmed one- and twelve-thread
 //! pools. `validate` prices `ValidatedTrace::new` on the all-rows synthetic trace,
-//! including temporary row-cache allocation and release, excluding trace generation:
-//! each cycle reads one bytecode index and all 21 digits, 11 of them compared with
+//! including group writing, temporary row-cache allocation and release, excluding trace generation:
+//! `validate_tail` adds the two present five-column groups; `validate_all`
+//! adds the routers' optional group too. All three run with `--units validate`.
+//! Each cycle checks one bytecode index and all 21 digits, 11 of them compared with
 //! a one-byte row cache; each bytecode row reads those 11 digits once. It has no
 //! requirement. To run it alone:
 //! ```sh
@@ -22,9 +24,12 @@ use jolt_rv64i_kernels::packed::buckets::{BucketError, BucketPlacement, NibbleBu
 use jolt_rv64i_kernels::packed::lift::WordLift;
 use jolt_rv64i_kernels::packed::pool::{PoolError, ScratchPool};
 use jolt_rv64i_kernels::packed::scatter::{ScatterError, ScatterPlan};
+use jolt_rv64i_kernels::router::cycle::RoutersCycleCore;
 use jolt_rv64i_kernels::router::fold::FoldCalibration;
-use jolt_rv64i_kernels::router::shape::RouterError;
-use jolt_rv64i_kernels::source::{CycleSource, SourceError, ValidatedTrace};
+use jolt_rv64i_kernels::router::shape::{synthetic_router_shapes, RouterError};
+use jolt_rv64i_kernels::source::{
+    CycleSource, PrepareRequest, PreparedGroups, SourceError, ValidatedTrace,
+};
 use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -163,7 +168,8 @@ impl Inputs {
 enum Machinery {
     Validate {
         source: Arc<SyntheticTrace>,
-        validated: Option<ValidatedTrace<SyntheticTrace>>,
+        request: PrepareRequest,
+        validated: Option<(ValidatedTrace<SyntheticTrace>, PreparedGroups)>,
     },
     Lift {
         inputs: Arc<Inputs>,
@@ -204,8 +210,20 @@ impl Machinery {
             Ok(pool)
         };
         match name {
-            "validate" => Ok(Self::Validate {
+            "validate" | "validate_tail" | "validate_all" => Ok(Self::Validate {
                 source: Arc::clone(&inputs.trace.source().base),
+                request: PrepareRequest {
+                    present: if name == "validate" {
+                        vec![]
+                    } else {
+                        vec![(0..5).collect(), (5..10).collect()]
+                    },
+                    optional: if name == "validate_all" {
+                        vec![RoutersCycleCore::columns(&synthetic_router_shapes()?)]
+                    } else {
+                        vec![]
+                    },
+                },
                 validated: None,
             }),
             "lift" => {
@@ -344,8 +362,15 @@ impl MachineryKernel for Machinery {
     }
     fn run(&mut self) -> Result<F128, MachineryError> {
         match self {
-            Self::Validate { source, validated } => {
-                *validated = Some(ValidatedTrace::new(Arc::clone(black_box(source)))?);
+            Self::Validate {
+                source,
+                request,
+                validated,
+            } => {
+                *validated = Some(ValidatedTrace::prepare(
+                    Arc::clone(black_box(source)),
+                    std::mem::take(request),
+                )?);
                 let _ = black_box(&*validated);
                 Ok(F128::from_raw(0))
             }
@@ -475,6 +500,8 @@ fn main() -> Result<(), RunnerError> {
     run_machinery(
         &[
             ("validate", None),
+            ("validate_tail", None),
+            ("validate_all", None),
             ("lift", Some(4.8)),
             ("bucket", Some(0.9)),
             ("scatter", Some(2.1)),

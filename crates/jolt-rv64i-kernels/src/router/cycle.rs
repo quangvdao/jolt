@@ -186,7 +186,7 @@ impl RoutersCycleCore {
             }
         }
         let factors = Self::factors(shapes);
-        let expected: Vec<_> = factors.iter().map(|factor| factor.column).collect();
+        let expected = Self::columns(shapes);
         if group.columns() != expected {
             return Err(RouterError::GroupColumns {
                 expected,

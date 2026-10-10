@@ -4,18 +4,16 @@
 pub mod support;
 
 use jolt_field::{Field, F128};
-use jolt_poly::UnivariatePoly;
 use jolt_rv64i_kernels::packed::scatter::ScatterError;
 use jolt_rv64i_kernels::packed::scatter::ScatterPlan;
 use jolt_rv64i_kernels::par::CycleChunks;
 use jolt_rv64i_kernels::par::ParError;
-use jolt_rv64i_kernels::router::fold::{FoldCalibration, FoldLayout, FoldOutput};
+use jolt_rv64i_kernels::router::fold::{FoldCalibration, FoldLayout};
 use jolt_rv64i_kernels::router::shape::RouterError;
 use jolt_rv64i_kernels::router::shape::{selector_counts, synthetic_router_shapes, RouterShape};
 use jolt_rv64i_kernels::source::SourceError;
 use jolt_rv64i_kernels::source::{CycleSource, ValidatedTrace};
 use jolt_rv64i_kernels::synth::{SynthProfile, SyntheticTrace};
-use jolt_sumcheck::{ProveRounds, SumcheckError};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use thiserror::Error;
@@ -33,8 +31,7 @@ enum FoldBenchError {
 }
 use rayon::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
-use support::{run_core_variants, CycleScale, RunnerError};
+use support::{run_cases, Case, Clock, RunnerError};
 
 const HISTOGRAM_COLUMNS: [usize; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 18, 19, 20];
 
@@ -60,35 +57,8 @@ struct Diagnostics {
     merge_model_ns: f64,
 }
 
-struct MeasuredFold {
-    output: FoldOutput,
-    phases: [Duration; 4],
-}
-
-impl ProveRounds<F128> for FoldBench {
-    fn num_rounds(&self) -> usize {
-        0
-    }
-    fn prove_round(
-        &mut self,
-        _: Option<F128>,
-        round: usize,
-        _: F128,
-    ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
-        Err(SumcheckError::WrongNumberOfRounds {
-            expected: 0,
-            got: round,
-        })
-    }
-    fn finish_rounds(&mut self, _: F128) -> Result<(), SumcheckError<F128>> {
-        Err(SumcheckError::MissingEvaluationSource {
-            kind: "fold pass has no rounds",
-        })
-    }
-}
-
 impl FoldBench {
-    fn new(source: Arc<SyntheticTrace>, byte_count: usize) -> Result<(Self, F128), FoldBenchError> {
+    fn new(source: Arc<SyntheticTrace>, byte_count: usize) -> Result<Self, FoldBenchError> {
         let log_t = source.cycles().ilog2() as usize;
         let trace = Arc::new(ValidatedTrace::new(source)?);
         let shapes = synthetic_router_shapes()?;
@@ -154,54 +124,89 @@ impl FoldBench {
             row_model_ns: rho * (64.0 * 0.6 + 5.0 * 0.3),
             merge_model_ns: 2.2e6 * 0.3 / cycles as f64,
         };
-        Ok((
-            Self {
-                trace,
-                shapes,
-                point,
-                plan,
-                layout,
-                diagnostics,
-            },
-            F128::from_raw(0),
-        ))
+        Ok(Self {
+            trace,
+            shapes,
+            point,
+            plan,
+            layout,
+            diagnostics,
+        })
     }
-    fn extract(&self) -> Result<MeasuredFold, FoldBenchError> {
-        let (output, phases) = self.layout.measure(
-            &self.trace,
-            &self.shapes,
-            &self.point,
-            &self.plan,
-            &HISTOGRAM_COLUMNS,
-        )?;
-        Ok(MeasuredFold { output, phases })
-    }
-
     #[expect(
         clippy::print_stdout,
         reason = "typed benchmark diagnostics are printed outside measurements"
     )]
-    fn report(&self, measured: &MeasuredFold, scale: CycleScale) {
+    fn report_diagnostics(&self) {
         let d = &self.diagnostics;
-        let times = scale.durations(measured.phases);
-        let _ = std::hint::black_box(&measured.output);
         println!("fold/scratch/{}/{}/{}/cycle cycle_bucket_bytes_per_worker={} row_bucket_bytes_per_worker={} chunk_weight_scratch_bytes_per_worker=0 scatter_buffer_bytes={} plan_bytes={} cycle_bucket_xors={:.6} model_cycle_bucket_xors=111.5 model_multiplication_ns=1.83 model_cycle_bucket_ns={:.6} model_scatter_ns=1.4 model_rows_ns={:.6} model_zero_merge_readout_ns={:.6} loaded_machine=true", d.byte_count, d.log_t, d.threads, d.cycle_bucket_bytes, d.row_bucket_bytes, d.scatter_bytes, d.plan_bytes, d.updates, d.updates*0.6, d.row_model_ns, d.merge_model_ns);
-        println!("fold/pass_phases/{}/{}/{}/cycle fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6}", d.byte_count, d.log_t, d.threads, times[0], times[1], times[2], times[3]);
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "fold phase distributions are benchmark output"
+)]
 fn main() -> Result<(), RunnerError> {
-    let variants = [
-        ("none", 0),
-        ("default", FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT),
-        ("all", 64),
+    let cases = [
+        Case::core(
+            "fold/none",
+            0,
+            &["fused_cycle", "scatter", "rows", "setup_merge_readout"],
+        ),
+        Case::core(
+            "fold/default",
+            FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT,
+            &["fused_cycle", "scatter", "rows", "setup_merge_readout"],
+        ),
+        Case::core(
+            "fold/all",
+            64,
+            &["fused_cycle", "scatter", "rows", "setup_merge_readout"],
+        ),
     ];
-    run_core_variants(
-        "fold",
+    let _ = run_cases(
         &[SynthProfile::AllRows],
-        &variants,
-        |source, &bytes| FoldBench::new(source, bytes),
-        |core, _| core.extract(),
-        |core, measured, scale| core.report(measured, scale),
-    )
+        &cases,
+        Ok::<_, RunnerError>,
+        |source, &bytes, _, times| {
+            let clock = Clock::start();
+            let core =
+                FoldBench::new(Arc::clone(source), bytes).map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            times.set(0, clock.elapsed());
+            let clock = Clock::start();
+            let (output, phases) = core
+                .layout
+                .measure(
+                    &core.trace,
+                    &core.shapes,
+                    &core.point,
+                    &core.plan,
+                    &HISTOGRAM_COLUMNS,
+                )
+                .map_err(|error| RunnerError::Core {
+                    message: error.to_string(),
+                })?;
+            let _ = std::hint::black_box(&output);
+            times.set(3, clock.elapsed());
+            for (index, phase) in phases.into_iter().enumerate() {
+                times.set(4 + index, phase);
+            }
+            Ok((core, output))
+        },
+        |(core, _), _| core.report_diagnostics(),
+        |record, _, &bytes| {
+            if bytes == FoldLayout::DEFAULT_BYTE_BUCKET_LIMIT && record.threads == 1 {
+                record.print_requirement(
+                    &format!("fold_pass/all_rows/{}/1", record.log_t),
+                    3,
+                    if record.log_t == 22 { 100.0 } else { 138.0 },
+                );
+            }
+            println!("fold/pass_phases/{}/{}/{}/cycle fused_cycle_ns={:.6} scatter_ns={:.6} rows_ns={:.6} setup_merge_readout_ns={:.6} loaded_machine=true", bytes, record.log_t, record.threads, record.phases[4].median, record.phases[5].median, record.phases[6].median, record.phases[7].median);
+        },
+    )?;
+    Ok(())
 }

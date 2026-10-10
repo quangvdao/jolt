@@ -1,6 +1,5 @@
 //! Every kernel benchmark enters this runner, for example:
-//! `CARGO_TARGET_DIR=/Users/quangdao/Documents/SNARKs/jolt-wt/k-tail-target
-//! RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels
+//! `RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-kernels
 //! --features test-utils --bench tail -- --log-t 20 --threads 1 --samples 3`.
 //!
 //! A case record id is `name/profile/log_t/threads`: the synthetic distribution,

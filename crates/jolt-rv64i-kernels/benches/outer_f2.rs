@@ -183,7 +183,7 @@ fn main() -> Result<(), RunnerError> {
         .iter()
         .map(|counts| model_price(counts, &POINT2_PRICES))
         .sum::<f64>();
-    println!("outer_f2/local loaded_machine=true threshold_1_thread_ns=268 threshold_12_threads_log22_ns=28 spec_threshold_1_thread_ns=254 spec_threshold_12_threads_log22_ns=26 model_point1_ns={model_point1:.1} model_point2_ns={model_point2:.1} tail_histogram_in_round1=true materialisation_in_round7=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true");
+    println!("outer_f2/local loaded_machine=true threshold_1_thread_ns=254 threshold_12_threads_log22_ns=26 model_point1_ns={model_point1:.1} model_point2_ns={model_point2:.1} tail_histogram_in_round1=true materialisation_in_round7=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true");
     if comparison {
         println!("outer_f2/compare_monomial loaded_machine=true folded_group_weights=true nibble_round_2=false alternating_sample_order=true histogram_in_round1=true materialisation_in_round7=true cycle_model_includes_final_row_bind=true materialisation_row7_bind=rounds7_8 row8_bind_cycles=round9_through_finish timing_includes_allocation_first_touch_parallel_overhead=true");
     }

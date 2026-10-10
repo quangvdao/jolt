@@ -157,7 +157,7 @@ Implementations of `SumcheckKernel` and `PrepareKernel` for the relations of `sp
 
   A core builds the tables of its `LazyFoldedRa` from points it has checked, so `try_new` cannot fail there; its error converts into the core's and has no case in this table. Its cases are those of `specs/binary-kernel-primitives.md` and of "Shared crates" above.
 
-- [ ] **Runner.** `run_core` on the dense-product example prints nanoseconds per cycle for construction, rounds, finish and extraction, and the peak and final live bytes, at `log_t` 20 and 22 on 1 and 12 threads.
+- [ ] **Runner.** `run_core` on the dense-product example prints nanoseconds per cycle for construction, rounds, finish and extraction, and the peak and final live bytes, at `log_t` 20 and 22 on 1 and 12 threads. Each of the seven benches of the cores and passes (`outer_f2`, `fold`, `routers`, `chunk_product`, `reduction`, `column_pass`, `tail`) runs through `run_cases`, and none of those seven files reads `Instant`.
 - [ ] **Performance.** Every benchmark of the Performance section is reported through the runner, at both sizes and both thread counts, against its row. A result above its threshold at `log_t = 22` fails the PR that adds or changes the kernel.
 - [ ] **Gates.** `cargo clippy --all-targets -- -D warnings` and `cargo nextest run --cargo-quiet` pass for `jolt-rv64i-kernels`, `jolt-field --features binary`, `jolt-poly` and `jolt-kernels`; `cargo fmt --check` passes.
 
@@ -171,7 +171,7 @@ Rustdoc on the public items states the contracts of the surface table and, on `O
 
 ### Performance
 
-Benchmarks run on an Apple M4 Max with `-C target-cpu=native`, on one thread and on a `rayon` pool of 12 threads, at `log_t = 20` and `log_t = 22`, with `2^20` bytecode rows and `2^20` RAM words at both lengths. Every benchmark goes through one runner, `run_core` in `benches/support/`. It takes a constructor and a profile and times four phases: construction with the passes that feed it, the rounds under challenges from a fixed seed, `finish_rounds`, and the extraction of the final values with the passes that follow the rounds. Under a counting allocator it reports the peak and the final live bytes. Ids are `<bench>/<profile>/<log_t>/<threads>`.
+Benchmarks run on an Apple M4 Max with `-C target-cpu=native`, on one thread and on a `rayon` pool of 12 threads, at `log_t = 20` and `log_t = 22`, with `2^20` bytecode rows and `2^20` RAM words at both lengths. Every benchmark goes through one runner in `benches/support/`, whose one sampling loop is `run_cases`. A bench gives it a function from the synthetic source to a prepared fixture (the validated trace, plans, input claims) and a list of cases, each with its named phases and the phases that make its total. The runner builds and warms the pool of a configuration before the first interval, prepares the fixture once per source and size outside every timed interval and every allocation interval and reports its cost as its own record, runs the cases of one source in rotation (A B C A B C) with a fresh kernel per sample, releases measured state and fixtures only after their counters have stopped, and alone computes the minimum, median and maximum of each phase and of the per-sample total, the comparison with a threshold and the comparison of two variants. The total is the median of the per-sample sums and not the sum of the phase medians. No bench of a core or pass reads a clock itself: one that times a part of its own work takes `Clock` from `support`. The unit benches `probe`, `machinery` and `round` keep their own entries, `run_probe` and `run_machinery`, in the same module. `run_core` and `run_batch` are layers over `run_cases` with the four phases of a core: construction with the passes that feed it; the rounds, under challenges from a fixed seed for one core and under the transcript's for a batch through `prove_batch`; `finish_rounds`; and the extraction of the final values with the passes that follow the rounds. Under a counting allocator the runner reports the peak and the final live bytes above the baseline of the interval, which leaves out the resident source, the fixture and the pools. Ids are `<bench>/<profile>/<log_t>/<threads>`.
 
 `SyntheticTrace` is a function of a `SynthProfile` and a seed (`ChaCha20Rng`). Its rows carry the chunk indicators at stated column ranges, its digits agree with them, and its lanes satisfy `C = A & B`.
 
@@ -447,7 +447,7 @@ Two uses of the structure of the routers are candidates, and a third is rejected
 
 ## Documentation
 
-No change to the Jolt book. The rustdoc of `source`, `packed`, `round`, `outer_f2`, `router`, `chunk_product`, `reduction` and `column_pass` states the definitions of Goal and the contracts of the surface table. The module documentation of `benches/support/` gives the command that runs a benchmark through the runner and the meaning of its four phases.
+No change to the Jolt book. The rustdoc of `source`, `packed`, `round`, `outer_f2`, `router`, `chunk_product`, `reduction` and `column_pass` states the definitions of Goal and the contracts of the surface table. The module documentation of `benches/support/` gives the command that runs a benchmark through the runner, the meaning of every field of a record, and what the allocation figures count and leave out.
 
 ## Execution
 

@@ -217,6 +217,7 @@ fn seeded_point(rounds: usize, seed: u64) -> Vec<F128> {
 
 fn assert_rounds(
     core: &mut impl ProveRounds<F128>,
+    source: &Arc<impl LaneSource>,
     point: &[F128],
     expected: &[UnivariatePoly<F128>],
 ) {
@@ -226,6 +227,7 @@ fn assert_rounds(
         let message = core
             .prove_round(round.checked_sub(1).map(|i| point[i]), round, claim)
             .unwrap();
+        assert_eq!(Arc::strong_count(source), if round < 6 { 2 } else { 1 });
         assert_eq!(
             message.coefficients(),
             expected.coefficients(),
@@ -270,10 +272,11 @@ fn outer_messages_and_boolean_points_match_summation_for_every_option_and_verify
                 let batch_claim = definition.final_claim(&expected_batch.proved.challenges);
                 for options in options() {
                     let mut core = OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
-                    assert_rounds(&mut core, &point, &messages);
+                    assert_rounds(&mut core, &source, &point, &messages);
                     assert_eq!(core.final_values(), values);
                     let mut core = OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
                     let batch = Batch::prove(&mut core, ZERO).unwrap();
+                    assert_eq!(Arc::strong_count(&source), 1);
                     assert_eq!(batch.proved.challenges, oracle.point);
                     assert_eq!(core.final_values(), batch_values);
                     assert_eq!(batch.proved.member_claims, [batch_claim]);
@@ -323,7 +326,12 @@ fn outer_messages_and_boolean_points_match_summation_for_every_option_and_verify
                     for options in options() {
                         let mut core =
                             OuterF2Core::new(Arc::clone(&source), &tau, options).unwrap();
-                        assert_rounds(&mut core, &zero_factor_point, &zero_factor_messages);
+                        assert_rounds(
+                            &mut core,
+                            &source,
+                            &zero_factor_point,
+                            &zero_factor_messages,
+                        );
                         assert_eq!(core.final_values(), zero_factor_values);
                     }
                 }
@@ -466,7 +474,7 @@ fn outer_messages_on_one_and_twelve_threads_match_summation() {
         pool.install(|| {
             let mut core =
                 OuterF2Core::new(Arc::clone(&source), &tau, OuterF2Options::default()).unwrap();
-            assert_rounds(&mut core, &point, &messages);
+            assert_rounds(&mut core, &source, &point, &messages);
             assert_eq!(core.final_values(), values);
         });
     }

@@ -6,7 +6,6 @@ use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::mem::size_of;
-use std::num::{NonZeroU8, NonZeroUsize};
 use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
@@ -38,6 +37,31 @@ pub trait CycleSource: Send + Sync + 'static {
     fn bits(&self, column: usize) -> usize;
     fn by_row(&self, column: usize) -> bool;
     fn digit(&self, column: usize, cycle: usize) -> Option<usize>;
+    /// Writes encoded digits in cycle-major, column-list order: slot
+    /// `(j - cycles.start) * digit_columns() + c` is zero for absence and
+    /// `min(d.saturating_add(1), u16::MAX)` for `digit(c, j) == Some(d)`.
+    /// Saturation preserves range rejection even for an over-wide malformed digit.
+    /// Every output slot is written. If the output length differs from
+    /// `cycles.len() * digit_columns()` (including overflow), all slots are zeroed
+    /// and no digit is read. Empty/reversed ranges therefore require empty output.
+    /// An override decodes the same storage with the same field description as
+    /// `digit`: these are two views of one immutable digit function.
+    /// Preparation checks agreement only in tiles it rejects; agreement in
+    /// accepted tiles is the source's obligation. No unsafe operation in this
+    /// crate may rely on that obligation; later source reads use safe indexing
+    /// or masking.
+    fn digits(&self, cycles: Range<usize>, out: &mut [u16]) {
+        let columns = self.digit_columns();
+        if cycles.len().checked_mul(columns) != Some(out.len()) || columns == 0 {
+            out.fill(0);
+            return;
+        }
+        for (cycle, row) in cycles.zip(out.chunks_exact_mut(columns)) {
+            for (column, slot) in row.iter_mut().enumerate() {
+                *slot = encode_digit(self.digit(column, cycle));
+            }
+        }
+    }
     fn row_digit(&self, column: usize, row: usize) -> Option<usize>;
 }
 
@@ -50,8 +74,17 @@ pub enum SourceError {
     BytecodeRows { rows: usize },
     #[error("column {column} is outside {columns} digit columns")]
     Column { column: usize, columns: usize },
-    #[error("column {column} width {bits} cannot be represented")]
+    #[error("column {column} width {bits} exceeds the 15-bit source limit")]
     Width { column: usize, bits: usize },
+    #[error("{columns} digit columns exceed the stack tile limit {max_columns}")]
+    ColumnCapacity { columns: usize, max_columns: usize },
+    #[error("bulk digit {encoded} disagrees with {digit:?} at column {column}, cycle {cycle}")]
+    DigitView {
+        column: usize,
+        cycle: usize,
+        encoded: u16,
+        digit: Option<usize>,
+    },
     #[error("column {column} width {bits} exceeds group limit {max_bits}")]
     GroupWidth {
         column: usize,
@@ -237,100 +270,350 @@ impl GroupData {
 }
 
 #[derive(Clone, Copy)]
-struct GroupTarget {
-    group: usize,
-    position: usize,
-    optional: bool,
+enum GroupColumns<'a> {
+    RunFive(usize),
+    RunEight(usize),
+    Five([usize; 5]),
+    Eight([usize; 8]),
+    General(&'a [usize]),
 }
+
+impl<'a> GroupColumns<'a> {
+    #[expect(
+        clippy::expect_used,
+        reason = "the matching length fixes the array width"
+    )]
+    fn new(columns: &'a [usize]) -> Self {
+        let contiguous = columns.windows(2).all(|pair| pair[0] + 1 == pair[1]);
+        match columns.len() {
+            5 if contiguous => Self::RunFive(columns[0]),
+            8 if contiguous => Self::RunEight(columns[0]),
+            5 => Self::Five(columns.try_into().expect("five columns")),
+            8 => Self::Eight(columns.try_into().expect("eight columns")),
+            _ => Self::General(columns),
+        }
+    }
+}
+
 struct GroupChunk<'a> {
     bytes: &'a mut [u8],
-    stride: usize,
+    columns: &'a GroupColumns<'a>,
+    bias: u16,
 }
 
 const ROW_CHUNK: usize = 4096;
-
-enum RowDigits {
-    Byte(Vec<Option<NonZeroU8>>),
-    Word(Vec<Option<NonZeroUsize>>),
-}
+const TILE_ENTRIES: usize = 4096;
+const MAX_COLUMNS: usize = 128;
 
 struct RowColumn {
     column: usize,
     bound: usize,
-    digits: RowDigits,
 }
 
-enum RowChunk<'a> {
-    Byte {
-        column: usize,
-        bound: usize,
-        digits: &'a mut [Option<NonZeroU8>],
-    },
-    Word {
-        column: usize,
-        bound: usize,
-        digits: &'a mut [Option<NonZeroUsize>],
-    },
+struct RowRun {
+    columns: Range<usize>,
+    cache: Range<usize>,
+    compare: fn(&[u16], &[u16]) -> bool,
 }
 
-struct RowFault {
-    column: usize,
-    row: usize,
-    digit: usize,
-    bound: usize,
+fn compare_general(values: &[u16], expected: &[u16]) -> bool {
+    values
+        .iter()
+        .zip(expected)
+        .fold(0_u16, |bad, (a, b)| bad | (a ^ b))
+        != 0
 }
 
-impl RowChunk<'_> {
-    fn validate(&mut self, source: &impl CycleSource, rows: Range<usize>) -> Option<RowFault> {
-        match self {
-            Self::Byte {
-                column,
-                bound,
-                digits,
-            } => cache_rows(source, *column, *bound, rows, digits, |value| {
-                NonZeroU8::new((value + 1) as u8)
-            }),
-            Self::Word {
-                column,
-                bound,
-                digits,
-            } => cache_rows(source, *column, *bound, rows, digits, |value| {
-                NonZeroUsize::new(value + 1)
-            }),
+#[expect(
+    clippy::expect_used,
+    reason = "the row plan selects this function from the checked run width"
+)]
+fn compare_run<const N: usize>(values: &[u16], expected: &[u16]) -> bool {
+    let values: &[u16; N] = values.try_into().expect("compiled row run");
+    let expected: &[u16; N] = expected.try_into().expect("compiled cache run");
+    values
+        .iter()
+        .zip(expected)
+        .fold(0_u16, |bad, (a, b)| bad | (a ^ b))
+        != 0
+}
+
+trait Writer {
+    type Plan: Copy;
+    fn plan(&self) -> Self::Plan;
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize);
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan);
+}
+struct EmptyWriter;
+impl Writer for EmptyWriter {
+    type Plan = ();
+    fn plan(&self) {}
+    fn check(&self, &(): &(), _: usize, _: usize) {}
+    fn write(&mut self, _: &[u16], _: usize, &(): &()) {}
+}
+struct FixedWriter<'a, const N: usize> {
+    indices: [usize; N],
+    bytes: &'a mut [[u8; N]],
+    bias: u16,
+}
+impl<'a, const N: usize> FixedWriter<'a, N> {
+    #[expect(
+        clippy::expect_used,
+        reason = "chunk descriptors cover all cycles and tile ranges partition each chunk"
+    )]
+    fn new(
+        indices: [usize; N],
+        bytes: &'a mut [u8],
+        bias: u16,
+        offset: usize,
+        cycles: usize,
+    ) -> Self {
+        Self {
+            indices,
+            bytes: bytes
+                .as_chunks_mut::<N>()
+                .0
+                .get_mut(offset..offset + cycles)
+                .expect("compiled output extent"),
+            bias,
         }
     }
 }
+impl<const N: usize> Writer for FixedWriter<'_, N> {
+    type Plan = ([usize; N], u16);
+    #[inline(always)]
+    fn plan(&self) -> Self::Plan {
+        (self.indices, self.bias)
+    }
+    #[inline(always)]
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize) {
+        assert!(!plan.0.iter().any(|&index| index >= columns));
+        assert!(self.bytes.len() >= cycles);
+    }
+    #[inline(always)]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        for (slot, &column) in self.bytes[offset].iter_mut().zip(&plan.0) {
+            *slot = digits[column].wrapping_sub(plan.1) as u8;
+        }
+    }
+}
+struct RunWriter<'a, const N: usize> {
+    start: usize,
+    bytes: &'a mut [[u8; N]],
+    bias: u16,
+}
+impl<'a, const N: usize> RunWriter<'a, N> {
+    fn new(start: usize, bytes: &'a mut [u8], bias: u16, offset: usize, cycles: usize) -> Self {
+        let writer = FixedWriter::<N>::new([0; N], bytes, bias, offset, cycles);
+        Self {
+            start,
+            bytes: writer.bytes,
+            bias,
+        }
+    }
+}
+impl<const N: usize> Writer for RunWriter<'_, N> {
+    type Plan = (usize, u16);
+    #[inline(always)]
+    fn plan(&self) -> Self::Plan {
+        (self.start, self.bias)
+    }
+    #[inline(always)]
+    fn check(&self, plan: &Self::Plan, columns: usize, cycles: usize) {
+        assert!(plan.0.checked_add(N).is_some_and(|end| end <= columns));
+        assert!(self.bytes.len() >= cycles);
+    }
+    #[inline(always)]
+    #[expect(
+        clippy::expect_used,
+        reason = "run width is fixed and its extent is checked before the cycle loop"
+    )]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        let values: &[u16; N] = digits[plan.0..plan.0 + N]
+            .try_into()
+            .expect("compiled contiguous run");
+        self.bytes[offset] = (*values).map(|digit| digit.wrapping_sub(plan.1) as u8);
+    }
+}
 
-fn cache_rows<N>(
-    source: &impl CycleSource,
-    column: usize,
-    bound: usize,
-    rows: Range<usize>,
-    cache: &mut [Option<N>],
-    encode: impl Fn(usize) -> Option<N>,
-) -> Option<RowFault> {
-    for (row, slot) in rows.zip(cache) {
-        let digit = source.row_digit(column, row);
-        if let Some(digit) = digit {
-            if digit >= bound {
-                return Some(RowFault {
-                    column,
-                    row,
-                    digit,
-                    bound,
-                });
+struct GeneralWriter<'a> {
+    columns: &'a [usize],
+    bytes: &'a mut [u8],
+    bias: u16,
+}
+impl<'a> GeneralWriter<'a> {
+    fn new(
+        columns: &'a [usize],
+        bytes: &'a mut [u8],
+        bias: u16,
+        offset: usize,
+        cycles: usize,
+    ) -> Self {
+        let width = columns.len();
+        Self {
+            columns,
+            bytes: &mut bytes[offset * width..(offset + cycles) * width],
+            bias,
+        }
+    }
+}
+impl<'a> Writer for GeneralWriter<'a> {
+    type Plan = (&'a [usize], u16);
+    fn plan(&self) -> Self::Plan {
+        (self.columns, self.bias)
+    }
+    fn check(&self, plan: &Self::Plan, columns: usize, _: usize) {
+        assert!(!plan.0.iter().any(|&index| index >= columns));
+    }
+    #[inline]
+    fn write(&mut self, digits: &[u16], offset: usize, plan: &Self::Plan) {
+        let width = plan.0.len();
+        for (slot, &column) in self.bytes[offset * width..(offset + 1) * width]
+            .iter_mut()
+            .zip(plan.0)
+        {
+            *slot = digits[column].wrapping_sub(plan.1) as u8;
+        }
+    }
+}
+struct ManyWriter<'a, 'b> {
+    output: &'a mut [Option<GroupChunk<'b>>],
+    offset: usize,
+}
+impl Writer for ManyWriter<'_, '_> {
+    type Plan = ();
+    fn plan(&self) {}
+    fn check(&self, &(): &(), _: usize, _: usize) {}
+    fn write(&mut self, digits: &[u16], offset: usize, &(): &()) {
+        let offset = self.offset + offset;
+        for group in self.output.iter_mut().flatten() {
+            match *group.columns {
+                GroupColumns::RunFive(start) => {
+                    for (slot, &digit) in group.bytes[offset * 5..(offset + 1) * 5]
+                        .iter_mut()
+                        .zip(&digits[start..start + 5])
+                    {
+                        *slot = digit.wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::RunEight(start) => {
+                    for (slot, &digit) in group.bytes[offset * 8..(offset + 1) * 8]
+                        .iter_mut()
+                        .zip(&digits[start..start + 8])
+                    {
+                        *slot = digit.wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::Five(columns) => {
+                    for (slot, column) in group.bytes[offset * 5..(offset + 1) * 5]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::Eight(columns) => {
+                    for (slot, column) in group.bytes[offset * 8..(offset + 1) * 8]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
+                GroupColumns::General(columns) => {
+                    let width = columns.len();
+                    for (slot, &column) in group.bytes[offset * width..(offset + 1) * width]
+                        .iter_mut()
+                        .zip(columns)
+                    {
+                        *slot = digits[column].wrapping_sub(group.bias) as u8;
+                    }
+                }
             }
         }
-        *slot = digit.and_then(&encode);
     }
-    None
+}
+
+trait RowChecker {
+    fn check(&self, columns: usize, rows: usize, cache: &[u16]);
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool;
+}
+
+struct FixedRows<const A: usize, const B: usize, const WIDTH: usize> {
+    first: usize,
+    second: usize,
+}
+impl<const A: usize, const B: usize, const WIDTH: usize> RowChecker for FixedRows<A, B, WIDTH> {
+    #[inline(always)]
+    fn check(&self, columns: usize, rows: usize, cache: &[u16]) {
+        if let Some(cached_rows) = cache.len().checked_div(WIDTH) {
+            assert!(cached_rows >= rows);
+            assert!(self.first.checked_add(A).is_some_and(|end| end <= columns));
+            if B != 0 {
+                assert!(self.second.checked_add(B).is_some_and(|end| end <= columns));
+            }
+        }
+    }
+    #[inline(always)]
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool {
+        if WIDTH == 0 {
+            return false;
+        }
+        let expected = &cache.as_chunks::<WIDTH>().0[row];
+        let mut difference = if A == 1 {
+            digits[self.first] ^ expected[0]
+        } else {
+            digits[self.first..self.first + A]
+                .iter()
+                .zip(&expected[..A])
+                .fold(0_u16, |difference, (a, b)| difference | (a ^ b))
+        };
+        if B != 0 {
+            difference |= if B == 1 {
+                digits[self.second] ^ expected[A]
+            } else {
+                digits[self.second..self.second + B]
+                    .iter()
+                    .zip(&expected[A..A + B])
+                    .fold(0_u16, |difference, (a, b)| difference | (a ^ b))
+            };
+        }
+        difference != 0
+    }
+}
+
+struct GeneralRows<'a> {
+    runs: &'a [RowRun],
+    width: usize,
+}
+impl RowChecker for GeneralRows<'_> {
+    fn check(&self, _: usize, _: usize, _: &[u16]) {}
+    #[inline]
+    fn compare(&self, row: usize, digits: &[u16], cache: &[u16]) -> bool {
+        let cache = &cache[row * self.width..(row + 1) * self.width];
+        self.runs.iter().fold(false, |bad, run| {
+            let difference = (run.compare)(&digits[run.columns.clone()], &cache[run.cache.clone()]);
+            bad || difference
+        })
+    }
+}
+
+struct TilePass<'a> {
+    source: &'a dyn CycleSource,
+    start: usize,
+    rows: usize,
+    tile: &'a [u16],
+    maxima: &'a mut [u16; MAX_COLUMNS],
+    minima: &'a mut [u16; MAX_COLUMNS],
+    rejected: &'a mut bool,
 }
 
 struct CycleValidation<'a> {
-    per_cycle: Vec<(usize, usize)>,
-    row_bytes: Vec<(usize, usize, &'a [Option<NonZeroU8>])>,
-    row_words: Vec<(usize, usize, &'a [Option<NonZeroUsize>])>,
-    targets: Vec<Vec<GroupTarget>>,
+    bounds: &'a [u16],
+    present: &'a [u16],
+    row_columns: &'a [RowColumn],
+    row_runs: &'a [RowRun],
+    row_cache: &'a [u16],
 }
 
 impl CycleValidation<'_> {
@@ -339,152 +622,383 @@ impl CycleValidation<'_> {
         source: &impl CycleSource,
         cycles: Range<usize>,
         rows: usize,
-        output: &mut [(usize, GroupChunk<'_>)],
+        output: &mut [Option<GroupChunk<'_>>],
     ) -> Result<(), SourceError> {
-        let mut fault = cycles.clone().find_map(|cycle| {
-            let row = source.bytecode_index(cycle);
-            (row >= rows).then_some((cycle, 0, SourceError::BytecodeIndex { cycle, row, rows }))
-        });
-        let end = fault
-            .as_ref()
-            .map_or(cycles.end, |(cycle, _, _)| *cycle)
-            .min(source.cycles());
-        let source_columns = source.digit_columns();
-        macro_rules! scan {
-            ($column:expr, $bound:expr, $matches:expr, $slots:expr, $store:expr, $present:expr) => {{
-                let column = $column;
-                let bound = $bound;
-                for (cycle, slot) in (cycles.start..end).zip($slots) {
-                    let digit = source.digit(column, cycle);
-                    let error = if let Some(digit) = digit.filter(|&digit| digit >= bound) {
-                        Some(SourceError::Digit {
-                            column,
-                            cycle,
-                            digit,
-                            bound,
-                        })
-                    } else if let Some(error) = $matches(digit, cycle) {
-                        Some(error)
-                    } else if $present && digit.is_none() {
-                        Some(SourceError::MissingDigit { column, cycle })
-                    } else {
-                        $store(slot, digit, cycle);
-                        None
-                    };
-                    if let Some(error) = error {
-                        let rank = column + 1;
-                        if fault.as_ref().is_none_or(|(previous, previous_rank, _)| {
-                            (cycle, rank) < (*previous, *previous_rank)
-                        }) {
-                            fault = Some((cycle, rank, error));
-                        }
-                        break;
+        let columns = self.bounds.len();
+        let tile_cycles = TILE_ENTRIES / columns.max(1);
+        let mut buffer = [0_u16; TILE_ENTRIES];
+        for start in (cycles.start..cycles.end).step_by(tile_cycles) {
+            let end = (start + tile_cycles).min(cycles.end);
+            let tile = &mut buffer[..(end - start) * columns];
+            source.digits(start..end, tile);
+            let mut maxima = [0_u16; MAX_COLUMNS];
+            let mut minima = [u16::MAX; MAX_COLUMNS];
+            let mut rejected = false;
+            if columns == 0 {
+                rejected = (start..end).any(|cycle| source.bytecode_index(cycle) >= rows);
+            } else {
+                self.fast_source_tile(
+                    source,
+                    TilePass {
+                        source,
+                        start,
+                        rows,
+                        tile,
+                        maxima: &mut maxima,
+                        minima: &mut minima,
+                        rejected: &mut rejected,
+                    },
+                    output,
+                    start - cycles.start,
+                );
+            }
+            rejected |= maxima[..columns]
+                .iter()
+                .zip(self.bounds)
+                .any(|(&maximum, &bound)| maximum > bound);
+            rejected |= minima[..columns]
+                .iter()
+                .zip(self.present)
+                .any(|(&minimum, &present)| minimum < present);
+            if rejected {
+                self.scalar_ladder(source, start..end, rows, tile)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn fast_source_tile<S: CycleSource>(
+        &self,
+        source: &S,
+        pass: TilePass<'_>,
+        output: &mut [Option<GroupChunk<'_>>],
+        offset: usize,
+    ) {
+        match self.row_runs {
+            [run] if run.columns.len() == 1 => self.fast_tile_rows(
+                pass,
+                output,
+                offset,
+                FixedRows::<1, 0, 1> {
+                    first: run.columns.start,
+                    second: 0,
+                },
+                source,
+            ),
+            [first, second] if first.columns.len() == 5 && second.columns.len() == 6 => self
+                .fast_tile_rows(
+                    pass,
+                    output,
+                    offset,
+                    FixedRows::<5, 6, { 5 + 6 }> {
+                        first: first.columns.start,
+                        second: second.columns.start,
+                    },
+                    source,
+                ),
+            _ => self.fast_tile(pass, output, offset),
+        }
+    }
+
+    fn fast_tile(&self, pass: TilePass<'_>, output: &mut [Option<GroupChunk<'_>>], offset: usize) {
+        let source = pass.source;
+        macro_rules! dispatch {
+            ($checker:expr) => {
+                self.fast_tile_rows(pass, output, offset, $checker, source)
+            };
+        }
+        macro_rules! pair {
+            ($first:expr, $second:expr; $($a:literal),*) => {
+                match $first.columns.len() {
+                    $($a => match $second.columns.len() {
+                        1 => dispatch!(FixedRows::<$a, 1, {$a + 1}> { first: $first.columns.start, second: $second.columns.start }),
+                        5 => dispatch!(FixedRows::<$a, 5, {$a + 5}> { first: $first.columns.start, second: $second.columns.start }),
+                        6 => dispatch!(FixedRows::<$a, 6, {$a + 6}> { first: $first.columns.start, second: $second.columns.start }),
+                        _ => dispatch!(GeneralRows { runs: self.row_runs, width: self.row_columns.len() }),
+                    },)*
+                    _ => dispatch!(GeneralRows { runs: self.row_runs, width: self.row_columns.len() }),
+                }
+            };
+        }
+        match self.row_runs {
+            [] => dispatch!(FixedRows::<0, 0, 0> {
+                first: 0,
+                second: 0
+            }),
+            [run] => match run.columns.len() {
+                1 => dispatch!(FixedRows::<1, 0, 1> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                5 => dispatch!(FixedRows::<5, 0, 5> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                6 => dispatch!(FixedRows::<6, 0, 6> {
+                    first: run.columns.start,
+                    second: 0
+                }),
+                _ => dispatch!(GeneralRows {
+                    runs: self.row_runs,
+                    width: self.row_columns.len()
+                }),
+            },
+            [first, second] => {
+                pair!(first, second; 1, 5, 6);
+            }
+            _ => dispatch!(GeneralRows {
+                runs: self.row_runs,
+                width: self.row_columns.len()
+            }),
+        }
+    }
+
+    fn fast_tile_rows<R: RowChecker, S: CycleSource + ?Sized>(
+        &self,
+        pass: TilePass<'_>,
+        output: &mut [Option<GroupChunk<'_>>],
+        offset: usize,
+        checker: R,
+        source: &S,
+    ) {
+        macro_rules! tails {
+            ($a:expr, $b:expr, $c:expr; $($tail:literal),*) => {
+                match self.bounds.len() % 16 {
+                    $($tail => self.healthy::<$tail, _, _, _, _, _>(source, pass.start, pass.rows, pass.tile, pass.maxima, pass.minima, pass.rejected, $a, $b, $c, checker),)*
+                    _ => unreachable!("remainder is below sixteen"),
+                }
+            };
+            ($a:expr, $b:expr, $c:expr) => {
+                tails!($a, $b, $c; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+            };
+        }
+        macro_rules! writer {
+            ($group:expr, $name:ident, $body:block) => {{
+                let group = $group;
+                match group.map(|g| (*g.columns, &mut *g.bytes, g.bias)) {
+                    None => {
+                        let $name = EmptyWriter;
+                        $body
+                    }
+                    Some((GroupColumns::RunFive(start), bytes, bias)) => {
+                        let $name = RunWriter::<5>::new(
+                            start,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::RunEight(start), bytes, bias)) => {
+                        let $name = RunWriter::<8>::new(
+                            start,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::Five(indices), bytes, bias)) => {
+                        let $name = FixedWriter::<5>::new(
+                            indices,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::Eight(indices), bytes, bias)) => {
+                        let $name = FixedWriter::<8>::new(
+                            indices,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
+                    }
+                    Some((GroupColumns::General(columns), bytes, bias)) => {
+                        let $name = GeneralWriter::new(
+                            columns,
+                            bytes,
+                            bias,
+                            offset,
+                            pass.tile.len() / self.bounds.len(),
+                        );
+                        $body
                     }
                 }
             }};
         }
-        macro_rules! column {
-            ($column:expr, $bound:expr, $matches:expr) => {{
-                if $column >= source_columns {
-                    return Err(SourceError::Column {
-                        column: $column,
-                        columns: source_columns,
+        if output.len() <= 3 {
+            let mut groups = output.iter_mut();
+            writer!(groups.next().and_then(Option::as_mut), a, {
+                writer!(groups.next().and_then(Option::as_mut), b, {
+                    writer!(groups.next().and_then(Option::as_mut), c, {
+                        tails!(a, b, c);
+                    });
+                });
+            });
+        } else {
+            let a = ManyWriter { output, offset };
+            tails!(a, EmptyWriter, EmptyWriter);
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "tail dispatch fixes the conversion widths before the cycle loop"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "separate slice references preserve LLVM noalias for the vectorized accumulator loop"
+    )]
+    fn healthy<
+        const TAIL: usize,
+        A: Writer,
+        B: Writer,
+        C: Writer,
+        R: RowChecker,
+        S: CycleSource + ?Sized,
+    >(
+        &self,
+        source: &S,
+        start: usize,
+        rows: usize,
+        tile: &[u16],
+        maxima: &mut [u16; MAX_COLUMNS],
+        minima: &mut [u16; MAX_COLUMNS],
+        rejected: &mut bool,
+        mut a: A,
+        mut b: B,
+        mut c: C,
+        checker: R,
+    ) {
+        let columns = self.bounds.len();
+        let prefix = columns - TAIL;
+        let (max_prefix, max_tail) = maxima[..columns].split_at_mut(prefix);
+        let (min_prefix, min_tail) = minima[..columns].split_at_mut(prefix);
+        let max_tail: &mut [u16; TAIL] = max_tail.try_into().expect("compiled tail width");
+        let min_tail: &mut [u16; TAIL] = min_tail.try_into().expect("compiled tail width");
+        let max_prefix = max_prefix.as_chunks_mut::<16>().0;
+        let min_prefix = min_prefix.as_chunks_mut::<16>().0;
+        let tile_cycles = tile.len() / columns;
+        // Local copies keep source calls and output writes from invalidating
+        // the index checks made before this loop.
+        let a_plan = a.plan();
+        let b_plan = b.plan();
+        let c_plan = c.plan();
+        a.check(&a_plan, columns, tile_cycles);
+        b.check(&b_plan, columns, tile_cycles);
+        c.check(&c_plan, columns, tile_cycles);
+        checker.check(columns, rows, self.row_cache);
+        for (offset, digits) in (0..tile_cycles).zip(tile.chunks_exact(columns)) {
+            let row = source.bytecode_index(start + offset);
+            if row >= rows {
+                *rejected = true;
+            } else {
+                *rejected |= checker.compare(row, digits, self.row_cache);
+            }
+            let (values, tail) = digits.split_at(prefix);
+            for ((maximum, minimum), values) in max_prefix
+                .iter_mut()
+                .zip(min_prefix.iter_mut())
+                .zip(values.as_chunks::<16>().0)
+            {
+                for ((maximum, minimum), &value) in
+                    maximum.iter_mut().zip(minimum.iter_mut()).zip(values)
+                {
+                    *maximum = (*maximum).max(value);
+                    *minimum = (*minimum).min(value);
+                }
+            }
+            let tail: &[u16; TAIL] = tail.try_into().expect("compiled tail width");
+            for ((maximum, minimum), &value) in
+                max_tail.iter_mut().zip(min_tail.iter_mut()).zip(tail)
+            {
+                *maximum = (*maximum).max(value);
+                *minimum = (*minimum).min(value);
+            }
+            a.write(digits, offset, &a_plan);
+            b.write(digits, offset, &b_plan);
+            c.write(digits, offset, &c_plan);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scalar_ladder(
+        &self,
+        source: &impl CycleSource,
+        cycles: Range<usize>,
+        rows: usize,
+        tile: &[u16],
+    ) -> Result<(), SourceError> {
+        for cycle in cycles.clone() {
+            let row = source.bytecode_index(cycle);
+            if row >= rows {
+                return Err(SourceError::BytecodeIndex { cycle, row, rows });
+            }
+            for (column, &bound) in self.bounds.iter().enumerate() {
+                let digit = source.digit(column, cycle);
+                let encoded = tile[(cycle - cycles.start) * self.bounds.len() + column];
+                if encoded != encode_digit(digit) {
+                    return Err(SourceError::DigitView {
+                        column,
+                        cycle,
+                        encoded,
+                        digit,
                     });
                 }
-                let targets = &self.targets[$column];
-                match targets.as_slice() {
-                    [] => scan!(
-                        $column,
-                        $bound,
-                        $matches,
-                        std::iter::repeat(()),
-                        |_, _, _| {},
-                        false
-                    ),
-                    [target] => {
-                        let GroupChunk { bytes, stride } = &mut output[target.group].1;
-                        let slots = bytes.iter_mut().skip(target.position).step_by(*stride);
-                        if target.optional {
-                            scan!(
-                                $column,
-                                $bound,
-                                $matches,
-                                slots,
-                                |slot: &mut u8, digit: Option<usize>, _| *slot =
-                                    digit.map_or(0, |d| (d + 1) as u8),
-                                false
-                            );
-                        } else {
-                            scan!(
-                                $column,
-                                $bound,
-                                $matches,
-                                slots,
-                                |slot: &mut u8, digit: Option<usize>, _| *slot =
-                                    digit.unwrap_or(0) as u8,
-                                true
-                            );
-                        }
-                    }
-                    _ => {
-                        let present = targets.iter().any(|target| !target.optional);
-                        scan!(
-                            $column,
-                            $bound,
-                            $matches,
-                            std::iter::repeat(()),
-                            |_, digit: Option<usize>, cycle: usize| {
-                                for target in targets {
-                                    let group = &mut output[target.group].1;
-                                    let byte = if target.optional {
-                                        digit.map_or(0, |d| (d + 1) as u8)
-                                    } else {
-                                        digit.unwrap_or(0) as u8
-                                    };
-                                    group.bytes
-                                        [(cycle - cycles.start) * group.stride + target.position] =
-                                        byte;
-                                }
-                            },
-                            present
-                        );
+                if let Some(digit) = digit.filter(|&digit| digit >= usize::from(bound)) {
+                    return Err(SourceError::Digit {
+                        column,
+                        cycle,
+                        digit,
+                        bound: usize::from(bound),
+                    });
+                }
+                if source.by_row(column) {
+                    let position = self.row_columns.iter().position(|row| row.column == column);
+                    let cache_matches = position.is_none_or(|position| {
+                        self.row_cache[row * self.row_columns.len() + position] == encoded
+                    });
+                    if !cache_matches || digit != source.row_digit(column, row) {
+                        return Err(SourceError::RowDigit { column, cycle, row });
                     }
                 }
-            }};
+                if self.present[column] != 0 && digit.is_none() {
+                    return Err(SourceError::MissingDigit { column, cycle });
+                }
+            }
         }
-        for &(column, bound) in &self.per_cycle {
-            column!(column, bound, |_, _| None);
-        }
-        for &(column, bound, cache) in &self.row_bytes {
-            column!(column, bound, |digit: Option<usize>, cycle| {
-                let row = source.bytecode_index(cycle);
-                (digit.map_or(0, |value| value + 1)
-                    != cache[row].map_or(0, |value| usize::from(value.get())))
-                .then_some(SourceError::RowDigit { column, cycle, row })
-            });
-        }
-        for &(column, bound, cache) in &self.row_words {
-            column!(column, bound, |digit: Option<usize>, cycle| {
-                let row = source.bytecode_index(cycle);
-                (digit.map_or(0, |value| value + 1) != cache[row].map_or(0, NonZeroUsize::get))
-                    .then_some(SourceError::RowDigit { column, cycle, row })
-            });
-        }
-        if let Some((_, _, error)) = fault {
-            return Err(error);
-        }
+        // Every fast predicate forces a ladder fault on an immutable source:
+        // bad index, encoded range/presence, or disagreement with the row cache.
+        // A source that changes between reads violates the trait contract; this
+        // total recheck does not introduce an impossible arm or an unsafe premise.
         Ok(())
     }
 }
 
+#[inline]
+fn encode_digit(digit: Option<usize>) -> u16 {
+    digit.map_or(0, |digit| {
+        digit.saturating_add(1).min(u16::MAX as usize) as u16
+    })
+}
+
 /// Shared source whose dimensions, indices and every digit column are checked.
-/// Construction reads every row-based digit once and every cycle digit once.
+/// Successful construction reads each row-based digit once and each tile once.
+/// Rejected tiles are reread through the scalar accessors to locate their fault.
 /// Temporary row caches are dropped before returning; the source owns its data.
 /// After dimension and request checks, fault order is: all rows before all cycles; rows ascending, then columns
 /// ascending; cycles ascending, then `BytecodeIndex`, then columns ascending,
-/// and within a column `Digit`, `RowDigit`, `MissingDigit`. Each column scan
-/// stops at its first fault; each chunk chooses the least cycle and rank, and
-/// preparation returns the fault of the first offending chunk. A row-based
+/// and within a column `DigitView`, `Digit`, `RowDigit`, `MissingDigit`.
+/// Tiles are visited in ascending cycle order; rejected tiles use the scalar
+/// ladder in that order. Preparation returns the fault of the first offending chunk. A row-based
 /// column reads no cache entry at an invalid bytecode index. Parallel
 /// completion cannot change this order.
 /// The guarantee relies on the immutability contract of [`CycleSource`].
@@ -501,7 +1015,11 @@ impl<S: CycleSource> ValidatedTrace<S> {
     /// Validates once and writes requested byte groups in that same parallel
     /// walk. Request columns and widths are rejected before any digit read.
     /// Group buffers have exactly `cycles * columns` bytes; row caches and
-    /// chunk descriptors are temporary, with no allocation per chunk.
+    /// chunk descriptors are temporary, with no allocation per chunk. Group
+    /// indices and row runs are compiled before the cycle walk; fixed-width
+    /// writers and comparisons are selected outside its cycle loop.
+    /// At most 128 digit columns of at most 15 bits are accepted. Each active
+    /// worker uses an 8 KiB stack tile and two 256-byte column accumulators.
     pub fn prepare(
         source: Arc<S>,
         request: PrepareRequest,
@@ -515,38 +1033,38 @@ impl<S: CycleSource> ValidatedTrace<S> {
             return Err(SourceError::BytecodeRows { rows });
         }
         let columns = source.digit_columns();
+        if columns > MAX_COLUMNS {
+            return Err(SourceError::ColumnCapacity {
+                columns,
+                max_columns: MAX_COLUMNS,
+            });
+        }
         check_validation_size::<usize>(columns, "digit widths")?;
-        check_validation_size::<Option<Vec<Option<NonZeroUsize>>>>(
-            columns,
-            "row digit cache metadata",
-        )?;
         check_validation_size::<RowColumn>(columns, "row digit cache columns")?;
         let mut widths = Vec::with_capacity(columns);
-        let mut row_digits = Vec::new();
-        let mut per_cycle = Vec::new();
+        let mut row_columns = Vec::new();
+        let mut bounds = Vec::with_capacity(columns);
         for column in 0..columns {
             let bits = source.bits(column);
-            if bits >= usize::BITS as usize {
+            if bits > 15 {
                 return Err(SourceError::Width { column, bits });
             }
             widths.push(bits);
             let bound = 1 << bits;
+            bounds.push(bound as u16);
             if source.by_row(column) {
-                check_validation_size::<Option<NonZeroUsize>>(rows, "row digit cache")?;
-                let digits = if bits < u8::BITS as usize {
-                    RowDigits::Byte(vec![None; rows])
-                } else {
-                    RowDigits::Word(vec![None; rows])
-                };
-                row_digits.push(RowColumn {
-                    column,
-                    bound,
-                    digits,
-                });
-            } else {
-                per_cycle.push((column, bound));
+                row_columns.push(RowColumn { column, bound });
             }
         }
+        let cache_len =
+            rows.checked_mul(row_columns.len())
+                .ok_or(SourceError::ValidationScratchSize {
+                    name: "row digit cache",
+                    len: rows,
+                    element_size: row_columns.len(),
+                })?;
+        check_validation_size::<u16>(cache_len, "row digit cache")?;
+        let mut row_cache = unsafe_allocate_zero_vec::<u16>(cache_len);
         let mut groups = PreparedGroups {
             present: request
                 .present
@@ -559,113 +1077,86 @@ impl<S: CycleSource> ValidatedTrace<S> {
                 .map(|columns| GroupData::allocate(columns, &widths, cycles, 7).map(OptionalGroup))
                 .collect::<Result<_, _>>()?,
         };
-        let mut targets = vec![Vec::new(); columns];
-        let mut group_count = 0;
-        for (group, optional) in groups
+        let mut present = vec![0_u16; columns];
+        for group in &groups.present {
+            for &column in &group.0.columns {
+                present[column] = 1;
+            }
+        }
+        let group_count = groups
             .present
             .iter()
-            .map(|group| (&group.0, false))
-            .chain(groups.optional.iter().map(|group| (&group.0, true)))
-        {
-            if group.columns.is_empty() {
-                continue;
-            }
-            for (position, &column) in group.columns.iter().enumerate() {
-                targets[column].push(GroupTarget {
-                    group: group_count,
-                    position,
-                    optional,
-                });
-            }
-            group_count += 1;
-        }
-        if !row_digits.is_empty() {
-            let chunk_count = rows.div_ceil(ROW_CHUNK);
-            let descriptors = chunk_count.checked_mul(row_digits.len()).ok_or(
-                SourceError::ValidationScratchSize {
-                    name: "row chunk metadata",
-                    len: chunk_count,
-                    element_size: size_of::<(usize, RowChunk<'_>)>(),
-                },
-            )?;
-            check_validation_size::<(usize, RowChunk<'_>)>(descriptors, "row chunk metadata")?;
-            let column_count = row_digits.len();
-            let mut chunks = Vec::with_capacity(descriptors);
-            for RowColumn {
-                column,
-                bound,
-                digits,
-            } in &mut row_digits
-            {
-                match digits {
-                    RowDigits::Byte(digits) => {
-                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
-                            chunks.push((
-                                chunk,
-                                RowChunk::Byte {
-                                    column: *column,
-                                    bound: *bound,
-                                    digits,
-                                },
-                            ));
-                        }
-                    }
-                    RowDigits::Word(digits) => {
-                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
-                            chunks.push((
-                                chunk,
-                                RowChunk::Word {
-                                    column: *column,
-                                    bound: *bound,
-                                    digits,
-                                },
-                            ));
-                        }
-                    }
-                }
-            }
-            chunks.sort_unstable_by_key(|(chunk, _)| *chunk);
-            if let Some(Some(fault)) = chunks
-                .par_chunks_mut(column_count)
+            .filter(|g| !g.0.columns.is_empty())
+            .count()
+            + groups
+                .optional
+                .iter()
+                .filter(|g| !g.0.columns.is_empty())
+                .count();
+        if !row_columns.is_empty() {
+            if let Some(Some(error)) = row_cache
+                .par_chunks_mut(ROW_CHUNK * row_columns.len())
                 .enumerate()
-                .map(|(chunk, columns)| {
-                    let rows = chunk * ROW_CHUNK..((chunk + 1) * ROW_CHUNK).min(rows);
-                    columns
-                        .iter_mut()
-                        .filter_map(|(_, column)| column.validate(source.as_ref(), rows.clone()))
-                        .min_by_key(|fault| (fault.row, fault.column))
+                .map(|(chunk, cache)| {
+                    for (offset, output) in cache.chunks_exact_mut(row_columns.len()).enumerate() {
+                        let row = chunk * ROW_CHUNK + offset;
+                        for (slot, RowColumn { column, bound }) in
+                            output.iter_mut().zip(&row_columns)
+                        {
+                            let digit = source.row_digit(*column, row);
+                            if let Some(digit) = digit.filter(|digit| digit >= bound) {
+                                return Some(SourceError::RowDigitRange {
+                                    column: *column,
+                                    row,
+                                    digit,
+                                    bound: *bound,
+                                });
+                            }
+                            *slot = digit.map_or(0, |digit| (digit + 1) as u16);
+                        }
+                    }
+                    None
                 })
                 .find_first(Option::is_some)
             {
-                return Err(SourceError::RowDigitRange {
-                    column: fault.column,
-                    row: fault.row,
-                    digit: fault.digit,
-                    bound: fault.bound,
+                return Err(error);
+            }
+        }
+        let mut row_runs: Vec<RowRun> = Vec::new();
+        for (position, row) in row_columns.iter().enumerate() {
+            if let Some(run) = row_runs
+                .last_mut()
+                .filter(|run| run.columns.end == row.column)
+            {
+                run.columns.end += 1;
+                run.cache.end += 1;
+            } else {
+                row_runs.push(RowRun {
+                    columns: row.column..row.column + 1,
+                    cache: position..position + 1,
+                    compare: compare_general,
                 });
             }
         }
-        let mut validation = CycleValidation {
-            per_cycle,
-            row_bytes: Vec::new(),
-            row_words: Vec::new(),
-            targets,
-        };
-        for RowColumn {
-            column,
-            bound,
-            digits,
-        } in &row_digits
-        {
-            match digits {
-                RowDigits::Byte(digits) => validation.row_bytes.push((*column, *bound, digits)),
-                RowDigits::Word(digits) => validation.row_words.push((*column, *bound, digits)),
-            }
+        for run in &mut row_runs {
+            run.compare = match run.columns.len() {
+                1 => compare_run::<1>,
+                5 => compare_run::<5>,
+                6 => compare_run::<6>,
+                _ => compare_general,
+            };
         }
+        let validation = CycleValidation {
+            bounds: &bounds,
+            present: &present,
+            row_columns: &row_columns,
+            row_runs: &row_runs,
+            row_cache: &row_cache,
+        };
         let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)
             .map_err(|_| SourceError::CycleCount { cycles })?;
         let chunk_count = cycles / geometry.chunk_len();
-        let validate = |chunk: usize, output: &mut [(usize, GroupChunk<'_>)]| {
+        let validate = |chunk: usize, output: &mut [Option<GroupChunk<'_>>]| {
             let start = chunk * geometry.chunk_len();
             validation.validate_chunk(
                 source.as_ref(),
@@ -688,32 +1179,43 @@ impl<S: CycleSource> ValidatedTrace<S> {
                         len: chunk_count,
                         element_size: size_of::<GroupChunk<'_>>(),
                     })?;
-            check_validation_size::<(usize, GroupChunk<'_>)>(len, "group chunk metadata")?;
-            let mut chunks = Vec::with_capacity(len);
-            let mut group_index = 0;
-            for group in groups
+            check_validation_size::<Option<GroupChunk<'_>>>(len, "group chunk metadata")?;
+            let mut chunks: Vec<Option<GroupChunk<'_>>> =
+                std::iter::repeat_with(|| None).take(len).collect();
+            let views: Vec<_> = groups
                 .present
                 .iter_mut()
-                .map(|group| &mut group.0)
-                .chain(groups.optional.iter_mut().map(|group| &mut group.0))
+                .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], false))
+                .chain(
+                    groups
+                        .optional
+                        .iter_mut()
+                        .map(|group| (&group.0.columns[..], &mut group.0.bytes[..], true)),
+                )
+                .filter(|(columns, _, _)| !columns.is_empty())
+                .collect();
+            check_validation_size::<GroupColumns<'_>>(views.len(), "group plans")?;
+            let plans: Vec<_> = views
+                .iter()
+                .map(|(columns, _, _)| GroupColumns::new(columns))
+                .collect();
+            for (group_index, ((columns, bytes, optional), plan)) in
+                views.into_iter().zip(&plans).enumerate()
             {
-                let stride = group.columns.len();
-                if stride == 0 {
-                    continue;
-                }
-                for (chunk, bytes) in group
-                    .bytes
-                    .chunks_mut(geometry.chunk_len() * stride)
-                    .enumerate()
+                let stride = columns.len();
+                for (slot, bytes) in chunks
+                    .iter_mut()
+                    .skip(group_index)
+                    .step_by(group_count)
+                    .zip(bytes.chunks_mut(geometry.chunk_len() * stride))
                 {
-                    chunks.push((
-                        chunk * group_count + group_index,
-                        GroupChunk { bytes, stride },
-                    ));
+                    *slot = Some(GroupChunk {
+                        bytes,
+                        columns: plan,
+                        bias: u16::from(!optional),
+                    });
                 }
-                group_index += 1;
             }
-            chunks.sort_unstable_by_key(|(chunk, _)| *chunk);
             chunks
                 .par_chunks_mut(group_count)
                 .enumerate()

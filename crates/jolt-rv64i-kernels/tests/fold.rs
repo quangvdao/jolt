@@ -1232,44 +1232,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn fold_rejects_unrepresentable_bucket_and_histogram_storage() {
-        let mut source = Trace::small(vec![Some(0); 8]);
-        source.widths.extend([usize::BITS as usize - 6, 1]);
-        source.by_row.extend([false, false]);
-        source.digits.extend([vec![None; 8], vec![Some(0); 8]]);
-        source.row_digits.extend([vec![None], vec![None]]);
-        let trace = Arc::new(ValidatedTrace::new(Arc::new(source)).unwrap());
-        let shape = RouterShape::new(RouterShapeRequest {
-            slots: 7,
-            bank: vec![WordSlot::Bits(vec![BitEntry::Indicator {
-                column: 1,
-                value: 0,
-            }])],
-            factors: vec![SelectorFactor {
-                column: 2,
-                slots: vec![6],
-            }],
-            word_slots: vec![],
-            log_outputs: 0,
-            route: vec![],
-        })
-        .unwrap();
-        assert_eq!(
-            FoldLayout::new(&trace, &[shape], &[vec![]]).unwrap_err(),
-            RouterError::Dimension {
-                variables: usize::BITS as usize
-            }
-        );
-        let shapes = vec![small_shape(WordSlot::Trace(0))];
-        let layout = FoldLayout::new(&trace, &shapes, &[vec![]]).unwrap();
-        let plan = ScatterPlan::new(Arc::clone(&trace)).unwrap();
-        assert_eq!(
-            fold_pass(&trace, &shapes, &[ZERO; 3], &plan, &layout, &[1, 1]).unwrap_err(),
-            RouterError::Dimension {
-                variables: usize::BITS as usize
-            }
-        );
-    }
 }

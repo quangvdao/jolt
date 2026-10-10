@@ -356,6 +356,8 @@ pub struct FoldOutput {
 #[inline]
 fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
     if bytes {
+        let storage: &mut [F128; BucketPlacement::Byte.word_entries()] =
+            storage.try_into().expect("whole byte word");
         for position in 0..ByteBuckets::POSITIONS_PER_WORD {
             let base = BucketPlacement::Byte.position_offset(position);
             storage[base + (word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] +=
@@ -930,5 +932,24 @@ fn word_total(buckets: &[F128], base: usize, bytes: bool) -> F128 {
                 .try_into()
                 .expect("nibble position"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{storage_add, RouterError};
+
+    #[test]
+    fn bucket_and_histogram_storage_reject_unrepresentable_bytes() {
+        let error = RouterError::Dimension {
+            variables: usize::BITS as usize,
+        };
+        let mut elements = usize::MAX;
+        assert_eq!(storage_add(&mut elements, 1), Err(error.clone()));
+        let mut elements = 0;
+        assert_eq!(
+            storage_add(&mut elements, 1 << (usize::BITS - 4)),
+            Err(error)
+        );
     }
 }

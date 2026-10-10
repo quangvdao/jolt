@@ -124,19 +124,33 @@ impl RoutersCycleCore {
     /// different slots. Prepare this list as one optional group for `new`.
     pub fn columns(shapes: &[RouterShape]) -> Vec<usize> {
         Self::factors(shapes)
+            .0
             .iter()
             .map(|factor| factor.column)
             .collect()
     }
 
-    fn factors(shapes: &[RouterShape]) -> Vec<&SelectorFactor> {
+    fn factors(shapes: &[RouterShape]) -> (Vec<&SelectorFactor>, Vec<Vec<usize>>) {
         let mut factors = Vec::new();
-        for factor in shapes.iter().flat_map(RouterShape::factors) {
-            if !factors.contains(&factor) {
-                factors.push(factor);
-            }
-        }
-        factors
+        let columns = shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .factors()
+                    .iter()
+                    .map(|factor| {
+                        factors
+                            .iter()
+                            .position(|other| *other == factor)
+                            .unwrap_or_else(|| {
+                                factors.push(factor);
+                                factors.len() - 1
+                            })
+                    })
+                    .collect()
+            })
+            .collect();
+        (factors, columns)
     }
 
     /// Takes one prepared optional group and one `T`-element source table per
@@ -185,8 +199,8 @@ impl RoutersCycleCore {
                 });
             }
         }
-        let factors = Self::factors(shapes);
-        let expected = Self::columns(shapes);
+        let (factors, shape_columns) = Self::factors(shapes);
+        let expected: Vec<_> = factors.iter().map(|factor| factor.column).collect();
         if group.columns() != expected {
             return Err(RouterError::GroupColumns {
                 expected,
@@ -208,16 +222,7 @@ impl RoutersCycleCore {
             degrees: Vec::new(),
             batches: Vec::new(),
         };
-        for (shape, value) in shapes.iter().enumerate() {
-            let mut columns = Vec::new();
-            for factor in value.factors() {
-                let index = factors.iter().position(|other| *other == factor).ok_or(
-                    RouterError::Factors {
-                        count: value.factors().len(),
-                    },
-                )?;
-                columns.push(index);
-            }
+        for (shape, columns) in shape_columns.into_iter().enumerate() {
             if shape.is_multiple_of(SHAPES_PER_BATCH) {
                 recipe.batches.push(BatchRecipe::default());
             }

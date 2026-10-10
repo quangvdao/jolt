@@ -12,6 +12,7 @@ use jolt_rv64i_kernels::synth::{SynthError, SynthProfile, SyntheticTrace};
 use rayon::ThreadPoolBuilder;
 use std::collections::BTreeSet;
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -271,7 +272,7 @@ fn source_validation_rejects_each_malformed_source_contract() {
     ));
 
     let mut source = SourceFixture::new();
-    source.widths[1] = usize::BITS as usize;
+    source.widths[1] = 16;
     assert!(matches!(
         ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::Width { column: 1, .. })
@@ -371,6 +372,128 @@ fn preparation_reads_each_digit_once_for_repeated_group_columns() {
     }
 }
 
+struct LiteralRowSource {
+    digits: Vec<[Option<usize>; 3]>,
+    digit_reads: Vec<[AtomicUsize; 3]>,
+}
+
+impl CycleSource for LiteralRowSource {
+    fn cycles(&self) -> usize {
+        self.digits.len()
+    }
+    fn trace_words(&self) -> usize {
+        0
+    }
+    fn trace_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_rows(&self) -> usize {
+        2
+    }
+    fn bytecode_words(&self) -> usize {
+        0
+    }
+    fn bytecode_word(&self, _: usize, _: usize) -> u64 {
+        0
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        [0, 1, 1, 0][cycle % 4]
+    }
+    fn digit_columns(&self) -> usize {
+        3
+    }
+    fn bits(&self, _: usize) -> usize {
+        2
+    }
+    fn by_row(&self, column: usize) -> bool {
+        column == 0 || column == 2
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        let _previous = self.digit_reads[cycle][column].fetch_add(1, Ordering::Relaxed);
+        self.digits[cycle][column]
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        [[Some(0), None, Some(2)], [Some(1), None, Some(3)]][row][column]
+    }
+}
+
+#[test]
+fn preparation_checks_distinct_row_columns_without_rereading_valid_digits() {
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let source = Arc::new(LiteralRowSource {
+                    digits: vec![
+                        [Some(0), Some(1), Some(2)],
+                        [Some(1), None, Some(3)],
+                        [Some(1), Some(2), Some(3)],
+                        [Some(0), Some(3), Some(2)],
+                    ],
+                    digit_reads: (0..4)
+                        .map(|_| std::array::from_fn(|_| AtomicUsize::new(0)))
+                        .collect(),
+                });
+                let (_, groups) = ValidatedTrace::prepare(
+                    Arc::clone(&source),
+                    PrepareRequest {
+                        present: vec![vec![2, 0, 2]],
+                        optional: vec![vec![1, 2, 0]],
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    groups.present[0].bytes(),
+                    &[2, 0, 2, 3, 1, 3, 3, 1, 3, 2, 0, 2]
+                );
+                assert_eq!(
+                    groups.optional[0].bytes(),
+                    &[2, 3, 1, 0, 4, 2, 3, 4, 2, 4, 3, 1]
+                );
+                for reads in source.digit_reads.iter().flatten() {
+                    assert_eq!(reads.load(Ordering::Relaxed), 1);
+                }
+            });
+    }
+}
+
+#[test]
+fn validation_reports_the_only_fault_at_the_final_partial_tile_cycle() {
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut digits = [
+                    [Some(0), Some(1), Some(2)],
+                    [Some(1), None, Some(3)],
+                    [Some(1), Some(2), Some(3)],
+                    [Some(0), Some(3), Some(2)],
+                ]
+                .repeat(2048);
+                digits[8191][1] = Some(4);
+                let source = Arc::new(LiteralRowSource {
+                    digits,
+                    digit_reads: (0..8192)
+                        .map(|_| std::array::from_fn(|_| AtomicUsize::new(0)))
+                        .collect(),
+                });
+                assert_eq!(
+                    ValidatedTrace::new(source).err(),
+                    Some(SourceError::Digit {
+                        column: 1,
+                        cycle: 8191,
+                        digit: 4,
+                        bound: 4,
+                    })
+                );
+            });
+    }
+}
+
 #[test]
 fn preparation_rejects_request_columns_and_widths_before_digit_reads() {
     for (request, expected) in [
@@ -466,9 +589,9 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     source.columns = usize::MAX;
     assert!(matches!(
         ValidatedTrace::new(Arc::new(source)),
-        Err(SourceError::ValidationScratchSize {
-            len: usize::MAX,
-            ..
+        Err(SourceError::ColumnCapacity {
+            columns: usize::MAX,
+            max_columns: 128,
         })
     ));
 
@@ -476,15 +599,15 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     let mut source = SourceFixture::new();
     source.columns = columns;
     assert!(matches!(ValidatedTrace::new(Arc::new(source)),
-        Err(SourceError::ValidationScratchSize { len, element_size, .. })
-        if len == columns && element_size > size_of::<usize>()));
+        Err(SourceError::ColumnCapacity { columns: actual, max_columns: 128 })
+        if actual == columns));
 
     let rows = 1_usize << (usize::BITS - 1);
     let mut source = SourceFixture::new();
     source.rows = rows;
     assert!(matches!(ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::ValidationScratchSize { len, element_size, .. })
-        if len == rows && element_size == size_of::<usize>()));
+        if len == rows && element_size == size_of::<u16>()));
 }
 
 struct OrderedFaults {
@@ -764,4 +887,143 @@ fn missing_digit_rank_preserves_cycle_column_and_chunk_order_on_every_pool() {
             );
         });
     }
+}
+
+#[test]
+fn bulk_digits_default_saturates_and_zeroes_malformed_output() {
+    let mut source = SourceFixture::new();
+    source.digits[1][0] = Some(usize::MAX);
+    let mut out = [99; 8];
+    source.digits(0..4, &mut out);
+    assert_eq!(out, [1, u16::MAX, 2, 0, 1, 4, 2, 2]);
+    let before = source.digit_reads.load(Ordering::Relaxed);
+    let mut short = [99; 7];
+    source.digits(0..4, &mut short);
+    assert_eq!(short, [0; 7]);
+    source.digits(0..4, &mut []);
+    assert_eq!(source.digit_reads.load(Ordering::Relaxed), before);
+}
+
+struct BulkFixture {
+    source: SourceFixture,
+    encoded: [[u16; 2]; 4],
+}
+
+impl CycleSource for BulkFixture {
+    fn cycles(&self) -> usize {
+        self.source.cycles()
+    }
+    fn trace_words(&self) -> usize {
+        self.source.trace_words()
+    }
+    fn trace_word(&self, word: usize, cycle: usize) -> u64 {
+        self.source.trace_word(word, cycle)
+    }
+    fn bytecode_rows(&self) -> usize {
+        self.source.bytecode_rows()
+    }
+    fn bytecode_words(&self) -> usize {
+        self.source.bytecode_words()
+    }
+    fn bytecode_word(&self, word: usize, row: usize) -> u64 {
+        self.source.bytecode_word(word, row)
+    }
+    fn bytecode_index(&self, cycle: usize) -> usize {
+        self.source.bytecode_index(cycle)
+    }
+    fn digit_columns(&self) -> usize {
+        2
+    }
+    fn bits(&self, column: usize) -> usize {
+        self.source.bits(column)
+    }
+    fn by_row(&self, column: usize) -> bool {
+        self.source.by_row(column)
+    }
+    fn digit(&self, column: usize, cycle: usize) -> Option<usize> {
+        self.source.digit(column, cycle)
+    }
+    fn row_digit(&self, column: usize, row: usize) -> Option<usize> {
+        self.source.row_digit(column, row)
+    }
+    fn digits(&self, cycles: Range<usize>, out: &mut [u16]) {
+        if cycles.len().checked_mul(2) != Some(out.len()) {
+            out.fill(0);
+            return;
+        }
+        for (cycle, output) in cycles.zip(out.chunks_exact_mut(2)) {
+            output.copy_from_slice(&self.encoded[cycle % 4]);
+        }
+    }
+}
+
+#[test]
+fn rejected_bulk_tiles_use_scalar_faults_and_view_precedence_on_every_pool() {
+    for threads in [1, 12] {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut source = BulkFixture {
+                    source: SourceFixture::new(),
+                    encoded: [[1, 3], [2, 0], [1, 4], [2, 2]],
+                };
+                source.encoded[0][0] = 5;
+                assert_eq!(
+                    ValidatedTrace::new(Arc::new(source)).err(),
+                    Some(SourceError::DigitView {
+                        column: 0,
+                        cycle: 0,
+                        encoded: 5,
+                        digit: Some(0)
+                    })
+                );
+                let mut source = BulkFixture {
+                    source: SourceFixture::new(),
+                    encoded: [[1, 3], [2, 0], [1, 4], [2, 2]],
+                };
+                source.encoded[0][1] = 5;
+                source.source.indices[0] = 2;
+                assert_eq!(
+                    ValidatedTrace::new(Arc::new(source)).err(),
+                    Some(SourceError::BytecodeIndex {
+                        cycle: 0,
+                        row: 2,
+                        rows: 2
+                    })
+                );
+                let mut source = SourceFixture::new();
+                source.widths[1] = 15;
+                source.digits[1][0] = Some(usize::MAX);
+                assert_eq!(
+                    ValidatedTrace::new(Arc::new(source)).err(),
+                    Some(SourceError::Digit {
+                        column: 1,
+                        cycle: 0,
+                        digit: usize::MAX,
+                        bound: 32768
+                    })
+                );
+            });
+    }
+}
+
+#[test]
+fn tile_column_capacity_is_checked_before_digit_reads_and_empty_columns_work() {
+    let mut source = SourceFixture::new();
+    source.columns = 129;
+    let source = Arc::new(source);
+    assert_eq!(
+        ValidatedTrace::new(Arc::clone(&source)).err(),
+        Some(SourceError::ColumnCapacity {
+            columns: 129,
+            max_columns: 128
+        })
+    );
+    assert_eq!(source.digit_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(source.row_reads.load(Ordering::Relaxed), 0);
+    let mut source = SourceFixture::new();
+    source.columns = 0;
+    assert!(ValidatedTrace::new(Arc::new(source)).is_ok());
 }

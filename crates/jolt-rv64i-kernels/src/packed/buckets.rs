@@ -13,18 +13,23 @@
 //!
 //! - Byte positions stride by 257 elements. Two entries agree modulo 4,096
 //!   bytes exactly when `Δposition + Δvalue = 0 (mod 256)`. The column pass
-//!   has 32 positions and the largest bank of byte words 72, so equal values
-//!   never agree within either.
+//!   has 32 positions and the experiment's five shapes have at most 72 byte
+//!   positions in a word bank, so equal values never agree within either.
 //! - Nibble words stride by 257 elements, their 16 positions at `16 * p`.
 //!   Two entries agree exactly when `Δword + 16 * Δposition + Δvalue = 0
-//!   (mod 256)`. A set has at most nine words, so `|Δword| <= 8` and
+//!   (mod 256)`. In the experiment's five shapes a set has at most nine
+//!   words, so `|Δword| <= 8` and
 //!   `|Δposition| <= 15`, and at equal value both differences are zero. Four
 //!   padding elements would not do: `4 * Δword + 16 * Δposition = 0` at
 //!   `(4, -1)`.
 //!
 //! The law covers the positions of the column pass and the words of one
-//! selector's set, and `equal_value_tables_do_not_alias` checks exactly
-//! that. It does not cover two sets that one cycle writes (one per shape),
+//! selector's set in the experiment's five shapes, and
+//! `equal_value_tables_do_not_alias` checks exactly that. `RouterShape::new`
+//! accepts larger caller-defined banks, which are outside this law: in a
+//! 32-word nibble bank, word 16 at position 0 and word 0 at position 1
+//! agree modulo 4,096 bytes at equal value. The law does not cover two sets
+//! that one cycle writes (one per shape),
 //! nor a set against the digit and flag tables that follow it: a nibble
 //! word takes one of the sixteen residue classes of its base modulo 16
 //! elements, so only a layout that assigned those classes across every

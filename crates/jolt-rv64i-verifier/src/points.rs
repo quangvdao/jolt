@@ -53,10 +53,17 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
             variables: point.len(),
         });
     }
-    let vertex: Vec<F> = (0..point.len())
-        .map(|i| F::from_u64(((index >> i) & 1) as u64))
-        .collect();
-    eq(point, &vertex)
+    Ok(point
+        .iter()
+        .enumerate()
+        .map(|(bit, coordinate)| {
+            if (index >> bit) & 1 != 0 {
+                *coordinate
+            } else {
+                F::one() + *coordinate
+            }
+        })
+        .product())
 }
 
 /// Allocates one equality table in low-variable-first index order, expanding it

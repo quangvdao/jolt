@@ -122,6 +122,8 @@ fn table<const N: usize>(weights: &[F128]) -> [F128; N] {
 }
 
 #[derive(Clone, Copy)]
+/// A range of lookup tables in an arena preserved by the caller. Appending
+/// tables preserves existing lifts; replacing entries changes their map.
 pub(crate) struct CompactLift {
     start: usize,
     len: usize,
@@ -158,6 +160,7 @@ impl CompactLift {
         })
     }
 
+    /// Checks width, table count and arena bounds before forming a static view.
     pub(crate) fn view<const N: usize, const TABLES: usize>(
         self,
         arena: &[F128],

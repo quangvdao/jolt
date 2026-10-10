@@ -99,7 +99,7 @@ impl Exponent {
     }
 
     #[inline(always)]
-    fn product(self, a: u64, b: u64, shift: usize) -> u64 {
+    fn product(&self, a: u64, b: u64, shift: usize) -> u64 {
         let mut product = 0;
         for &(left, right) in &self.pairs[..self.len] {
             product ^= (a >> (shift + left)) & (b >> (shift + right));

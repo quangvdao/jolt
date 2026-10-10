@@ -147,7 +147,7 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
         changed,
         verifier,
         witness,
-        ..
+        expected_batch,
     } = support::proving_failure_fixture(ProvingFailure::WrongOutput);
     let preprocessing = ProverPreprocessing {
         verifier,
@@ -169,7 +169,7 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
     )
     .err()
     .unwrap();
-    assert_failed_batch(error, "4");
+    assert_failed_batch(error, expected_batch);
     let error = verify_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing.verifier,
         &changed,
@@ -184,13 +184,13 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
 #[test]
 fn missing_termination_is_rejected_by_proving_and_statement_binding() {
     let ProvingFailureFixture {
-        statement: changed,
-        changed: rejected,
+        statement,
+        changed,
         verifier,
         witness,
-        ..
+        expected_batch,
     } = support::proving_failure_fixture(ProvingFailure::MissingTermination);
-    assert!(changed.device.panic);
+    assert!(statement.device.panic);
     assert_eq!(witness.final_ram[3], 0);
     assert!(witness.bits.iter().all(|row| {
         let fetched = &witness.bytecode.rows()[witness.layout.bytecode_index(row) as usize];
@@ -203,12 +203,11 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
     let backend = Rv64iBackend::reference();
     let (proof, _) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &changed,
+        &statement,
         &witness,
         &backend,
     )
     .unwrap();
-    let changed = rejected;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &changed,
@@ -217,7 +216,7 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
     )
     .err()
     .unwrap();
-    assert_failed_batch(error, "4");
+    assert_failed_batch(error, expected_batch);
     let error = verify_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing.verifier,
         &changed,
@@ -232,11 +231,11 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
 #[test]
 fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
     let ProvingFailureFixture {
-        statement: changed,
-        changed: rejected,
+        statement,
+        changed,
         verifier,
         witness,
-        ..
+        expected_batch,
     } = support::proving_failure_fixture(ProvingFailure::WrongEntry);
     let preprocessing = ProverPreprocessing {
         verifier,
@@ -245,12 +244,11 @@ fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
     let backend = Rv64iBackend::reference();
     let (proof, _) = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
-        &changed,
+        &statement,
         &witness,
         &backend,
     )
     .unwrap();
-    let changed = rejected;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &changed,
@@ -259,7 +257,7 @@ fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
     )
     .err()
     .unwrap();
-    assert_failed_batch(error, "6a");
+    assert_failed_batch(error, expected_batch);
     let error = verify_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing.verifier,
         &changed,

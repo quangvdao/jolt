@@ -26,7 +26,7 @@ pub(super) enum ReadBit {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct CompiledShape {
+pub(super) struct ReadoutShape {
     bank: Vec<WordSlot>,
     factors: Vec<SelectorFactor>,
     slots: Vec<(usize, SlotVariable)>,
@@ -35,7 +35,7 @@ pub(super) struct CompiledShape {
     pub(super) destinations: Vec<usize>,
 }
 
-impl CompiledShape {
+impl ReadoutShape {
     #[expect(
         clippy::expect_used,
         reason = "checked bank slots and entries have canonical storage"
@@ -45,10 +45,10 @@ impl CompiledShape {
         layout: &ShapeLayout,
         source: &S,
     ) -> Self {
-        let mut factor_indices = [(0, 0); 3];
+        let mut factor_shifts = [0; 3];
         let mut shift = 0;
         for (index, factor) in shape.factors().iter().enumerate() {
-            factor_indices[index] = (factor.column, shift);
+            factor_shifts[index] = shift;
             shift += factor.slots.len();
         }
         let bank_storage = shape
@@ -116,7 +116,7 @@ impl CompiledShape {
                                 SlotVariable::Bit(_) => 0,
                                 SlotVariable::Word(bit) => word >> bit,
                                 SlotVariable::Selector { factor, bit } => {
-                                    h >> (factor_indices[factor].1 + bit)
+                                    h >> (factor_shifts[factor] + bit)
                                 }
                             };
                             destination | ((value & 1) << position)

@@ -407,14 +407,6 @@ impl ProbeCase {
 pub trait ProbeKernel: Send {
     fn operations(&self) -> usize;
     fn run(&mut self) -> F128;
-    /// Consume pass results after the primary timer ends, for deferred lane merges.
-    fn finish_run(&mut self) -> F128 {
-        F128::from_raw(0)
-    }
-    /// Fraction of consecutive cycle updates addressing the same position bucket.
-    fn alias_rate(&self) -> Option<f64> {
-        None
-    }
     fn chain_terms(&self) -> Option<usize> {
         None
     }
@@ -431,7 +423,6 @@ pub struct ProbeRecord {
     pub id: String,
     pub median: f64,
     pub layout: Option<(usize, usize)>,
-    pub alias_rate: Option<f64>,
 }
 
 struct ProbeInfo {
@@ -439,7 +430,6 @@ struct ProbeInfo {
     chain_terms: Option<usize>,
     lookup_layout: Option<(usize, usize)>,
     memory_layout: Option<(usize, usize)>,
-    alias_rate: Option<f64>,
 }
 
 /// Runs unit probes with warmed pools and resident sources excluded from timing.
@@ -538,7 +528,6 @@ where
                             chain_terms: kernel.chain_terms(),
                             lookup_layout: kernel.lookup_layout(),
                             memory_layout: kernel.memory_layout(),
-                            alias_rate: kernel.alias_rate(),
                         };
                         if info.operations == 0 {
                             return Err(RunnerError::WorkCount {
@@ -548,7 +537,6 @@ where
                         let start = Instant::now();
                         let _ = black_box(kernel.run());
                         let primary_ns = start.elapsed().as_nanos() as f64;
-                        let _ = black_box(kernel.finish_run());
                         let allocation = measurement.finish();
                         Ok::<_, RunnerError>((
                             Sample {
@@ -567,7 +555,6 @@ where
                 let chain_terms = info.chain_terms;
                 let lookup_layout = info.lookup_layout;
                 let memory_layout = info.memory_layout;
-                let alias_rate = info.alias_rate;
                 let samples: Vec<_> = collected.into_iter().map(|(sample, _)| sample).collect();
                 let primary = Sample::phase(&samples, 1, operations as f64);
                 let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
@@ -598,15 +585,11 @@ where
                         primary.median / terms as f64
                     );
                 }
-                if let Some(rate) = alias_rate {
-                    print!(" alias_rate={rate:.9}");
-                }
                 println!();
                 records.push(ProbeRecord {
                     id,
                     median: primary.median,
                     layout: memory_layout,
-                    alias_rate,
                 });
             }
         }

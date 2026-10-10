@@ -14,7 +14,6 @@
 //! | R | arithmetic/reduce_hot and /reduce_hot_control (context) | hot accumulator reductions versus opaque-lane checksum; signed difference |
 //! | L | lookup/g_digits_69kib; other canonical layouts retained | fixed-bank field loads/XORs with necessary source decoding |
 //! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, prepared selectors |
-//! | Bk | bucket/l1_nibble_lanes_{1,2,4,8}/{local,all_rows} | one trace word in cycle order; lane merge follows timing |
 //! | sct | sct/partitioned_emit_rows_20/all_rows | cached-slot weight emission and buffered range application |
 //! | mrg | merge/zero_fill_10mib, /tree_only_10mib, readout/* (context) | separately counted fills, two-array merges, selected-half reads/XORs |
 //! | X | arithmetic/mul_x_hot_raw_shift_substitute | independent hot 128-bit shifts and conditional modulus XOR |
@@ -78,11 +77,6 @@
 //! Bucket read-out uses those same layouts: 128 reads per byte bit, eight per
 //! nibble bit, direct indicator cells, combined-flag sums and selector One totals.
 //! Both fold streams exclude its separate four-word-per-visited-bytecode-row pass.
-//! The L1 lane family uses one sequential cycle loop and 4 KiB per lane.
-//! Cycle j writes lane j mod lanes; a separate untimed finish merges them.
-//! Its alias rate counts equal nibbles at each position in consecutive cycles,
-//! excluding the first cycle, and is prepared before timing. Run this family
-//! with --threads 1 to measure its unit floor.
 //!
 //! sct calls the library ScatterPlan: construction caches each cycle's u16 slot
 //! and each slot's u16 row offset. Timing emits weights through those slots into
@@ -999,85 +993,6 @@ fn bucket_word(
     }
 }
 
-type NibbleWord = [[F128; 16]; 16];
-
-struct L1Nibble {
-    source: Arc<SyntheticTrace>,
-    tables: Vec<NibbleWord>,
-    alias_rate: f64,
-}
-
-impl L1Nibble {
-    fn new(source: Arc<SyntheticTrace>, lanes: usize) -> Self {
-        let cycles = CycleSource::cycles(source.as_ref());
-        let aliases: usize = (1..cycles)
-            .map(|cycle| {
-                let difference = source.trace_word(0, cycle - 1) ^ source.trace_word(0, cycle);
-                (0..16)
-                    .filter(|position| (difference >> (position * 4)).trailing_zeros() >= 4)
-                    .count()
-            })
-            .sum();
-        Self {
-            source,
-            tables: vec![[[F128::from_raw(0); 16]; 16]; lanes],
-            alias_rate: aliases as f64 / ((cycles - 1) * 16) as f64,
-        }
-    }
-
-    #[inline]
-    #[expect(
-        clippy::unwrap_used,
-        reason = "the dispatch selects the lane count allocated by the constructor"
-    )]
-    fn run_lanes<const LANES: usize>(&mut self) -> F128 {
-        let source = black_box(&self.source);
-        let tables: &mut [NibbleWord; LANES] = self.tables.as_mut_slice().try_into().unwrap();
-        let tables = black_box(tables);
-        for cycle in 0..CycleSource::cycles(source.as_ref()) {
-            let weight = trace_value(source, cycle);
-            let mut word = source.trace_word(0, cycle);
-            let table = &mut tables[cycle & (LANES - 1)];
-            for position in table.iter_mut() {
-                position[(word & 15) as usize] += weight;
-                word >>= 4;
-            }
-        }
-        let _ = black_box(tables);
-        F128::from_raw(0)
-    }
-
-    fn run(&mut self) -> F128 {
-        match self.tables.len() {
-            1 => self.run_lanes::<1>(),
-            2 => self.run_lanes::<2>(),
-            4 => self.run_lanes::<4>(),
-            8 => self.run_lanes::<8>(),
-            _ => unreachable!(),
-        }
-    }
-
-    #[expect(
-        clippy::unwrap_used,
-        reason = "the constructor creates at least one lane for every registered case"
-    )]
-    fn finish_run(&mut self) -> F128 {
-        let (first, rest) = self.tables.split_first_mut().unwrap();
-        for table in rest {
-            for (left, right) in first.iter_mut().zip(table) {
-                for (left, &right) in left.iter_mut().zip(right.iter()) {
-                    *left += right;
-                }
-            }
-        }
-        black_box(first)
-            .iter()
-            .flatten()
-            .copied()
-            .fold(F128::from_raw(0), |sum, entry| sum + entry)
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ScatterMethod {
     Direct,
@@ -1549,7 +1464,6 @@ impl PartitionedScatter {
 enum Unit {
     Lookup(Box<Lookup>),
     Bucket(Box<Bucket>),
-    L1Nibble(L1Nibble),
     Scatter(Scatter),
     Partitioned(Box<PartitionedScatter>),
     Fmadd(Box<Fmadd>),
@@ -1592,15 +1506,6 @@ impl Unit {
                     _ => return Err(invalid()),
                 };
                 Ok(Self::Lookup(Box::new(Lookup::new(trace()?, pattern, kib))))
-            }
-            "bucket" if case.variant.starts_with("l1_nibble_lanes_") => {
-                let lanes = case
-                    .variant
-                    .strip_prefix("l1_nibble_lanes_")
-                    .and_then(|lanes| lanes.parse::<usize>().ok())
-                    .filter(|lanes| [1, 2, 4, 8].contains(lanes))
-                    .ok_or_else(invalid)?;
-                Ok(Self::L1Nibble(L1Nibble::new(trace()?, lanes)))
             }
             "bucket" => {
                 let variant = case.variant.as_str();
@@ -1719,7 +1624,6 @@ impl ProbeKernel for Unit {
         match self {
             Self::Lookup(unit) => CycleSource::cycles(unit.source.as_ref()) * unit.pattern.reads(),
             Self::Bucket(unit) => unit.operations,
-            Self::L1Nibble(unit) => CycleSource::cycles(unit.source.as_ref()) * 16,
             Self::Scatter(unit) => CycleSource::cycles(unit.source.as_ref()),
             Self::Partitioned(unit) => unit.cycles(),
             Self::Fmadd(unit) => CycleSource::cycles(unit.source.as_ref()),
@@ -1733,27 +1637,12 @@ impl ProbeKernel for Unit {
         match self {
             Self::Lookup(unit) => unit.run(),
             Self::Bucket(unit) => unit.run(),
-            Self::L1Nibble(unit) => unit.run(),
             Self::Scatter(unit) => unit.run(),
             Self::Partitioned(unit) => unit.run(),
             Self::Fmadd(unit) => unit.run(),
             Self::Merge(unit) => unit.run(),
             Self::Readout(unit) => unit.run(),
             Self::Hot(unit) => unit.run(),
-        }
-    }
-
-    fn finish_run(&mut self) -> F128 {
-        match self {
-            Self::L1Nibble(unit) => unit.finish_run(),
-            _ => F128::from_raw(0),
-        }
-    }
-
-    fn alias_rate(&self) -> Option<f64> {
-        match self {
-            Self::L1Nibble(unit) => Some(unit.alias_rate),
-            _ => None,
         }
     }
 
@@ -1770,7 +1659,6 @@ impl ProbeKernel for Unit {
     fn memory_layout(&self) -> Option<(usize, usize)> {
         match self {
             Self::Merge(unit) => Some(unit.layout()),
-            Self::L1Nibble(unit) => Some((size_of::<NibbleWord>(), unit.tables.len())),
             Self::Readout(unit) => Some((unit.buckets.len() * size_of::<F128>(), 1)),
             _ => None,
         }
@@ -1984,14 +1872,6 @@ fn main() -> Result<(), RunnerError> {
                 minimum_threads: 1,
             });
         }
-    }
-    for lanes in [1, 2, 4, 8] {
-        cases.push(ProbeCase {
-            unit: "bucket",
-            variant: format!("l1_nibble_lanes_{lanes}"),
-            profiles: BOTH,
-            minimum_threads: 1,
-        });
     }
     for rows in [16, 20] {
         for method in ["direct_atomic_halves", "worker_tree", "gather"] {

@@ -28,6 +28,12 @@ mod tests {
     const ZERO: F128 = F128::from_raw(0);
     const ONE: F128 = F128::from_raw(1);
 
+    #[test]
+    fn byte_bucket_values_break_frequency_ties_by_lower_selector() {
+        let counts = [2, 7, 5, 7, 1, 7];
+        assert_eq!(FoldLayout::byte_bucket_values(&counts, 2), vec![1, 3]);
+    }
+
     #[derive(Clone)]
     struct Trace {
         words: Vec<[u64; 6]>,

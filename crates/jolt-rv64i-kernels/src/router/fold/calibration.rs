@@ -1,10 +1,13 @@
 //! Checked experiment geometry for machinery and unit-cost benchmarks.
 
-use super::{FoldLayout, ShapeLayout};
-use crate::router::shape::{synthetic_router_shapes, RouterError};
-use crate::source::ValidatedTrace;
+use super::{fold_impl, FoldLayout, FoldOutput, PhaseHook, ShapeLayout};
+use crate::packed::scatter::ScatterPlan;
+use crate::router::shape::{synthetic_router_shapes, RouterError, RouterShape};
+use crate::source::{CycleSource, ValidatedTrace};
 use crate::synth::{SynthProfile, SyntheticTrace};
+use jolt_field::F128;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Geometry of the five synthetic router shapes, derived by `FoldLayout::new`.
 /// Available only with `test-utils`; it owns no production routing state.
@@ -136,5 +139,54 @@ impl FoldCalibration {
             });
         }
         Ok(layout.metadata + selector * layout.meta_len)
+    }
+}
+
+struct PhaseClock {
+    times: [Duration; 4],
+    start: Instant,
+}
+
+impl PhaseClock {
+    fn new() -> Self {
+        Self {
+            times: [Duration::ZERO; 4],
+            start: Instant::now(),
+        }
+    }
+}
+
+impl PhaseHook for PhaseClock {
+    fn finish_phase(&mut self, phase: usize) {
+        self.times[phase] += self.start.elapsed();
+        self.start = Instant::now();
+    }
+}
+
+impl FoldLayout {
+    /// Benchmark-only observation of the identical fold implementation. Durations
+    /// cover fused equality/buckets/emission, scatter application, visited-row
+    /// buckets, and preparation/merges/read-out, respectively. Lazy scratch
+    /// zero-fill is included in its bucket phase; the first phase cannot isolate
+    /// its fused multiplication and XORs without instrumenting every cycle.
+    pub fn measure<S: CycleSource>(
+        &self,
+        source: &ValidatedTrace<S>,
+        shapes: &[RouterShape],
+        point: &[F128],
+        plan: &ScatterPlan<S>,
+        histogram_columns: &[usize],
+    ) -> Result<(FoldOutput, [Duration; 4]), RouterError> {
+        let mut phases = PhaseClock::new();
+        let output = fold_impl(
+            source,
+            shapes,
+            point,
+            plan,
+            self,
+            histogram_columns,
+            &mut phases,
+        )?;
+        Ok((output, phases.times))
     }
 }

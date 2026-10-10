@@ -5,7 +5,7 @@
 use super::allocator::{AllocationMeasurement, CountingAllocator};
 use super::inventory::Inventory;
 use super::pipelines::{BenchResult, Fixture, Kernels};
-use super::timing::{Timing, PHASES};
+use super::timing::{Phase, Timing};
 use super::witness::WitnessFixture;
 use jolt_rv64i_prover::optimized::outer::WitnessLanes;
 use rayon::ThreadPoolBuilder;
@@ -83,7 +83,7 @@ impl Options {
 }
 
 pub struct Sample {
-    pub times: [Duration; 5],
+    pub times: [Duration; Phase::TIMED.len()],
     pub driver: Duration,
     pub total: Duration,
     pub peak: usize,
@@ -144,8 +144,10 @@ fn print_samples(
     let allocs = samples.iter().map(|s| s.allocs).max().unwrap_or(0);
     let threshold = threshold(name, log_t, threads);
     print!("{id} samples={} total_ns={total:.6} total_min_ns={min:.6} total_max_ns={max:.6} threshold_ns={threshold:.6} meets_threshold={} peak_bytes={peak} final_bytes={final_bytes} allocs={allocs} decoded_bytes={} peak_with_decoded_bytes={}",samples.len(),total<=threshold,fixture.witness.bits.len()*16,peak+fixture.witness.bits.len()*16);
-    for (phase, label) in PHASES[..5].iter().enumerate() {
-        let (median, min, max) = summary(samples.iter().map(|s| ns(s.times[phase])).collect());
+    for phase in Phase::TIMED {
+        let label = phase.label();
+        let (median, min, max) =
+            summary(samples.iter().map(|s| ns(s.times[phase.index()])).collect());
         print!(" {label}_ns={median:.6} {label}_min_ns={min:.6} {label}_max_ns={max:.6}");
     }
     let (driver, _, _) = summary(samples.iter().map(|s| ns(s.driver)).collect());
@@ -212,7 +214,7 @@ pub fn run(options: Options) -> BenchResult<()> {
                                 let timing = Arc::new(Timing::default());
                                 let kernels = Kernels::new(&timing);
                                 CountingAllocator::begin(witness.witness.bits.len());
-                                CountingAllocator::phase(6);
+                                CountingAllocator::phase(Phase::WarmPrepare.index());
                                 let before = CountingAllocator::live_bytes();
                                 let mut session = fixture
                                     .warm_session(&witness.witness, name)
@@ -220,16 +222,16 @@ pub fn run(options: Options) -> BenchResult<()> {
                                 let resident =
                                     CountingAllocator::live_bytes().saturating_sub(before);
                                 let measurement = AllocationMeasurement::begin();
-                                CountingAllocator::phase(5);
+                                CountingAllocator::phase(Phase::Driver.index());
                                 let start = Instant::now();
                                 let lanes = if name == "lanes" {
-                                    Some(timing.measure(0, || {
+                                    Some(timing.measure(Phase::Prepare, || {
                                         WitnessLanes::new(&witness.witness)
                                             .map_err(|e| e.to_string())
                                     })?)
                                 } else {
                                     if name == "source" {
-                                        timing.measure(0, || {
+                                        timing.measure(Phase::Prepare, || {
                                             fixture
                                                 .run(name, &witness.witness, &mut session, &kernels)
                                                 .map_err(|e| e.to_string())
@@ -244,7 +246,7 @@ pub fn run(options: Options) -> BenchResult<()> {
                                 let total = start.elapsed();
                                 let mut times = timing.times();
                                 let driver = total.saturating_sub(times.iter().sum());
-                                times[3] += driver;
+                                times[Phase::Extract.index()] += driver;
                                 let stats = measurement.finish();
                                 let _ = black_box(&lanes);
                                 // Counters stop with the session and lanes alive; scoped workers

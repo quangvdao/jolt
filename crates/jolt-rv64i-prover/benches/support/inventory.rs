@@ -2,7 +2,7 @@
 //! several owners; the inventory lists every candidate, never a guessed owner.
 
 use super::allocator::CountingAllocator;
-use super::timing::PHASES;
+use super::timing::Phase;
 use jolt_rv64i_prover::plane::Rv64iWitness;
 
 pub struct Geometry {
@@ -146,7 +146,10 @@ impl Inventory {
                 .filter(|row| row.sizes.contains(&size))
                 .map(|row| row.object)
                 .collect();
-            let phase = PHASES.get(phase).copied().unwrap_or("warm_prepare");
+            let phase = Phase::from_index(phase).map_or_else(
+                || format!("unknown({phase})"),
+                |phase| phase.label().to_owned(),
+            );
             if matches.is_empty() {
                 unmatched += 1;
             }

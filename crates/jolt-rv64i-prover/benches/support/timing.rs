@@ -15,16 +15,57 @@ use jolt_verifier::stages::relations::{
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PHASES: [&str; 6] = ["prepare", "rounds", "finish", "extract", "park", "driver"];
+#[derive(Clone, Copy)]
+pub enum Phase {
+    Prepare,
+    Rounds,
+    Finish,
+    Extract,
+    Park,
+    Driver,
+    WarmPrepare,
+}
+impl Phase {
+    pub const TIMED: [Self; 5] = [
+        Self::Prepare,
+        Self::Rounds,
+        Self::Finish,
+        Self::Extract,
+        Self::Park,
+    ];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Rounds => "rounds",
+            Self::Finish => "finish",
+            Self::Extract => "extract",
+            Self::Park => "park",
+            Self::Driver => "driver",
+            Self::WarmPrepare => "warm_prepare",
+        }
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::TIMED
+            .into_iter()
+            .chain([Self::Driver, Self::WarmPrepare])
+            .find(|phase| phase.index() == index)
+    }
+}
 
 #[derive(Default)]
-pub struct Timing(Mutex<[Duration; 5]>);
+pub struct Timing(Mutex<[Duration; Phase::TIMED.len()]>);
 impl Timing {
     #[expect(
         clippy::unwrap_used,
         reason = "a poisoned timing mutex means a benchmark worker panicked"
     )]
-    pub fn times(&self) -> [Duration; 5] {
+    pub fn times(&self) -> [Duration; Phase::TIMED.len()] {
         *self.0.lock().unwrap()
     }
 
@@ -32,13 +73,13 @@ impl Timing {
         clippy::unwrap_used,
         reason = "a poisoned timing mutex means a benchmark worker panicked"
     )]
-    pub fn measure<T>(&self, phase: usize, f: impl FnOnce() -> T) -> T {
-        CountingAllocator::phase(phase);
+    pub fn measure<T>(&self, phase: Phase, f: impl FnOnce() -> T) -> T {
+        CountingAllocator::phase(phase.index());
         let start = Instant::now();
         let result = f();
         let elapsed = start.elapsed();
-        self.0.lock().unwrap()[phase] += elapsed;
-        CountingAllocator::phase(5);
+        self.0.lock().unwrap()[phase.index()] += elapsed;
+        CountingAllocator::phase(Phase::Driver.index());
         result
     }
 }
@@ -64,9 +105,9 @@ impl<R: ConcreteSumcheck<F128> + 'static> PrepareKernel<F128, R, Rv64iPlane> for
         witness: &Rv64iWitness,
         inputs: ProverInputs<'_, F128, R>,
     ) -> Result<Box<dyn SumcheckKernel<F128, Relation = R>>, KernelError<F128>> {
-        let inner = self
-            .timing
-            .measure(0, || self.inner.prepare(session, witness, inputs))?;
+        let inner = self.timing.measure(Phase::Prepare, || {
+            self.inner.prepare(session, witness, inputs)
+        })?;
         Ok(Box::new(TimedKernel {
             inner,
             timing: Arc::clone(&self.timing),
@@ -88,10 +129,11 @@ impl<R: ConcreteSumcheck<F128>> ProveRounds<F128> for TimedKernel<R> {
         claim: F128,
     ) -> Result<UnivariatePoly<F128>, SumcheckError<F128>> {
         self.timing
-            .measure(1, || self.inner.prove_round(bind, round, claim))
+            .measure(Phase::Rounds, || self.inner.prove_round(bind, round, claim))
     }
     fn finish_rounds(&mut self, bind: F128) -> Result<(), SumcheckError<F128>> {
-        self.timing.measure(2, || self.inner.finish_rounds(bind))
+        self.timing
+            .measure(Phase::Finish, || self.inner.finish_rounds(bind))
     }
 }
 impl<R: ConcreteSumcheck<F128> + 'static> SumcheckKernel<F128> for TimedKernel<R> {
@@ -100,7 +142,8 @@ impl<R: ConcreteSumcheck<F128> + 'static> SumcheckKernel<F128> for TimedKernel<R
         &mut self,
         inputs: &SumcheckInputClaims<F128, R>,
     ) -> Result<SumcheckOutputClaims<F128, R>, SumcheckKernelError<F128>> {
-        self.timing.measure(3, || self.inner.output_claims(inputs))
+        self.timing
+            .measure(Phase::Extract, || self.inner.output_claims(inputs))
     }
     fn validate_derived_tables(
         &self,
@@ -109,13 +152,13 @@ impl<R: ConcreteSumcheck<F128> + 'static> SumcheckKernel<F128> for TimedKernel<R
         outputs: &SumcheckOutputPoints<F128, R>,
         challenges: &ConcreteSumcheckChallenges<F128, R>,
     ) -> Result<(), SumcheckKernelError<F128>> {
-        self.timing.measure(3, || {
+        self.timing.measure(Phase::Extract, || {
             self.inner
                 .validate_derived_tables(relation, inputs, outputs, challenges)
         })
     }
     fn park_residue(self: Box<Self>, session: &mut ProofSession) {
         let Self { inner, timing } = *self;
-        timing.measure(4, || inner.park_residue(session));
+        timing.measure(Phase::Park, || inner.park_residue(session));
     }
 }

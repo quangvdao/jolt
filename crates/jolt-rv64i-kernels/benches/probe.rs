@@ -156,8 +156,15 @@ struct Lookup {
     source: Arc<SyntheticTrace>,
     table: Vec<F128>,
     pattern: LookupPattern,
-    accesses: [[Access; 49]; 2],
+    layout: LookupLayout,
     addressable_entries: usize,
+}
+
+enum LookupLayout {
+    Word,
+    Digits,
+    Bytes,
+    Pressure(Box<[[Access; 49]; 2]>),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -181,11 +188,17 @@ impl Lookup {
             Self::accesses(pattern, entries)
         };
         let addressable_entries = Self::domain_bound(&source, pattern, &accesses, entries);
+        let layout = match (pattern, kib) {
+            (LookupPattern::Outer | LookupPattern::Lift, 32) => LookupLayout::Word,
+            (LookupPattern::Digits, 69) => LookupLayout::Digits,
+            (LookupPattern::Bytes, 196) => LookupLayout::Bytes,
+            _ => LookupLayout::Pressure(Box::new(accesses)),
+        };
         Self {
             source,
             table: field_values(entries),
             pattern,
-            accesses,
+            layout,
             addressable_entries,
         }
     }
@@ -463,6 +476,160 @@ impl Lookup {
     }
 
     fn run(&self) -> F128 {
+        match &self.layout {
+            LookupLayout::Word => {
+                if matches!(self.pattern, LookupPattern::Outer) {
+                    self.run_words::<true>()
+                } else {
+                    self.run_words::<false>()
+                }
+            }
+            LookupLayout::Digits => self.run_digits(),
+            LookupLayout::Bytes => self.run_bytes(),
+            LookupLayout::Pressure(accesses) => self.run_pressure(accesses),
+        }
+    }
+
+    fn run_chunks(&self, value: impl Fn(&SyntheticTrace, usize) -> F128 + Sync) -> F128 {
+        let source = black_box(&self.source);
+        (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
+            .into_par_iter()
+            .map(|chunk| {
+                let start = chunk * CHUNK;
+                let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
+                let mut sum = F128::from_raw(0);
+                for cycle in start..end {
+                    sum += value(source, cycle);
+                }
+                sum
+            })
+            .reduce(|| F128::from_raw(0), |left, right| left + right)
+    }
+
+    #[inline(never)]
+    fn run_words<const OUTER: bool>(&self) -> F128 {
+        let (banks, _) = black_box(self.table.as_slice()).as_chunks::<256>();
+        self.run_chunks(|source, cycle| {
+            let mut sum = F128::from_raw(0);
+            if OUTER {
+                for group in source.lanes(cycle) {
+                    for word in group {
+                        for (bank, byte) in banks.iter().zip(word.to_le_bytes()) {
+                            sum += bank[usize::from(byte)];
+                        }
+                    }
+                }
+            } else {
+                for word in 0..6 {
+                    for (bank, byte) in banks
+                        .iter()
+                        .zip(source.trace_word(word, cycle).to_le_bytes())
+                    {
+                        sum += bank[usize::from(byte)];
+                    }
+                }
+            }
+            sum
+        })
+    }
+
+    #[inline(never)]
+    fn run_digits(&self) -> F128 {
+        let table = black_box(self.table.as_slice());
+        let (byte_banks, _) = table[..4096].as_chunks::<256>();
+        self.run_chunks(|source, cycle| {
+            let mut sum = F128::from_raw(0);
+            let inc = source.trace_word(5, cycle).to_le_bytes();
+            for banks in byte_banks.chunks_exact(8) {
+                for (bank, byte) in banks.iter().zip(inc) {
+                    sum += bank[usize::from(byte)];
+                }
+            }
+            macro_rules! digit {
+                ($column:literal, $base:literal) => {
+                    sum += table[$base + source.digit($column, cycle).unwrap_or(0)];
+                };
+            }
+            digit!(0, 4096);
+            digit!(1, 4112);
+            digit!(2, 4128);
+            digit!(3, 4144);
+            digit!(4, 4160);
+            digit!(5, 4176);
+            digit!(6, 4192);
+            digit!(7, 4208);
+            digit!(8, 4224);
+            digit!(9, 4240);
+            digit!(10, 4256);
+            digit!(11, 4264);
+            sum += table[4272 + usize::from(source.digit(18, cycle).is_some())];
+            digit!(5, 4274);
+            digit!(6, 4290);
+            digit!(7, 4306);
+            digit!(8, 4322);
+            digit!(9, 4338);
+            digit!(10, 4354);
+            digit!(11, 4362);
+            let flags = usize::from(source.digit(18, cycle).is_some())
+                | (usize::from(source.digit(19, cycle).is_some()) << 1)
+                | (usize::from(source.digit(20, cycle).is_some()) << 2);
+            sum += table[4370 + flags];
+            sum
+        })
+    }
+
+    #[inline(never)]
+    fn run_bytes(&self) -> F128 {
+        let table = black_box(self.table.as_slice());
+        self.run_chunks(|source, cycle| {
+            let row = source.rows()[cycle];
+            let mut sum = F128::from_raw(0);
+            macro_rules! pair {
+                ($word:literal, $shift:literal, $base:literal) => {
+                    let index = (((row[$word] >> $shift) & 255) as usize) << 1;
+                    sum += table[$base + index];
+                    sum += table[$base + index + 1];
+                };
+            }
+            macro_rules! single {
+                ($word:literal, $shift:literal, $base:literal) => {
+                    sum += table[$base + (((row[$word] >> $shift) & 255) as usize)];
+                };
+            }
+            pair!(0, 0, 0);
+            pair!(0, 8, 512);
+            pair!(0, 16, 1024);
+            pair!(0, 24, 1536);
+            pair!(0, 32, 2048);
+            pair!(0, 40, 2560);
+            pair!(0, 48, 3072);
+            pair!(0, 56, 3584);
+            single!(1, 0, 10240);
+            single!(1, 8, 10496);
+            single!(1, 16, 10752);
+            single!(1, 24, 11008);
+            single!(1, 32, 11264);
+            single!(1, 40, 11520);
+            single!(1, 48, 11776);
+            single!(1, 56, 12032);
+            single!(2, 0, 12288);
+            pair!(2, 8, 4096);
+            pair!(2, 16, 4608);
+            pair!(2, 24, 5120);
+            pair!(2, 32, 5632);
+            pair!(2, 40, 6144);
+            pair!(2, 48, 6656);
+            pair!(2, 56, 7168);
+            pair!(3, 0, 7680);
+            pair!(3, 8, 8192);
+            pair!(3, 16, 8704);
+            pair!(3, 24, 9216);
+            pair!(3, 32, 9728);
+            sum
+        })
+    }
+
+    fn run_pressure(&self, layouts: &[[Access; 49]; 2]) -> F128 {
         let source = black_box(&self.source);
         let _ = black_box(&self.table);
         (0..CycleSource::cycles(source.as_ref()).div_ceil(CHUNK))
@@ -470,7 +637,7 @@ impl Lookup {
             .map(|chunk| {
                 let start = chunk * CHUNK;
                 let end = (start + CHUNK).min(CycleSource::cycles(source.as_ref()));
-                let accesses = &self.accesses[chunk & 1];
+                let accesses = &layouts[chunk & 1];
                 let mut sum = F128::from_raw(0);
                 for cycle in start..end {
                     let mut stream = 0;

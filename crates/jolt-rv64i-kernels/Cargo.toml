@@ -1,0 +1,72 @@
+[package]
+name = "jolt-rv64i-kernels"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Packed-bit sum-check kernels over a binary field"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+test-utils = ["dep:rand_chacha"]
+
+[dependencies]
+jolt-field = { workspace = true, features = ["binary"] }
+jolt-poly.workspace = true
+jolt-sumcheck.workspace = true
+jolt-kernels.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+rand_chacha = { workspace = true, optional = true }
+
+[[bench]]
+name = "example"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "probe"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "machinery"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "fold"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "outer_f2"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "routers"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "chunk_product"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "reduction"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "column_pass"
+harness = false
+required-features = ["test-utils"]
+
+[[bench]]
+name = "tail"
+harness = false
+required-features = ["test-utils"]

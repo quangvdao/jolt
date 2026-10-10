@@ -25,6 +25,14 @@ pub struct Options {
 }
 impl Options {
     pub fn parse() -> BenchResult<Self> {
+        Self::parse_for("adapters", &NAMES)
+    }
+
+    pub fn parse_witness() -> BenchResult<Self> {
+        Self::parse_for("witness_pipeline", &["pipeline"])
+    }
+
+    fn parse_for(prefix: &str, names: &[&str]) -> BenchResult<Self> {
         let mut result = Self {
             log_t: vec![20, 22],
             threads: vec![1, 12],
@@ -54,19 +62,19 @@ impl Options {
                         _ => return Err(format!("invalid {arg}: {value}").into()),
                     }
                 }
-                _ if arg.starts_with("adapters/") && result.filter.is_none() => {
+                _ if arg.starts_with(&format!("{prefix}/")) && result.filter.is_none() => {
                     result.filter = Some(arg);
                 }
                 _ => return Err(format!("unknown argument {arg}").into()),
             }
         }
         if result.filter.is_some()
-            && !NAMES.into_iter().any(|name| {
+            && !names.iter().any(|name| {
                 result.log_t.iter().any(|&log_t| {
                     result
                         .threads
                         .iter()
-                        .any(|&threads| result.selected(name, log_t, threads))
+                        .any(|&threads| result.selected_for(prefix, name, log_t, threads))
                 })
             })
         {
@@ -75,8 +83,16 @@ impl Options {
         Ok(result)
     }
     fn selected(&self, name: &str, log_t: u8, threads: usize) -> bool {
+        self.selected_for("adapters", name, log_t, threads)
+    }
+
+    pub fn selected_witness(&self, log_t: u8, threads: usize) -> bool {
+        self.selected_for("witness_pipeline", "pipeline", log_t, threads)
+    }
+
+    fn selected_for(&self, prefix: &str, name: &str, log_t: u8, threads: usize) -> bool {
         self.filter.as_ref().is_none_or(|filter| {
-            let id = format!("adapters/{name}/{log_t}/{threads}");
+            let id = format!("{prefix}/{name}/{log_t}/{threads}");
             id == *filter || id.starts_with(&format!("{filter}/"))
         })
     }
@@ -113,7 +129,7 @@ fn threshold(name: &str, log_t: u8, threads: usize) -> f64 {
     }
 }
 
-fn summary(mut values: Vec<f64>) -> (f64, f64, f64) {
+pub fn summary(mut values: Vec<f64>) -> (f64, f64, f64) {
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
     let median = if values.len().is_multiple_of(2) {

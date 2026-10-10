@@ -5,8 +5,16 @@ use common::{
     constants::RAM_START_ADDRESS,
     jolt_device::{JoltDevice, MemoryConfig, MemoryLayout},
 };
-use jolt_rv64i_arith::{CycleFacts, Layout, Variant};
+use jolt_program::{
+    execution::{
+        RamAccess, RamRead, RamWrite, RegisterRead, RegisterState, RegisterWrite, SourceTraceRow,
+    },
+    image::decode::decode_instruction,
+};
+use jolt_riscv::RV64I;
+use jolt_rv64i_arith::{Layout, Variant};
 use jolt_rv64i_prover::{commitment::transparent::TransparentBits, plane::Rv64iWitness};
+use jolt_rv64i_trace::{adapt, Execution};
 use jolt_rv64i_verifier::{
     preprocessing::VerifierPreprocessing,
     statement::{CheckedInputs, Statement},
@@ -24,6 +32,10 @@ use std::{
 )]
 #[path = "../../../jolt-rv64i-arith/tests/suite/common/asm.rs"]
 mod asm;
+#[expect(
+    dead_code,
+    reason = "the shared harness also exposes facts for integration tests"
+)]
 #[path = "../../../jolt-rv64i-arith/tests/suite/common/harness.rs"]
 mod harness;
 #[expect(
@@ -82,6 +94,44 @@ pub struct WitnessFixture {
 
 impl WitnessFixture {
     pub fn new(log_t: u8) -> Result<Self, Box<dyn Error>> {
+        let fixture = TraceFixture::new(log_t)?;
+        let execution = fixture.adapt()?;
+        let checked = fixture.checked(&execution)?;
+        let witness = Rv64iWitness::from_facts(
+            checked.layout().clone(),
+            Arc::clone(fixture.preprocessing.shared_bytecode()),
+            &execution.facts,
+            checked.initial_ram().to_vec(),
+        )?;
+        Ok(Self {
+            witness,
+            statement: fixture.statement,
+            preprocessing: fixture.preprocessing,
+            mix: fixture.mix,
+        })
+    }
+
+    pub fn checked(&self) -> Result<CheckedInputs<'_, TransparentBits>, Box<dyn Error>> {
+        Ok(CheckedInputs::of_statement(
+            &self.preprocessing,
+            &self.statement,
+            LOG_K as u8,
+            self.witness.final_pc,
+        )?)
+    }
+}
+
+/// Executed architectural transitions retained for untimed pipeline setup.
+/// The cut has no exit or padded suffix; initial memory includes the program image.
+pub struct TraceFixture {
+    pub rows: Vec<SourceTraceRow>,
+    pub statement: Statement,
+    pub preprocessing: VerifierPreprocessing<TransparentBits>,
+    pub mix: DynamicMix,
+}
+
+impl TraceFixture {
+    pub fn new(log_t: u8) -> Result<Self, Box<dyn Error>> {
         let words = Self::program();
         let program_bytes = (4 * PROGRAM_ROWS) as u64;
         let memory_layout = MemoryLayout::try_new(&MemoryConfig {
@@ -137,7 +187,7 @@ impl WitnessFixture {
         drop(words);
         drop(program);
         let cycles = 1_usize << log_t;
-        let mut facts: Vec<CycleFacts> = Vec::with_capacity(cycles);
+        let mut rows = Vec::with_capacity(cycles);
         let mut visited = vec![false; PROGRAM_ROWS];
         let mut mix = DynamicMix {
             cycles,
@@ -163,29 +213,75 @@ impl WitnessFixture {
                 mix.visited_rows += 1;
                 visited[index] = true;
             }
-            facts.push(harness::facts(&record, index));
+            let instruction = decode_instruction(record.word, record.pc, false, RV64I)?;
+            let operands = instruction.row().operands;
+            let registers = RegisterState {
+                rs1: operands.rs1.map(|register| RegisterRead {
+                    register,
+                    value: record.rs1_value,
+                }),
+                rs2: operands.rs2.map(|register| RegisterRead {
+                    register,
+                    value: record.rs2_value,
+                }),
+                rd: operands.rd.map(|register| RegisterWrite {
+                    register,
+                    pre_value: record.rd_pre_value,
+                    post_value: record.rd_post_value,
+                }),
+            };
+            let ram = record.access.map_or(RamAccess::NoOp, |access| {
+                let address = layout.lowest_address() + 8 * access.word_index;
+                if access.is_store {
+                    RamAccess::Write(RamWrite {
+                        address,
+                        pre_value: access.word_before,
+                        post_value: access.word_after,
+                    })
+                } else {
+                    RamAccess::Read(RamRead {
+                        address,
+                        value: access.word_before,
+                    })
+                }
+            });
+            rows.push(SourceTraceRow::new(
+                u32::try_from(index)?,
+                record.pc,
+                record.next_pc,
+                registers,
+                ram,
+            ));
         }
-        let witness = Rv64iWitness::from_facts(layout, bytecode, &facts, initial_ram)?;
-        drop(facts);
         drop(machine);
         drop(visited);
-        // Statement admission checks geometry and a fetched successor, not an exit.
-        let _ =
-            CheckedInputs::of_statement(&preprocessing, &statement, LOG_K as u8, witness.final_pc)?;
         Ok(Self {
-            witness,
+            rows,
             statement,
             preprocessing,
             mix,
         })
     }
 
-    pub fn checked(&self) -> Result<CheckedInputs<'_, TransparentBits>, Box<dyn Error>> {
+    pub fn adapt(&self) -> Result<Execution, Box<dyn Error>> {
+        Ok(adapt(
+            self.preprocessing.bytecode(),
+            self.preprocessing.image(),
+            &self.statement.device.memory_layout,
+            self.statement.entry_pc,
+            &self.rows,
+        )?)
+    }
+
+    pub fn checked(
+        &self,
+        execution: &Execution,
+    ) -> Result<CheckedInputs<'_, TransparentBits>, Box<dyn Error>> {
         Ok(CheckedInputs::of_statement(
             &self.preprocessing,
             &self.statement,
-            LOG_K as u8,
-            self.witness.final_pc,
+            execution.log_K_ram,
+            execution.final_pc(),
         )?)
     }
 

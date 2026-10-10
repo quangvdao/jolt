@@ -37,6 +37,7 @@ jolt-rv64i-verifier.workspace = true
 rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
 
 [dev-dependencies]
+jolt-rv64i-trace.workspace = true
 jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true
 
@@ -115,4 +116,9 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "optimized_registry"
+required-features = ["test-utils"]
+
+[[bench]]
+name = "witness_pipeline"
+harness = false
 required-features = ["test-utils"]

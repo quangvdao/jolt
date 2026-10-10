@@ -1,4 +1,4 @@
-//! Stand-in commitment and replay contracts retained after replacement of the reduction fixture.
+//! Packed bit commitments reject altered tables, columns and invalid opening geometry.
 #![expect(clippy::unwrap_used, reason = "tests fail on invalid fixtures")]
 mod support;
 use jolt_field::{One, Ring, F128};

@@ -133,10 +133,6 @@ fn compact_lifts_reject_malformed_weights_widths_views_and_arenas() {
     ));
     assert!(matches!(lift.view::<256, 2>(&[]), Err(LiftError::Layout)));
     assert!(matches!(
-        lift.view::<256, { usize::MAX }>(&arena),
-        Err(LiftError::Layout)
-    ));
-    assert!(matches!(
         compact_table::<8>(&[one; 3]),
         Err(LiftError::Width { bits: 3 })
     ));

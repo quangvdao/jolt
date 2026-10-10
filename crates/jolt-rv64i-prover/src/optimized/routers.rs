@@ -358,6 +358,7 @@ impl VariantTerms {
             .iter()
             .zip(&word_weights)
             .enumerate()
+            // `Inc` is committed: its slot stays inside the `VariantBits` opening.
             .filter(|(_, (word, _))| **word != BankWord::Inc)
             .map(|(slot, (&word, &coefficient))| VariantWordTerm {
                 word,

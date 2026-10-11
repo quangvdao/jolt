@@ -6,13 +6,20 @@
 //! order. Comparison CSV reports medians, minima, maxima, and paired ratios.
 //! Samples include output allocation, first touch and the call-scoped domain;
 //! later levels share one table. `--load` reports uptime outside measurement.
-//! `--arithmetic --iterations 8000000 --samples 5` measures fully reduced
-//! K multiplication and E-by-K scaling throughput on independent chains.
+//! `--arithmetic --iterations 8000000 --samples 5` measures product throughput.
+//! Reduced K multiplication and E-by-K scaling use independent chains; the
+//! unreduced-product rows time carry-less multiply/XOR with a 16 KiB L1 input
+//! buffer and include loads and loop control, with reduction after timing.
+//! Compiler spills can dominate these rows; they do not establish a hardware floor.
+//! `--counts --log-t 20,22` enumerates zero, short and general twiddle
+//! butterflies from the domain table. Short means nonzero with no bits above
+//! bit 60. Conditional architecture carry-less counts assume two products for
+//! short twiddles and three for general ones; base-field counts always use three.
 //! Provisioning rows time allocation and direct indexed parallel replication
-//! without butterflies. Subtracting them estimates provisioning cost because
-//! provisioning and transform traffic can overlap in the complete phase.
+//! without butterflies. Subtraction estimates residual transform time; cache
+//! effects and overlapping traffic prevent exact attribution.
 
-use jolt_field::ExtField;
+use jolt_field::{Accumulator, ExtField, WithAccumulator};
 use jolt_field::{F192, F64};
 use jolt_rv64i_pcs::ntt::Encoder;
 use jolt_rv64i_verifier::commitment::BitsGeometry;
@@ -160,6 +167,7 @@ struct Options {
     load: bool,
     copy: bool,
     arithmetic: bool,
+    counts: bool,
     iterations: usize,
 }
 impl Options {
@@ -172,6 +180,7 @@ impl Options {
             load: false,
             copy: true,
             arithmetic: false,
+            counts: false,
             iterations: 8_000_000,
         };
         let mut args = std::env::args().skip(1);
@@ -189,6 +198,7 @@ impl Options {
                 "--load" => options.load = true,
                 "--no-copy" => options.copy = false,
                 "--arithmetic" => options.arithmetic = true,
+                "--counts" => options.counts = true,
                 "--iterations" => {
                     options.iterations = args.next().ok_or("missing iterations")?.parse()?;
                 }
@@ -198,14 +208,90 @@ impl Options {
         if options.samples == 0 || options.iterations == 0 || options.threads.contains(&0) {
             return Err("samples, iterations and threads must be positive".into());
         }
-        if options.arithmetic && options.compare.is_some() {
-            return Err("arithmetic and executable comparison are separate measurements".into());
+        if (options.arithmetic && options.compare.is_some())
+            || (options.counts && (options.arithmetic || options.compare.is_some()))
+        {
+            return Err("counts, arithmetic and executable comparison are separate modes".into());
         }
         if options.sizes.iter().any(|t| ![20, 22].contains(t)) {
             return Err("log-t must select 20 or 22".into());
         }
         Ok(options)
     }
+}
+
+#[derive(Default)]
+struct ButterflyCounts {
+    zero: usize,
+    short: usize,
+    general: usize,
+}
+impl ButterflyCounts {
+    fn at_level(table: &DomainTable, level: &Level, lanes: usize) -> Self {
+        let mut counts = Self::default();
+        for l in 0..level.c {
+            let run_positions = 1usize << (l + 1);
+            let group = lanes * (1usize << l);
+            for x in (0..1usize << level.d).step_by(run_positions) {
+                let raw = table.w_hat(l, x as u32).to_raw();
+                if raw == 0 {
+                    counts.zero += group;
+                } else if raw >> 61 == 0 {
+                    counts.short += group;
+                } else {
+                    counts.general += group;
+                }
+            }
+        }
+        counts
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.zero += other.zero;
+        self.short += other.short;
+        self.general += other.general;
+    }
+
+    fn products(&self, coefficients: usize) -> (usize, usize, usize) {
+        let reduced = (self.short + self.general) * coefficients;
+        let conditional = (2 * self.short + 3 * self.general) * coefficients;
+        (reduced, conditional, 3 * reduced)
+    }
+}
+
+#[expect(clippy::print_stdout, reason = "domain count CSV is benchmark output")]
+fn report_counts(options: &Options) -> Result<(), Box<dyn Error>> {
+    println!("t,level,c,d,zero_butterflies,short_butterflies,general_butterflies,K_products,conditional_arch_carryless_products,base_field_carryless_products");
+    for &log_t in &options.sizes {
+        let schedule = Schedule::new(BitsGeometry { log_T: log_t })?;
+        let levels = schedule.levels();
+        let level0 = levels.first().ok_or(WhirError::Shape {
+            part: WhirPart::Levels,
+            expected: 1,
+            actual: 0,
+        })?;
+        let table = DomainTable::new(level0.c, level0.d)?;
+        let mut later = ButterflyCounts::default();
+        for (i, level) in levels.iter().enumerate() {
+            let lanes = level.lanes()? * if i == 0 { 2 } else { 1 };
+            let counts = ButterflyCounts::at_level(&table, level, lanes);
+            let coefficients = if i == 0 { 1 } else { 3 };
+            let (products, conditional, base) = counts.products(coefficients);
+            println!(
+                "{log_t},{i},{},{},{},{},{},{products},{conditional},{base}",
+                level.c, level.d, counts.zero, counts.short, counts.general
+            );
+            if i != 0 {
+                later.merge(&counts);
+            }
+        }
+        let (products, conditional, base) = later.products(3);
+        println!(
+            "{log_t},later-total,all,all,{},{},{},{products},{conditional},{base}",
+            later.zero, later.short, later.general
+        );
+    }
+    Ok(())
 }
 
 fn parse_list(text: &str) -> Result<Vec<usize>, Box<dyn Error>> {
@@ -433,6 +519,26 @@ fn reduced_products<const N: usize, const SHARED: bool>(iterations: usize, seed:
 }
 
 #[inline(never)]
+fn unreduced_shared_products<const N: usize>(iterations: usize, seed: u64) -> Duration {
+    type BaseAccumulator = <F64 as WithAccumulator>::Accumulator;
+    let mut rng = Words(black_box(seed));
+    let input: Vec<_> = black_box((0..2048).map(|_| F64::from_raw(rng.gen())).collect());
+    let factor = black_box(F64::from_raw(rng.gen()));
+    let mut state: [BaseAccumulator; N] = std::array::from_fn(|_| BaseAccumulator::default());
+    let mask = input.len() - 1;
+    let start = Instant::now();
+    for iteration in 0..black_box(iterations) {
+        let base = iteration.wrapping_mul(N);
+        for (chain, accumulator) in state.iter_mut().enumerate() {
+            accumulator.fmadd(input[base.wrapping_add(chain) & mask], factor);
+        }
+    }
+    let elapsed = start.elapsed();
+    let _result = black_box(state.map(Accumulator::reduce));
+    elapsed
+}
+
+#[inline(never)]
 fn extension_scalings<const N: usize>(iterations: usize, seed: u64) -> Duration {
     let mut rng = Words(black_box(seed));
     let mut state: [F192; N] =
@@ -454,16 +560,32 @@ fn extension_scalings<const N: usize>(iterations: usize, seed: u64) -> Duration 
 )]
 fn report_arithmetic(options: &Options) {
     type ArithmeticCase = (&'static str, usize, fn(usize, u64) -> Duration);
-    let cases: [ArithmeticCase; 7] = [
+    let cases: [ArithmeticCase; 10] = [
         ("K-reduced-product", 1, reduced_products::<1, false>),
         ("K-reduced-product", 4, reduced_products::<4, false>),
         ("K-reduced-product", 8, reduced_products::<8, false>),
         ("K-reduced-shared-product", 16, reduced_products::<16, true>),
         ("K-reduced-shared-product", 24, reduced_products::<24, true>),
+        (
+            "K-unreduced-shared-product",
+            8,
+            unreduced_shared_products::<8>,
+        ),
+        (
+            "K-unreduced-shared-product",
+            16,
+            unreduced_shared_products::<16>,
+        ),
+        (
+            "K-unreduced-shared-product",
+            24,
+            unreduced_shared_products::<24>,
+        ),
         ("E-by-K-scale", 4, extension_scalings::<4>),
         ("E-by-K-scale", 8, extension_scalings::<8>),
     ];
-    println!("# one thread; dependent chains are mutually independent; products include reduction");
+    println!("# one thread; chains are mutually independent; reduced rows include field reduction");
+    println!("# unreduced rows include L1 input loads, multiply/XOR and loop control; reduction is outside timing");
     println!("operation,chains,iterations,operations,K-products,median_ms,min_ms,max_ms,median_ns/operation,min_ns/operation,median_ns/K-product,min_ns/K-product");
     for (operation, chains, run) in cases {
         let _warm = black_box(run(options.iterations, 0x6172_6974_686d));
@@ -494,7 +616,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if options.load {
         report_load()?;
     }
-    if options.arithmetic {
+    if options.counts {
+        report_counts(&options)?;
+    } else if options.arithmetic {
         report_arithmetic(&options);
     } else if let Some(baseline) = &options.compare {
         compare(&options, baseline)?;

@@ -155,7 +155,7 @@ pub(crate) fn add_claim_weights(
     let (induced, commit_coefficient) = measure::run(observer, Phase::InducedWeights, || {
         let encoder = Encoder::new(table, previous.c, previous.d, 1)?;
         let mut domain = try_vec(WhirPart::Leaves, domain_len)?;
-        domain.resize(domain_len, F192::zero());
+        rayon::iter::repeat_n(F192::zero(), domain_len).collect_into_vec(&mut domain);
         for &position in positions {
             domain[position] = coefficients.next_query();
         }

@@ -1,3 +1,7 @@
+//! Slice butterflies: `cargo bench -p jolt-field --features binary --bench binary_kernels -- butterfly`.
+//! Native AArch64 arithmetic requires `RUSTFLAGS="-C target-cpu=native"`.
+//! Accumulator reduction: `cargo bench -p jolt-field --features binary --bench binary_kernels -- reduce`.
+
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use jolt_field::{
     Accumulator, ExtField, F128Accumulator, Field, NaiveAccumulator, WithAccumulator, Zero, F128,
@@ -66,6 +70,32 @@ fn bench_accumulators<F: Field + WithAccumulator>(c: &mut Criterion, name: &str)
     group.finish();
 }
 
+fn bench_reduction<F: Field + WithAccumulator>(c: &mut Criterion, name: &str) {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7265_6475_6365);
+    let states: Vec<_> = (0..1024)
+        .map(|_| {
+            let mut acc = F::Accumulator::default();
+            acc.fmadd(F::random(&mut rng), F::random(&mut rng));
+            acc
+        })
+        .collect();
+    let mut output = vec![F::zero(); states.len()];
+    let mut group = c.benchmark_group(name);
+    let _ = group.bench_function("reduce", |bencher| {
+        bencher.iter(|| black_box(black_box(states[0]).reduce()));
+    });
+    let _ = group.throughput(Throughput::Elements(1024));
+    let _ = group.bench_function("reduce_slice", |bencher| {
+        bencher.iter(|| {
+            for (dest, &acc) in output.iter_mut().zip(black_box(&states)) {
+                *dest = acc.reduce();
+            }
+            let _ = black_box(&output);
+        });
+    });
+    group.finish();
+}
+
 fn binary_kernels(c: &mut Criterion) {
     let a64 = F64::from_raw(0xfedc_ba98_7654_3210);
     let b64 = F64::from_raw(0x89ab_cdef_0123_4567);
@@ -85,6 +115,8 @@ fn binary_kernels(c: &mut Criterion) {
     bench_accumulators::<F64>(c, "F64");
     bench_accumulators::<F128>(c, "F128");
     bench_accumulators::<F192>(c, "F192");
+    bench_reduction::<F64>(c, "F64");
+    bench_reduction::<F192>(c, "F192");
     bench_field(c, "F64", a64, b64);
     bench_field(c, "F128", a128, b128);
     bench_field(
@@ -246,10 +278,53 @@ fn bench_commitment_products(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_butterflies(c: &mut Criterion) {
+    let mut group = c.benchmark_group("butterfly");
+    let _ = group.throughput(Throughput::Elements(1024));
+    for (name, raw) in [
+        ("short", (1u64 << 61) - 1),
+        ("general", 0xa53c_2f17_8e91_6bd4),
+    ] {
+        let twiddle = F64::from_raw(raw);
+        let mut top: Vec<_> = (0..1024)
+            .map(|i| F64::from_raw(0x9e37_79b9_7f4a_7c15 ^ i))
+            .collect();
+        let mut bot: Vec<_> = (0..1024)
+            .map(|i| F64::from_raw(0xd1b5_4a32_d192_ed03 ^ i))
+            .collect();
+        let _ = group.bench_function(format!("F64/{name}"), |bencher| {
+            bencher.iter(|| {
+                F64::butterfly_assign(black_box(&mut top), black_box(&mut bot), black_box(twiddle));
+                let _ = black_box((&top, &bot));
+            });
+        });
+        let mut top: Vec<_> = top
+            .iter()
+            .map(|v| F192::from_base_fn(|j| F64::from_raw(v.to_raw().rotate_left(17 * j as u32))))
+            .collect();
+        let mut bot: Vec<_> = bot
+            .iter()
+            .map(|v| F192::from_base_fn(|j| F64::from_raw(v.to_raw().rotate_right(23 * j as u32))))
+            .collect();
+        let _ = group.bench_function(format!("F192/{name}"), |bencher| {
+            bencher.iter(|| {
+                F192::butterfly_assign(
+                    black_box(&mut top),
+                    black_box(&mut bot),
+                    black_box(twiddle),
+                );
+                let _ = black_box((&top, &bot));
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     binary_kernels,
     bench_word_products,
-    bench_commitment_products
+    bench_commitment_products,
+    bench_butterflies
 );
 criterion_main!(benches);

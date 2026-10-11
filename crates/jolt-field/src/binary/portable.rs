@@ -1,3 +1,5 @@
+use super::reduction::MODULUS64;
+
 #[inline]
 pub(super) const fn add128(a: u128, b: u128) -> u128 {
     a ^ b
@@ -16,7 +18,7 @@ pub(super) fn multiply64(mut a: u64, mut b: u64) -> u64 {
             product ^= a;
         }
         let carry = a >> 63;
-        a = (a << 1) ^ (carry * 0x1b);
+        a = (a << 1) ^ (carry * MODULUS64);
         b >>= 1;
     }
     product

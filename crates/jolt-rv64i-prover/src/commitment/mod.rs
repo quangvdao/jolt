@@ -6,9 +6,10 @@ use jolt_transcript::Transcript;
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 pub mod transparent;
+pub mod whir;
 
 /// Prover half of the bit-table scheme, with commit absorption matching `verify_commit` and opening after column absorption.
-/// A scheme retaining packed rows shares their allocation; neither phase copies a trace-sized buffer.
+/// Packed rows share their allocation; the codeword is a new buffer, with no packed copy of the rows.
 pub trait BitsCommitmentProver: BitsCommitmentScheme {
     /// Scheme setup borrowed by both prover phases.
     type ProverSetup;

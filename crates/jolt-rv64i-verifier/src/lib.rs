@@ -35,3 +35,4 @@ pub mod stages;
 pub mod statement;
 pub mod transcript;
 pub mod verifier;
+pub mod whir;

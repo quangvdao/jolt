@@ -18,11 +18,12 @@ use jolt_rv64i_prover::commitment::{
     BitsCommitmentProver,
 };
 use jolt_rv64i_prover::plane::Rv64iWitness;
+use jolt_rv64i_prover::reference::bytecode::BytecodeReadAddressPrepare;
 use jolt_rv64i_prover::stages::stage6a::{Stage6aKernels, Stage6aSumchecks};
 use jolt_rv64i_prover::stages::stage6b::{Stage6bKernels, Stage6bSumchecks};
 use jolt_rv64i_verifier::claims::bits_reduction::BitsReductionInputClaims;
 use jolt_rv64i_verifier::claims::bytecode_read::{
-    BytecodeReadAddressInputClaims, BytecodeReadCycleInputClaims,
+    BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims, BytecodeReadCycleInputClaims,
 };
 use jolt_rv64i_verifier::claims::ram_ra_product::RamRaProductInputClaims;
 use jolt_rv64i_verifier::commitment::{BitsCommitmentScheme, BitsGeometry, BitsOpening};
@@ -47,6 +48,7 @@ use jolt_sumcheck::{ClearSumcheckRecorder, SequentialRounds};
 use jolt_transcript::{Blake2bTranscript, Transcript};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 
 type BinaryTranscript = Blake2bTranscript<F128>;
@@ -1179,5 +1181,86 @@ fn stage6_schedule_matches_reference_layout_literals() {
         );
         let output = batch.expand(&vec![F128::zero(); 256]).unwrap();
         assert_eq!(batch.opening_values(&output).len(), 256);
+    }
+}
+
+#[test]
+fn parallel_bytecode_tables_preserve_literal_pc_bits_and_padding() {
+    let (_, _, witness) = support::counting_loop();
+    let layout = Layout::new(
+        14,
+        witness.layout.log_K_ram(),
+        witness.layout.lowest_address(),
+    )
+    .unwrap();
+    let program: Vec<_> = (0..8193)
+        .map(|row| (RAM_START_ADDRESS + 4 * row, support::asm::jal(0, 0)))
+        .collect();
+    let bytecode = support::harness::bytecode(&program, &layout);
+    let mut x = vec![F128::zero(); 17];
+    x[1] = F128::one();
+    let points =
+        BytecodeReadPoints::new(&x, vec![F128::zero(); 5], vec![], vec![], vec![]).unwrap();
+    let relation =
+        BytecodeReadAddress::new(14, points, RAM_START_ADDRESS, RAM_START_ADDRESS).unwrap();
+    let challenges = BytecodeReadAddressChallenges {
+        imm: F128::zero(),
+        fall_through_pc: F128::zero(),
+        pc_plus_imm: F128::zero(),
+        pc: F128::one(),
+        variant: F128::zero(),
+        shift_kind: F128::zero(),
+        access_kind: F128::zero(),
+        key_kind: F128::zero(),
+        branch: F128::zero(),
+        rs1_ra: F128::from_raw(3),
+        rs2_ra: F128::zero(),
+        rd_wa_read: F128::zero(),
+        rd_wa_write: F128::from_raw(5),
+        store: F128::zero(),
+        entry: F128::from_raw(7),
+        next: F128::from_raw(11),
+    };
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let tables = pool
+            .install(|| BytecodeReadAddressPrepare.public_tables(&bytecode, &relation, &challenges))
+            .unwrap();
+        for (column, table) in tables.iter().enumerate() {
+            assert_eq!(table.len(), 16384);
+            for (row, &value) in table.iter().take(8193).enumerate() {
+                let expected = match column {
+                    0 => {
+                        if row % 2 == 0 {
+                            F128::zero()
+                        } else {
+                            F128::one()
+                        }
+                    }
+                    1 => F128::from_raw(3),
+                    2 => F128::from_raw(5),
+                    3 => {
+                        if row % 2 == 0 {
+                            F128::zero()
+                        } else {
+                            F128::from_raw(7)
+                        }
+                    }
+                    4 => {
+                        if row % 2 == 0 {
+                            F128::zero()
+                        } else {
+                            F128::from_raw(11)
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                assert_eq!(value, expected);
+            }
+            assert!(table[8193..].iter().all(|value| *value == F128::zero()));
+        }
     }
 }

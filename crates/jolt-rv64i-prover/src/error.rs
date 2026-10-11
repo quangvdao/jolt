@@ -48,6 +48,8 @@ pub enum Rv64iProverError {
         bits: usize,
         words: usize,
     },
+    #[error("witness has {found} decoded rows, expected {expected}")]
+    DecodedLength { expected: usize, found: usize },
     #[error("cycle {cycle} selects an invalid bytecode index {index}")]
     InvalidBytecode { cycle: usize, index: u64 },
     #[error("cycle {cycle} has multiple stored indicators in chunk {start}")]

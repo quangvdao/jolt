@@ -14,12 +14,35 @@ use common::{
     jolt_device::{JoltDevice, MemoryConfig, MemoryLayout},
 };
 use jolt_field::F128;
+use jolt_kernels::ProofSession;
 use jolt_rv64i_arith::{CycleFacts, Layout};
-use jolt_rv64i_prover::{commitment::transparent::TransparentBits, plane::Rv64iWitness};
+use jolt_rv64i_prover::{
+    backend::Rv64iBackend,
+    commitment::{transparent::TransparentBits, BitsCommitmentProver},
+    plane::Rv64iWitness,
+    stages as prover_stages,
+};
 use jolt_rv64i_verifier::{
+    commitment::{BitsGeometry, BitsOpening},
     preprocessing::VerifierPreprocessing,
+    proof::{
+        BatchProof, BitsColumns, BytecodeAddressValue, InnerValues, OuterValues,
+        ReadCheckingValues, RouterCycleValues, RouterFoldValues, ValEvaluationValues,
+    },
+    public::matrices::RowMatrices,
+    stages::stage1::{
+        Output as Stage1Output, Stage1InputClaims, Stage1InputPoints, Stage1Sumchecks,
+    },
+    stages::stage2::{verify::Inputs as Stage2Inputs, Output as Stage2Output},
+    stages::stage3a::{verify::Inputs as Stage3aInputs, Output as Stage3aOutput},
+    stages::stage3b::{verify::Inputs as Stage3bInputs, Output as Stage3bOutput},
+    stages::stage4::{verify::Inputs as Stage4Inputs, Output as Stage4Output},
+    stages::stage5::{verify::Inputs as Stage5Inputs, Output as Stage5Output},
+    stages::stage6a::{verify::Inputs as Stage6aInputs, Output as Stage6aOutput},
+    stages::stage6b::{verify::Inputs as Stage6bInputs, Output as Stage6bOutput},
+    stages::{stage1, stage2, stage3a, stage3b, stage4, stage5, stage6a, stage6b},
     statement::{CheckedInputs, Statement},
-    transcript::Rv64iTranscript,
+    transcript::{preamble, Rv64iTranscript},
 };
 use jolt_transcript::{AppendToTranscript, Label, Transcript};
 use std::sync::Arc;
@@ -45,6 +68,7 @@ pub enum Program {
     CallsReturns,
     ShiftXor,
     BranchLadder,
+    Separating,
 }
 pub const PROGRAMS: [Program; 5] = [
     Program::CountingLoop,
@@ -62,6 +86,7 @@ impl Program {
             Self::CallsReturns => "calls_returns",
             Self::ShiftXor => "shift_xor",
             Self::BranchLadder => "branch_ladder",
+            Self::Separating => "separating",
         }
     }
     fn words(self) -> Vec<u32> {
@@ -157,6 +182,31 @@ impl Program {
                 asm::sd(2, 4, 0),
                 asm::ecall(),
             ],
+            Self::Separating => vec![
+                asm::auipc(2, 0),
+                asm::addi(2, 2, -8),
+                asm::addi(1, 0, 83),
+                asm::addi(3, 0, 37),
+                asm::addi(4, 0, -29),
+                asm::addi(5, 0, 701),
+                asm::addi(6, 0, 913),
+                asm::addi(7, 2, -16),
+                asm::addi(9, 0, 271),
+                asm::addi(10, 0, 419),
+                asm::sb(7, 4, 3),
+                asm::lbu(6, 7, 3),
+                asm::sll(5, 1, 3),
+                asm::slt(4, 6, 1),
+                asm::bne(1, 3, 8),
+                asm::addi(0, 0, 0),
+                asm::beq(5, 6, 8),
+                asm::addi(8, 0, 113),
+                asm::auipc(9, 0),
+                asm::jalr(10, 9, 9),
+                asm::addi(11, 0, 1),
+                asm::sd(2, 11, 0),
+                asm::jal(0, 0),
+            ],
             Self::BranchLadder => vec![
                 asm::auipc(2, 0),
                 asm::addi(2, 2, -8),
@@ -186,6 +236,55 @@ impl Program {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ProvingFailure {
+    WrongOutput,
+    MissingTermination,
+    WrongEntry,
+}
+pub const PROVING_FAILURES: [ProvingFailure; 3] = [
+    ProvingFailure::WrongOutput,
+    ProvingFailure::MissingTermination,
+    ProvingFailure::WrongEntry,
+];
+pub struct ProvingFailureFixture {
+    pub statement: Statement,
+    pub changed: Statement,
+    pub verifier: VerifierPreprocessing<TransparentBits>,
+    pub witness: Rv64iWitness,
+    pub expected_batch: &'static str,
+}
+pub fn proving_failure_fixture(case: ProvingFailure) -> ProvingFailureFixture {
+    let program = match case {
+        ProvingFailure::WrongOutput => Program::ByteCopy,
+        ProvingFailure::MissingTermination => Program::CountingLoopWithoutTermination,
+        ProvingFailure::WrongEntry => Program::CountingLoop,
+    };
+    let (statement, verifier, witness) = program_fixture(program, 6);
+    let mut changed = statement.clone();
+    let expected_batch = match case {
+        ProvingFailure::WrongOutput => {
+            changed.device.outputs[0] ^= 1;
+            "4"
+        }
+        ProvingFailure::MissingTermination => {
+            changed.device.panic = false;
+            "4"
+        }
+        ProvingFailure::WrongEntry => {
+            changed.entry_pc += 4;
+            "6a"
+        }
+    };
+    ProvingFailureFixture {
+        statement,
+        changed,
+        verifier,
+        witness,
+        expected_batch,
+    }
+}
+
 pub fn counting_loop() -> (
     Statement,
     VerifierPreprocessing<TransparentBits>,
@@ -204,6 +303,13 @@ pub fn counting_loop_at(
 }
 pub fn counting_loop_facts() -> Vec<CycleFacts> {
     program_fixture_with_facts(Program::CountingLoop, 6).3
+}
+pub fn separating_fixture() -> (
+    Statement,
+    VerifierPreprocessing<TransparentBits>,
+    Rv64iWitness,
+) {
+    program_fixture(Program::Separating, 6)
 }
 pub fn program_fixture(
     program: Program,
@@ -288,9 +394,11 @@ fn program_fixture_with_facts(
             harness::facts(&record, bytecode.index_of_pc(record.pc).unwrap())
         })
         .collect();
-    if matches!(program_kind, Program::ByteCopy) {
+    if matches!(program_kind, Program::ByteCopy | Program::Separating) {
         statement.device.outputs = machine.ram_word(1).unwrap().to_le_bytes().to_vec();
-        assert_eq!(statement.device.outputs, statement.device.inputs);
+        if matches!(program_kind, Program::ByteCopy) {
+            assert_eq!(statement.device.outputs, statement.device.inputs);
+        }
     }
     assert_eq!(machine.pc(), last_pc);
     assert_eq!(
@@ -411,5 +519,216 @@ impl Transcript for RecordedTranscript {
     }
     fn state(&self) -> [u8; 32] {
         self.inner.state()
+    }
+}
+
+/// Batch-local protocol inputs and the transcript immediately before its stage driver,
+/// retained alongside the proof and typed output from its single reference run.
+pub struct BatchRecord<I, V, O> {
+    pub inputs: I,
+    pub transcript: RecordedTranscript,
+    pub proof: BatchProof<V>,
+    pub output: O,
+}
+
+pub struct Stage1Inputs {
+    pub batch: Stage1Sumchecks<F128>,
+    pub claims: Stage1InputClaims<F128>,
+    pub points: Stage1InputPoints<F128>,
+}
+
+/// Each reference kernel runs once; later adapter tests replay an individual batch
+/// from its saved transcript without proving the upstream batches again.
+pub struct ReferenceBatches {
+    pub stage1: BatchRecord<Stage1Inputs, OuterValues, Stage1Output>,
+    pub stage2: BatchRecord<Stage2Inputs, InnerValues, Stage2Output>,
+    pub stage3a: BatchRecord<Stage3aInputs, RouterFoldValues, Stage3aOutput>,
+    pub stage3b: BatchRecord<Stage3bInputs, RouterCycleValues, Stage3bOutput>,
+    pub stage4: BatchRecord<Stage4Inputs, ReadCheckingValues, Stage4Output>,
+    pub stage5: BatchRecord<Stage5Inputs, ValEvaluationValues, Stage5Output>,
+    pub stage6a: BatchRecord<Stage6aInputs, BytecodeAddressValue, Stage6aOutput>,
+    pub stage6b: BatchRecord<Stage6bInputs, BitsColumns, Stage6bOutput>,
+    pub transcript: RecordedTranscript,
+}
+
+pub fn reference_batches(
+    statement: &Statement,
+    preprocessing: &VerifierPreprocessing<TransparentBits>,
+    witness: &Rv64iWitness,
+) -> ReferenceBatches {
+    let checked = CheckedInputs::of_statement(
+        preprocessing,
+        statement,
+        witness.layout.log_K_ram() as u8,
+        witness.final_pc,
+    )
+    .unwrap();
+    let mut transcript = preamble::<TransparentBits, RecordedTranscript>(&checked);
+    let geometry = BitsGeometry {
+        log_T: checked.log_T(),
+    };
+    let (_, state) =
+        TransparentBits::commit(&(), geometry, &witness.bits, &mut transcript).unwrap();
+    let backend = Rv64iBackend::reference();
+    let mut session = ProofSession::default();
+    macro_rules! keep {
+        ($inputs:expr, $prove:expr) => {{
+            let before = transcript.fork();
+            let inputs = $inputs;
+            let (proof, output) = $prove.unwrap();
+            BatchRecord {
+                inputs,
+                transcript: before,
+                proof,
+                output,
+            }
+        }};
+    }
+    let s1 = keep!(
+        {
+            let batch = stage1::verify::from_checked(&checked, &mut transcript.fork()).unwrap();
+            let points = batch.empty_input_points();
+            Stage1Inputs {
+                batch,
+                claims: Stage1InputClaims {
+                    spartan_outer_f2: Default::default(),
+                    spartan_outer_f128: Default::default(),
+                },
+                points,
+            }
+        },
+        prover_stages::stage1::prove(
+            &checked,
+            witness,
+            &backend.stage1,
+            &mut session,
+            &mut transcript,
+        )
+    );
+    let s2 = keep!(
+        stage2::verify::from_upstream(Arc::new(RowMatrices::new(checked.layout())), &s1.output)
+            .unwrap(),
+        prover_stages::stage2::prove(
+            &checked,
+            witness,
+            &backend.stage2,
+            &mut session,
+            &mut transcript,
+            &s1.output,
+        )
+    );
+    let s3a = keep!(
+        stage3a::verify::from_upstream(&checked, &s2.output).unwrap(),
+        prover_stages::stage3a::prove(
+            &checked,
+            witness,
+            &backend.stage3a,
+            &mut session,
+            &mut transcript,
+            &s2.output,
+        )
+    );
+    let s3b = keep!(
+        stage3b::verify::from_upstream(&checked, &s1.output, &s3a.output).unwrap(),
+        prover_stages::stage3b::prove(
+            &checked,
+            witness,
+            &backend.stage3b,
+            &mut session,
+            &mut transcript,
+            &s1.output,
+            &s3a.output,
+        )
+    );
+    let s4 = keep!(
+        stage4::verify::from_upstream(&checked, &mut transcript.fork(), &s3a.output, &s3b.output,)
+            .unwrap(),
+        prover_stages::stage4::prove(
+            &checked,
+            witness,
+            &backend.stage4,
+            &mut session,
+            &mut transcript,
+            &s3a.output,
+            &s3b.output,
+        )
+    );
+    let s5 = keep!(
+        stage5::verify::from_upstream(&checked, &s3a.output, &s4.output).unwrap(),
+        prover_stages::stage5::prove(
+            &checked,
+            witness,
+            &backend.stage5,
+            &mut session,
+            &mut transcript,
+            &s3a.output,
+            &s4.output,
+        )
+    );
+    let s6a = keep!(
+        stage6a::verify::from_upstream(&checked, &s3a.output, &s3b.output, &s4.output, &s5.output,)
+            .unwrap(),
+        prover_stages::stage6a::prove(
+            &checked,
+            witness,
+            &backend.stage6a,
+            &mut session,
+            &mut transcript,
+            &s3a.output,
+            &s3b.output,
+            &s4.output,
+            &s5.output,
+        )
+    );
+    let s6b = keep!(
+        stage6b::verify::from_upstream(
+            &checked,
+            &s1.output,
+            &s2.output,
+            &s3a.output,
+            &s3b.output,
+            &s4.output,
+            &s5.output,
+            &s6a.output,
+        )
+        .unwrap(),
+        prover_stages::stage6b::prove(
+            &checked,
+            witness,
+            &backend.stage6b,
+            &mut session,
+            &mut transcript,
+            &s1.output,
+            &s2.output,
+            &s3a.output,
+            &s3b.output,
+            &s4.output,
+            &s5.output,
+            &s6a.output,
+        )
+    );
+    let rho = transcript.challenge_vector(8);
+    let _ = TransparentBits::open(
+        &(),
+        state,
+        &BitsOpening {
+            geometry,
+            column_point: &rho,
+            cycle_point: &s6b.output.point,
+            columns: &s6b.proof.values.0,
+        },
+        &mut transcript,
+    )
+    .unwrap();
+    ReferenceBatches {
+        stage1: s1,
+        stage2: s2,
+        stage3a: s3a,
+        stage3b: s3b,
+        stage4: s4,
+        stage5: s5,
+        stage6a: s6a,
+        stage6b: s6b,
+        transcript,
     }
 }

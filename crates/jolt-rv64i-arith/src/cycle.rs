@@ -3,7 +3,7 @@
 use thiserror::Error as ThisError;
 
 use crate::bytecode::Bytecode;
-use crate::decode::{eval, Sources};
+use crate::decode::{eval, SourceParts, Sources};
 use crate::layout::{set_bit, BitsRow, Layout, LayoutError};
 use crate::variant::{BranchCondition, Variant};
 use crate::words::BaseWords;
@@ -29,6 +29,18 @@ pub struct CycleFacts {
     pub ram_pre_value: u64,
     pub ram_post_value: u64,
     pub next_pc: u64,
+}
+
+impl CycleFacts {
+    /// XOR update of the RAM word for a store, or destination register otherwise.
+    #[inline(always)]
+    pub fn increment(&self, variant: Variant) -> u64 {
+        if variant.is_store() {
+            self.ram_pre_value ^ self.ram_post_value
+        } else {
+            self.rd_pre_value ^ self.rd_post_value
+        }
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +111,16 @@ impl<'a> BitsBuilder<'a> {
     /// subject to its surrounding-protocol obligations.
     #[inline]
     pub fn bits_row(&self, facts: &CycleFacts) -> Result<BitsRow, WitnessError> {
+        self.bits_row_with_parts(facts).map(|(bits, _)| bits)
+    }
+
+    /// Returns the committed row and its source parts from the same evaluation;
+    /// the parts are retained values, without decoding the completed row.
+    #[inline]
+    pub fn bits_row_with_parts(
+        &self,
+        facts: &CycleFacts,
+    ) -> Result<(BitsRow, SourceParts), WitnessError> {
         let row = self
             .bytecode
             .rows()
@@ -113,7 +135,14 @@ impl<'a> BitsBuilder<'a> {
         self.layout
             .write_bytecode_index(&mut bits, u64::from(facts.bytecode_index))
             .map_err(|source| WitnessError::Layout { source })?;
-        let mut pos = 0;
+        let mut parts = SourceParts {
+            inc: facts.increment(variant),
+            ram_index: 0,
+            pos: 0,
+            keys_differ: false,
+            should_branch: false,
+            jalr_low_bit: false,
+        };
         if let Some(access) = variant.access() {
             let relative_address = facts.rs1_value.wrapping_add(row.imm);
             if u128::from(relative_address) >= (8u128 << self.layout.log_K_ram()) {
@@ -132,17 +161,14 @@ impl<'a> BitsBuilder<'a> {
                     found: facts.ram_word_index,
                 });
             }
+            parts.ram_index = expected;
             self.layout
-                .write_ram_index(&mut bits, expected)
+                .write_ram_index(&mut bits, parts.ram_index)
                 .map_err(|source| WitnessError::Layout { source })?;
-            pos = (relative_address & 7) as u8;
+            parts.pos = (relative_address & 7) as u8;
         }
         if let Some(inc) = bits.first_mut() {
-            *inc = if variant.is_store() {
-                facts.ram_pre_value ^ facts.ram_post_value
-            } else {
-                facts.rd_pre_value ^ facts.rd_post_value
-            };
+            *inc = parts.inc;
         }
         let shift = variant.shift();
         let keys = variant.key_kind();
@@ -152,44 +178,41 @@ impl<'a> BitsBuilder<'a> {
                 rs2_value: facts.rs2_value,
                 ..BaseWords::default()
             };
-            let src = Sources::new(self.layout, row, &base, &bits);
+            let src = Sources::from_parts(row, &base, parts);
             if let Some(shift) = shift {
                 let mask = if shift.kind.is_word() { 31 } else { 63 };
-                pos = (src.get(shift.amount) & mask) as u8;
+                parts.pos = (src.get(shift.amount) & mask) as u8;
             }
             if let Some(keys) = keys {
                 let (left_form, right_form) = keys.keys();
                 let left = eval(left_form, &src);
                 let right = eval(right_form, &src);
                 let diff = left ^ right;
-                let differs = diff != 0;
-                if differs {
-                    pos = diff.ilog2() as u8;
+                parts.keys_differ = diff != 0;
+                if parts.keys_differ {
+                    parts.pos = diff.ilog2() as u8;
                 }
-                set_bit(&mut bits, self.layout.keys_differ(), differs);
-                let less = differs && (right >> pos) & 1 != 0;
+                set_bit(&mut bits, self.layout.keys_differ(), parts.keys_differ);
+                let less = parts.keys_differ && (right >> parts.pos) & 1 != 0;
                 if let Some(branch) = variant.branch() {
-                    let taken = match branch {
-                        BranchCondition::Equal => !differs,
-                        BranchCondition::NotEqual => differs,
+                    parts.should_branch = match branch {
+                        BranchCondition::Equal => !parts.keys_differ,
+                        BranchCondition::NotEqual => parts.keys_differ,
                         BranchCondition::Less => less,
                         BranchCondition::NotLess => !less,
                     };
-                    set_bit(&mut bits, self.layout.should_branch(), taken);
+                    set_bit(&mut bits, self.layout.should_branch(), parts.should_branch);
                 }
             }
         }
         if matches!(variant, Variant::JALR | Variant::JALR_X0) {
-            set_bit(
-                &mut bits,
-                self.layout.jalr_low_bit(),
-                facts.rs1_value.wrapping_add(row.imm) & 1 != 0,
-            );
+            parts.jalr_low_bit = facts.rs1_value.wrapping_add(row.imm) & 1 != 0;
+            set_bit(&mut bits, self.layout.jalr_low_bit(), parts.jalr_low_bit);
         }
         self.layout
-            .write_pos(&mut bits, pos)
+            .write_pos(&mut bits, parts.pos)
             .map_err(|source| WitnessError::Layout { source })?;
-        Ok(bits)
+        Ok((bits, parts))
     }
 
     /// Applies the scalar generator in order with no state between cycles.

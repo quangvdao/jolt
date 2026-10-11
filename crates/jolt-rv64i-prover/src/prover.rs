@@ -71,6 +71,12 @@ fn prove_inner<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
             words: witness.words.len(),
         });
     }
+    if witness.decoded.len() != expected {
+        return Err(Rv64iProverError::DecodedLength {
+            expected,
+            found: witness.decoded.len(),
+        });
+    }
     if witness.layout.log_K_bytecode() != checked.log_K_bytecode()
         || witness.layout.log_K_ram() != checked.log_K_ram()
         || witness.layout.lowest_address() != checked.layout().lowest_address()

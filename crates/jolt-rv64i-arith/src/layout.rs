@@ -40,6 +40,13 @@ pub enum ChunkError {
     DigitBitOutOfRange { bit: u8, bits: u8 },
 }
 
+/// A chunk with more than one stored indicator cannot name a digit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("chunk {start} has multiple stored indicators")]
+pub struct MultipleIndicators {
+    pub start: u16,
+}
+
 /// A digit of width `bits` stores indicators for digits `1..2^bits` beginning
 /// at `start`; digit zero is represented by their complemented parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +118,16 @@ impl Chunk {
             0
         };
         ((low | high) & ((1_u64 << self.indicators()) - 1)) as u16
+    }
+
+    /// Returns the digit for zero or one stored indicator; rejects multiple indicators.
+    #[inline]
+    pub fn checked_digit(self, row: &BitsRow) -> Result<u8, MultipleIndicators> {
+        let stored = self.stored(row);
+        if stored & stored.wrapping_sub(1) != 0 {
+            return Err(MultipleIndicators { start: self.start });
+        }
+        Ok((u16::BITS - stored.leading_zeros()) as u8)
     }
 
     /// All indicators, `(stored << 1) | (1 XOR parity(stored))`.
@@ -587,11 +604,24 @@ mod tests {
             for digit in 0..(1 << bits) {
                 chunk.write_digit(&mut row, digit).unwrap();
                 assert_eq!(chunk.full(&row), 1 << digit);
+                assert_eq!(chunk.checked_digit(&row), Ok(digit));
                 for i in 0..bits {
                     assert_eq!(chunk.digit_bit(&row, i).unwrap(), digit & (1 << i) != 0);
                 }
             }
         }
+    }
+
+    #[test]
+    fn checked_digit_rejects_two_indicators_across_a_word_boundary() {
+        let chunk = Chunk::new(63, 3).unwrap();
+        let mut row = [0; 4];
+        set_bit(&mut row, 63, true);
+        set_bit(&mut row, 64, true);
+        assert_eq!(
+            chunk.checked_digit(&row),
+            Err(MultipleIndicators { start: 63 })
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-allocative = ["dep:allocative", "jolt-rv64i-verifier/allocative", "jolt-kernels/allocative"]
+allocative = ["dep:allocative", "jolt-rv64i-verifier/allocative", "jolt-kernels/allocative", "jolt-verifier/allocative"]
 parallel = ["jolt-kernels/parallel", "jolt-sumcheck/parallel"]
 test-utils = ["jolt-rv64i-verifier/test-utils", "dep:rand"]
 
@@ -24,6 +24,8 @@ jolt-field = { path = "../jolt-field", default-features = false, features = ["bi
 jolt-poly.workspace = true
 jolt-r1cs.workspace = true
 jolt-rv64i-arith.workspace = true
+jolt-rv64i-kernels = { path = "../jolt-rv64i-kernels" }
+rayon.workspace = true
 jolt-sumcheck.workspace = true
 jolt-transcript = { workspace = true, features = ["transcript-blake2b"] }
 thiserror.workspace = true
@@ -35,6 +37,7 @@ jolt-rv64i-verifier.workspace = true
 rand = { workspace = true, optional = true, features = ["std", "std_rng"] }
 
 [dev-dependencies]
+jolt-rv64i-trace.workspace = true
 jolt-program = { workspace = true, features = ["image"] }
 jolt-riscv.workspace = true
 
@@ -88,4 +91,34 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "lifecycle"
+required-features = ["test-utils"]
+
+[[bench]]
+name = "adapters"
+harness = false
+required-features = ["test-utils"]
+
+[[test]]
+name = "optimized_sources"
+required-features = ["test-utils"]
+
+[[test]]
+name = "optimized_outer"
+required-features = ["test-utils"]
+
+[[test]]
+name = "optimized_routers"
+required-features = ["test-utils"]
+
+[[test]]
+name = "optimized_tail"
+required-features = ["test-utils"]
+
+[[test]]
+name = "optimized_registry"
+required-features = ["test-utils"]
+
+[[bench]]
+name = "witness_pipeline"
+harness = false
 required-features = ["test-utils"]

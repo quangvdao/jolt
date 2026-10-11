@@ -1,7 +1,7 @@
 //! Decode rows as XOR-linear maps on words. A term's wires define its bit map.
 
 use crate::bytecode::BytecodeRow;
-use crate::layout::{bit, BitsRow, Layout};
+use crate::layout::{bit, BitsRow, Chunk, Layout, MultipleIndicators};
 use crate::variant::{Access, AccessKind, BranchCondition, KeyKind, Shift, ShiftKind, Variant};
 use crate::words::BaseWords;
 use thiserror::Error as ThisError;
@@ -61,6 +61,61 @@ impl Variant {
             .chain((!self.is_store()).then_some(RdWriteSource::Inc))
     }
 }
+/// Decoded inputs of the source bank; `pos` is interpreted as a word.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceParts {
+    pub inc: u64,
+    pub ram_index: u64,
+    pub pos: u8,
+    pub keys_differ: bool,
+    pub should_branch: bool,
+    pub jalr_low_bit: bool,
+}
+impl SourceParts {
+    /// Reads the source inputs with the layout's XOR-linear digit semantics.
+    #[inline]
+    pub fn from_bits(layout: &Layout, bits: &BitsRow) -> Self {
+        Self::with_digits(layout, bits, layout.ram_index(bits), layout.pos(bits))
+    }
+
+    /// Checks each chunk once and returns the fetched index and source inputs.
+    /// Position and address digits reuse the checked indicator reads.
+    #[inline]
+    pub fn from_checked_bits(
+        layout: &Layout,
+        bits: &BitsRow,
+    ) -> Result<(u64, Self), MultipleIndicators> {
+        let index = |chunks: &[Chunk]| -> Result<u64, MultipleIndicators> {
+            let mut value = 0;
+            let mut shift = 0;
+            for chunk in chunks {
+                value |= u64::from(chunk.checked_digit(bits)?) << shift;
+                shift += chunk.bits();
+            }
+            Ok(value)
+        };
+        let bytecode_index = index(layout.bytecode_ra())?;
+        let ram_index = index(layout.ram_ra())?;
+        let pos = index(&layout.pos_ra())? as u8;
+        Ok((
+            bytecode_index,
+            Self::with_digits(layout, bits, ram_index, pos),
+        ))
+    }
+
+    #[inline]
+    fn with_digits(layout: &Layout, bits: &BitsRow, ram_index: u64, pos: u8) -> Self {
+        Self {
+            inc: layout.inc(bits),
+            ram_index,
+            pos,
+            keys_differ: bit(bits, layout.keys_differ()),
+            should_branch: bit(bits, layout.should_branch()),
+            jalr_low_bit: bit(bits, layout.jalr_low_bit()),
+        }
+    }
+}
+
 /// Stack values of the sixteen named source words.
 #[derive(Clone, Copy, Debug)]
 pub struct Sources([u64; 16]);
@@ -68,7 +123,13 @@ impl Sources {
     /// RamAddress = (RamIndex << 3) | (Pos & 7); flag sources are the committed bits.
     #[inline]
     pub fn new(layout: &Layout, row: &BytecodeRow, base: &BaseWords, bits: &BitsRow) -> Self {
-        let pos = u64::from(layout.pos(bits));
+        Self::from_parts(row, base, SourceParts::from_bits(layout, bits))
+    }
+    /// Builds the same sixteen sources from decoded parts; address arithmetic
+    /// wraps just as the committed-row constructor does.
+    #[inline]
+    pub fn from_parts(row: &BytecodeRow, base: &BaseWords, parts: SourceParts) -> Self {
+        let pos = u64::from(parts.pos);
         Self([
             base.rs1_value,
             base.rs2_value,
@@ -78,13 +139,13 @@ impl Sources {
             row.pc_plus_imm,
             row.pc,
             base.next_pc,
-            layout.inc(bits),
+            parts.inc,
             base.ram_read_value,
-            (layout.ram_index(bits) << 3) | (pos & 7),
+            (parts.ram_index << 3) | (pos & 7),
             pos,
-            u64::from(bit(bits, layout.keys_differ())),
-            u64::from(bit(bits, layout.should_branch())),
-            u64::from(bit(bits, layout.jalr_low_bit())),
+            u64::from(parts.keys_differ),
+            u64::from(parts.should_branch),
+            u64::from(parts.jalr_low_bit),
             1,
         ])
     }

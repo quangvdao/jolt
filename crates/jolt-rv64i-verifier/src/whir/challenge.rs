@@ -5,8 +5,8 @@ use super::{
     params::{Level, Queries},
 };
 use crate::commitment::squeeze_bytes;
-use jolt_field::{CanonicalEncoding, F128, F192};
-use jolt_transcript::Transcript;
+use jolt_field::{CanonicalBytes, CanonicalEncoding, F128, F192};
+use jolt_transcript::{Label, Transcript};
 
 /// Commit-phase root label.
 pub const COMMIT_LABEL: &[u8] = b"whir_commit";
@@ -20,6 +20,66 @@ pub const ROUND_LABEL: &[u8] = b"whir_round";
 pub const ROOT_LABEL: &[u8] = b"whir_root";
 /// Final-message label.
 pub const FINAL_LABEL: &[u8] = b"whir_final";
+
+/// Absorbs one label and one concatenation of canonical elements. Up to 32
+/// elements use stack storage; larger explicit schedules reserve checked bytes.
+pub fn append_elements<T: Transcript<Challenge = F128>>(
+    transcript: &mut T,
+    label: &'static [u8],
+    values: &[F192],
+) -> Result<(), WhirError> {
+    let len = checked_product(WhirPart::FinalValues, &[values.len(), F192::NUM_BYTES])?;
+    let mut stack = [0; 32 * 24];
+    let mut heap;
+    let bytes = if let Some(bytes) = stack.get_mut(..len) {
+        bytes
+    } else {
+        heap = try_vec(WhirPart::FinalValues, len)?;
+        heap.resize(len, 0);
+        heap.as_mut_slice()
+    };
+    for (value, encoding) in values.iter().zip(bytes.chunks_exact_mut(F192::NUM_BYTES)) {
+        value.to_bytes_le(encoding);
+    }
+    transcript.append(&Label(label));
+    transcript.append_bytes(bytes);
+    Ok(())
+}
+
+/// Coefficients of the entering sample, ascending distinct queries, and optional
+/// commit sample. Consume one query coefficient per position before the commit
+/// coefficient; its consuming method closes the ordered walk.
+pub struct ClaimCoefficients {
+    lambda: F192,
+    next: F192,
+}
+
+impl ClaimCoefficients {
+    /// The entering sample has coefficient lambda; the first query has lambda².
+    pub fn new(lambda: F192) -> Self {
+        Self {
+            lambda,
+            next: lambda * lambda,
+        }
+    }
+
+    /// Coefficient of the new oracle's out-of-domain sample.
+    pub fn sample(&self) -> F192 {
+        self.lambda
+    }
+
+    /// Coefficient of the next distinct query, in ascending position order.
+    pub fn next_query(&mut self) -> F192 {
+        let coefficient = self.next;
+        self.next *= self.lambda;
+        coefficient
+    }
+
+    /// Coefficient of the commit sample after every distinct query is consumed.
+    pub fn commit_sample(self) -> F192 {
+        self.next
+    }
+}
 
 /// Draws one element with two 16-byte draws, discarding the last eight bytes.
 #[expect(
@@ -109,14 +169,14 @@ pub fn draw_positions<T: Transcript<Challenge = F128>>(
 )]
 mod tests {
     use super::{
-        draw_element, draw_point, draw_positions, COMMIT_LABEL, FINAL_LABEL, OOD_LABEL, OPEN_LABEL,
-        ROOT_LABEL, ROUND_LABEL,
+        append_elements, draw_element, draw_point, draw_positions, ClaimCoefficients, COMMIT_LABEL,
+        FINAL_LABEL, OOD_LABEL, OPEN_LABEL, ROOT_LABEL, ROUND_LABEL,
     };
     use crate::whir::{
         error::{WhirError, WhirPart},
         params::{Level, Queries},
     };
-    use jolt_field::{CanonicalBytes, CanonicalEncoding, F128};
+    use jolt_field::{CanonicalBytes, CanonicalEncoding, ExtField, F128, F192, F64};
     use jolt_transcript::Transcript;
 
     #[derive(Default)]
@@ -154,6 +214,47 @@ mod tests {
 
         fn state(&self) -> [u8; 32] {
             [0; 32]
+        }
+    }
+
+    #[test]
+    fn claim_coefficients_match_literal_sample_query_commit_exponents() {
+        let lambda = F192::lift_base(F64::from_raw(2));
+        for (queries, literals) in [
+            (0, vec![2, 4]),
+            (1, vec![2, 4, 8]),
+            (5, vec![2, 4, 8, 16, 32, 64, 128]),
+        ] {
+            let mut coefficients = ClaimCoefficients::new(lambda);
+            let mut actual = vec![coefficients.sample()];
+            for _ in 0..queries {
+                actual.push(coefficients.next_query());
+            }
+            actual.push(coefficients.commit_sample());
+            let expected: Vec<_> = literals
+                .into_iter()
+                .map(|raw| F192::lift_base(F64::from_raw(raw)))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn element_absorption_keeps_literal_single_body_across_stack_bound() {
+        let element = F192::from_base_fn(|i| F64::from_raw([1, 2, 3].get(i).copied().unwrap()));
+        let encoded = [
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut label = [0; 32];
+        label.get_mut(..10).unwrap().copy_from_slice(b"whir_round");
+        for count in [0, 1, 2, 32, 33] {
+            let mut transcript = ByteTranscript::default();
+            append_elements(&mut transcript, ROUND_LABEL, &vec![element; count]).unwrap();
+            assert_eq!(
+                transcript.absorbed,
+                vec![label.to_vec(), encoded.repeat(count)]
+            );
+            assert_eq!(transcript.draw, 0);
         }
     }
 

@@ -3,7 +3,9 @@
 use crate::commit::power;
 use crate::measure::{self, Event, Phase};
 use crate::ntt::Encoder;
+use crate::parallel::{self, MIN_TASK};
 use jolt_field::{Accumulator, WithAccumulator, Zero, F192};
+use jolt_rv64i_verifier::whir::challenge::ClaimCoefficients;
 use jolt_rv64i_verifier::whir::code::DomainTable;
 use jolt_rv64i_verifier::whir::error::{try_vec, WhirError, WhirPart};
 use jolt_rv64i_verifier::whir::params::Level;
@@ -37,12 +39,18 @@ pub(crate) fn equality_table_into(
     let mut width = 1;
     for coordinate in point {
         let (low, high) = table[..2 * width].split_at_mut(width);
-        low.par_iter_mut()
-            .zip(high.par_iter_mut())
-            .for_each(|(low, high)| {
-                *high = *low * *coordinate;
-                *low += *high;
-            });
+        let expand = |(low, high): (&mut F192, &mut F192)| {
+            *high = *low * *coordinate;
+            *low += *high;
+        };
+        if parallel::enabled(width) {
+            low.par_iter_mut()
+                .zip(high.par_iter_mut())
+                .with_min_len(MIN_TASK)
+                .for_each(expand);
+        } else {
+            low.iter_mut().zip(high.iter_mut()).for_each(expand);
+        }
         width *= 2;
     }
     Ok(())
@@ -56,18 +64,27 @@ pub(crate) fn inner_product(message: &[F192], weight: &[F192]) -> Result<F192, W
             actual: weight.len(),
         });
     }
-    Ok(message
-        .par_iter()
-        .zip(weight.par_iter())
-        .fold(ProductAccumulator::default, |mut sum, (&f, &w)| {
-            sum.fmadd(f, w);
-            sum
-        })
-        .reduce(ProductAccumulator::default, |mut a, b| {
-            a.merge(b);
-            a
-        })
-        .reduce())
+    let accumulate = |mut sum: ProductAccumulator, (&f, &w): (&F192, &F192)| {
+        sum.fmadd(f, w);
+        sum
+    };
+    let sum = if parallel::enabled(message.len()) {
+        message
+            .par_iter()
+            .zip(weight.par_iter())
+            .with_min_len(MIN_TASK)
+            .fold(ProductAccumulator::default, accumulate)
+            .reduce(ProductAccumulator::default, |mut a, b| {
+                a.merge(b);
+                a
+            })
+    } else {
+        message
+            .iter()
+            .zip(weight.iter())
+            .fold(ProductAccumulator::default(), accumulate)
+    };
+    Ok(sum.reduce())
 }
 
 /// Claims entering together at one level interface.
@@ -133,33 +150,62 @@ pub(crate) fn add_claim_weights(
         }
         last = Some(position);
     }
-    let (induced, power) = measure::run(observer, Phase::InducedWeights, || {
+    let mut coefficients = ClaimCoefficients::new(lambda);
+    let sample_coefficient = coefficients.sample();
+    let (induced, commit_coefficient) = measure::run(observer, Phase::InducedWeights, || {
         let encoder = Encoder::new(table, previous.c, previous.d, 1)?;
         let mut domain = try_vec(WhirPart::Leaves, domain_len)?;
         domain.resize(domain_len, F192::zero());
-        let mut power = lambda * lambda;
         for &position in positions {
-            domain[position] = power;
-            power *= lambda;
+            domain[position] = coefficients.next_query();
         }
         let induced = encoder.transpose(&mut domain)?;
         drop(domain);
-        Ok::<_, WhirError>((induced, power))
+        Ok::<_, WhirError>((induced, coefficients.commit_sample()))
     })?;
     measure::run(observer, Phase::EqualityAndSamples, || {
         let commit_table = commit_point
-            .map(|point| equality_table(point, power))
+            .map(|point| equality_table(point, commit_coefficient))
             .transpose()?;
-        weight
-            .par_iter_mut()
-            .zip(sample_table.par_iter())
-            .zip(induced.par_iter())
-            .for_each(|((weight, &sample), &query)| *weight += lambda * sample + query);
         if let Some(commit_table) = commit_table {
-            weight
-                .par_iter_mut()
-                .zip(commit_table.par_iter())
-                .for_each(|(weight, &commit)| *weight += commit);
+            let merge =
+                |(((weight, &sample), &query), &commit): (((&mut F192, &F192), &F192), &F192)| {
+                    *weight += sample_coefficient * sample + query + commit;
+                };
+            if parallel::enabled(weight.len()) {
+                weight
+                    .par_iter_mut()
+                    .zip(sample_table.par_iter())
+                    .zip(induced.par_iter())
+                    .zip(commit_table.par_iter())
+                    .with_min_len(MIN_TASK)
+                    .for_each(merge);
+            } else {
+                weight
+                    .iter_mut()
+                    .zip(sample_table.iter())
+                    .zip(induced.iter())
+                    .zip(commit_table.iter())
+                    .for_each(merge);
+            }
+        } else {
+            let merge = |((weight, &sample), &query): ((&mut F192, &F192), &F192)| {
+                *weight += sample_coefficient * sample + query;
+            };
+            if parallel::enabled(weight.len()) {
+                weight
+                    .par_iter_mut()
+                    .zip(sample_table.par_iter())
+                    .zip(induced.par_iter())
+                    .with_min_len(MIN_TASK)
+                    .for_each(merge);
+            } else {
+                weight
+                    .iter_mut()
+                    .zip(sample_table.iter())
+                    .zip(induced.iter())
+                    .for_each(merge);
+            }
         }
         Ok::<_, WhirError>(())
     })
@@ -175,6 +221,7 @@ mod tests {
     use crate::ntt::Encoder;
     use jolt_field::{ExtField, One, Zero, F192, F64};
     use jolt_rv64i_verifier::points::eq_index;
+    use jolt_rv64i_verifier::whir::challenge::ClaimCoefficients;
     use jolt_rv64i_verifier::whir::code::DomainTable;
     use jolt_rv64i_verifier::whir::error::{WhirError, WhirPart};
     use jolt_rv64i_verifier::whir::params::{Level, Queries};
@@ -182,7 +229,7 @@ mod tests {
     #[test]
     fn scaled_equality_table_uses_low_variable_first_vertices() {
         let scale = F192::from_base_fn(|i| F64::from_raw(13 + i as u64));
-        for n in 0..=8 {
+        for n in 0..=14 {
             let point: Vec<_> = (0..n)
                 .map(|i| F192::from_base_fn(|j| F64::from_raw(27 + i as u64 + j as u64)))
                 .collect();
@@ -223,14 +270,14 @@ mod tests {
         let lambda = F192::from_base_fn(|i| F64::from_raw(5 + i as u64));
         for commit_point in [None, Some(commit.as_slice())] {
             let sample_table = equality_table(&sample, F192::one()).unwrap();
-            let mut expected = lambda * inner_product(&message, &sample_table).unwrap();
-            let mut power = lambda * lambda;
+            let mut coefficients = ClaimCoefficients::new(lambda);
+            let mut expected =
+                coefficients.sample() * inner_product(&message, &sample_table).unwrap();
             for &position in &positions {
-                expected += power * code[position];
-                power *= lambda;
+                expected += coefficients.next_query() * code[position];
             }
             if let Some(point) = commit_point {
-                expected += power
+                expected += coefficients.commit_sample()
                     * inner_product(&message, &equality_table(point, F192::one()).unwrap())
                         .unwrap();
             }

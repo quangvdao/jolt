@@ -2,7 +2,7 @@
 
 use crate::{
     bridge::{BridgeTables, FoldedBridge},
-    commit::{append_elements, power, validate_schedule, ProverState},
+    commit::{initial_lanes, power, ProverState},
     induce::{add_claim_weights, equality_table, inner_product, ClaimWeights},
     measure::{self, Event, Phase, ReleasePoint},
     merkle::MerkleTree,
@@ -15,8 +15,8 @@ use jolt_rv64i_verifier::{
     whir::{
         bridge::slice_claims,
         challenge::{
-            draw_element, draw_point, draw_positions, FINAL_LABEL, OOD_LABEL, OPEN_LABEL,
-            ROOT_LABEL, ROUND_LABEL,
+            append_elements, draw_element, draw_point, draw_positions, FINAL_LABEL, OOD_LABEL,
+            OPEN_LABEL, ROOT_LABEL, ROUND_LABEL,
         },
         code::DomainTable,
         error::{checked_product, try_vec, WhirError, WhirPart},
@@ -47,7 +47,7 @@ pub fn open_with_schedule<T: Transcript<Challenge = F128>>(
     open_impl(schedule, state, opening, transcript, &mut |_| {})
 }
 
-/// Observes joined phases and allocation release points for the measurement example.
+/// Observes joined phases and allocation release points for the WHIR benchmark runner.
 #[cfg(feature = "test-utils")]
 pub fn open_observed<T: Transcript<Challenge = F128>>(
     state: ProverState,
@@ -73,13 +73,10 @@ fn open_impl<T: Transcript<Challenge = F128>>(
         });
     }
     let _ = slice_claims(opening)?;
-    let first = validate_schedule(state.geometry, &schedule)?;
+    let first = schedule.validate_geometry(state.geometry)?;
+    let lanes = initial_lanes(first)?;
     for (part, expected, actual) in [
-        (
-            WhirPart::LaneValues,
-            first.lanes()?,
-            state.lane_values.len(),
-        ),
+        (WhirPart::LaneValues, lanes, state.lane_values.len()),
         (WhirPart::Rounds, first.c, state.point.len()),
     ] {
         if expected != actual {

@@ -1,5 +1,6 @@
 //! Adjacent-pair sumcheck rounds after the streaming bridge round.
 
+use crate::parallel::MIN_TASK;
 use jolt_field::{Accumulator, WithAccumulator, Zero, F192};
 use jolt_rv64i_verifier::whir::error::{try_vec, WhirError, WhirPart};
 use rayon::prelude::*;
@@ -110,17 +111,25 @@ impl RoundState {
     }
 
     fn fold_in_place(values: &mut Vec<F192>, challenge: F192) {
-        Self::fold_prefix(values, challenge);
+        let cutoff = if rayon::current_num_threads() > 1 {
+            2 * MIN_TASK
+        } else {
+            2
+        };
+        Self::fold_prefix(values, challenge, cutoff);
         values.truncate(values.len() / 2);
     }
 
-    fn fold_prefix(values: &mut [F192], challenge: F192) {
-        if values.len() == 2 {
-            values[0] += challenge * (values[0] + values[1]);
+    fn fold_prefix(values: &mut [F192], challenge: F192, cutoff: usize) {
+        if values.len() <= cutoff {
+            for index in 0..values.len() / 2 {
+                values[index] =
+                    values[2 * index] + challenge * (values[2 * index] + values[2 * index + 1]);
+            }
             return;
         }
         let (left, right) = values.split_at_mut(values.len() / 2);
-        Self::fold_prefix(left, challenge);
+        Self::fold_prefix(left, challenge, cutoff);
         // The original left half is consumed before its upper quarter becomes
         // output storage for the original right half. Every output is written
         // once, with disjoint input/output borrows and no compaction pass.
@@ -139,33 +148,42 @@ mod tests {
     use crate::induce::inner_product;
     use jolt_field::{ExtField, One, Zero, F192, F64};
     use jolt_rv64i_verifier::whir::error::{WhirError, WhirPart};
+    use rayon::ThreadPoolBuilder;
 
     #[test]
     fn round_coefficients_and_folds_obey_sumcheck_identity() {
-        for release in [false, true] {
-            let f: Vec<_> = (1..=8192)
-                .map(|i| F192::lift_base(F64::from_raw(i)))
-                .collect();
-            let w: Vec<_> = (1..=8192)
-                .map(|i| F192::lift_base(F64::from_raw(i * 31)))
-                .collect();
-            let mut state = RoundState::new(f, w).unwrap();
-            let old_capacity = state.message.capacity();
-            while state.message.len() > 1 {
-                let sigma = inner_product(&state.message, &state.weight).unwrap();
-                let [u0, u2] = state.coefficients().unwrap();
-                let a = F192::from_base_fn(|i| F64::from_raw(7 + i as u64));
-                state.fold(a, release).unwrap();
-                assert_eq!(
-                    inner_product(&state.message, &state.weight).unwrap(),
-                    u0 + (sigma + u2) * a + u2 * a * a
-                );
-            }
-            if release {
-                assert_eq!(state.message.capacity(), 1);
-            } else {
-                assert_eq!(state.message.capacity(), old_capacity);
-            }
+        for threads in [1, 12] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    for release in [false, true] {
+                        let f: Vec<_> = (1..=65536)
+                            .map(|i| F192::lift_base(F64::from_raw(i)))
+                            .collect();
+                        let w: Vec<_> = (1..=65536)
+                            .map(|i| F192::lift_base(F64::from_raw(i * 31)))
+                            .collect();
+                        let mut state = RoundState::new(f, w).unwrap();
+                        let old_capacity = state.message.capacity();
+                        while state.message.len() > 1 {
+                            let sigma = inner_product(&state.message, &state.weight).unwrap();
+                            let [u0, u2] = state.coefficients().unwrap();
+                            let a = F192::from_base_fn(|i| F64::from_raw(7 + i as u64));
+                            state.fold(a, release).unwrap();
+                            assert_eq!(
+                                inner_product(&state.message, &state.weight).unwrap(),
+                                u0 + (sigma + u2) * a + u2 * a * a
+                            );
+                        }
+                        if release {
+                            assert_eq!(state.message.capacity(), 1);
+                        } else {
+                            assert_eq!(state.message.capacity(), old_capacity);
+                        }
+                    }
+                });
         }
     }
 

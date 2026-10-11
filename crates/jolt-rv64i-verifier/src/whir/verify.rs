@@ -3,11 +3,11 @@
 use super::{
     bridge::{slice_claims, tau, BridgeWeight},
     challenge::{
-        draw_element, draw_point, draw_positions, COMMIT_LABEL, FINAL_LABEL, OOD_LABEL, OPEN_LABEL,
-        ROOT_LABEL, ROUND_LABEL,
+        append_elements, draw_element, draw_point, draw_positions, ClaimCoefficients, COMMIT_LABEL,
+        FINAL_LABEL, OOD_LABEL, OPEN_LABEL, ROOT_LABEL, ROUND_LABEL,
     },
     code::DomainTable,
-    error::{checked_product, try_vec, WhirError, WhirPart},
+    error::{try_vec, WhirError, WhirPart},
     merkle::{verify_multiproof, Digest},
     params::Schedule,
     wire::{WhirCommitment, WhirLevelMessage, WhirOpeningProof},
@@ -17,7 +17,7 @@ use crate::{
     points::{eq, eq_index, equality_table, PointsError},
 };
 use jolt_field::WithAccumulator;
-use jolt_field::{Accumulator, CanonicalBytes, CanonicalEncoding, Zero, F128, F192, F64};
+use jolt_field::{Accumulator, CanonicalEncoding, Zero, F128, F192, F64};
 use jolt_transcript::{Label, Transcript};
 
 type ProductAccumulator = <F192 as WithAccumulator>::Accumulator;
@@ -99,24 +99,7 @@ impl WhirBits {
         commitment: &WhirCommitment,
         transcript: &mut T,
     ) -> Result<WhirVerifierState, WhirError> {
-        if !(1..=32).contains(&geometry.log_T) {
-            return Err(WhirError::UnsupportedGeometry {
-                log_T: geometry.log_T,
-            });
-        }
-        if schedule.mu() != geometry.log_T + 1 {
-            return Err(WhirError::GeometryMismatch {
-                expected: BitsGeometry {
-                    log_T: schedule.mu().saturating_sub(1),
-                },
-                actual: geometry,
-            });
-        }
-        let first = schedule.levels().first().ok_or(WhirError::Shape {
-            part: WhirPart::Levels,
-            expected: 1,
-            actual: 0,
-        })?;
+        let first = schedule.validate_geometry(geometry)?;
         commitment.validate(&schedule)?;
         let expected = first.lanes()?;
         // Check all explicit-schedule dimensions before transcript draws or shifts.
@@ -129,30 +112,13 @@ impl WhirBits {
         transcript.append(&Label(COMMIT_LABEL));
         transcript.append_bytes(&commitment.root);
         let point = draw_point(transcript, first.c)?;
-        Self::append_elements(transcript, OOD_LABEL, &lane_values)?;
+        append_elements(transcript, OOD_LABEL, &lane_values)?;
         Ok(WhirVerifierState {
             geometry,
             root: commitment.root,
             point,
             lane_values,
         })
-    }
-
-    fn append_elements<T: Transcript<Challenge = F128>>(
-        transcript: &mut T,
-        label: &'static [u8],
-        values: &[F192],
-    ) -> Result<(), WhirError> {
-        let len = checked_product(WhirPart::FinalValues, &[values.len(), 24])?;
-        let mut bytes = try_vec(WhirPart::FinalValues, len)?;
-        for value in values {
-            let mut encoding = [0; 24];
-            value.to_bytes_le(&mut encoding);
-            bytes.extend_from_slice(&encoding);
-        }
-        transcript.append(&Label(label));
-        transcript.append_bytes(&bytes);
-        Ok(())
     }
 
     fn rounds<T: Transcript<Challenge = F128>>(
@@ -162,7 +128,7 @@ impl WhirBits {
         transcript: &mut T,
     ) -> Result<(), WhirError> {
         for &[u_0, u_2] in rounds {
-            Self::append_elements(transcript, ROUND_LABEL, &[u_0, u_2])?;
+            append_elements(transcript, ROUND_LABEL, &[u_0, u_2])?;
             let a = draw_element(transcript);
             *sigma = u_0 + (*sigma + u_2) * a + u_2 * a * a;
             q.push(a);
@@ -183,21 +149,20 @@ impl WhirBits {
                 actual: opening.geometry,
             });
         }
-        if schedule.mu() != state.geometry.log_T + 1 {
-            return Err(WhirError::GeometryMismatch {
-                expected: state.geometry,
-                actual: BitsGeometry {
-                    log_T: schedule.mu().saturating_sub(1),
-                },
-            });
-        }
+        let first = schedule
+            .validate_geometry(state.geometry)
+            .map_err(|error| {
+                if let WhirError::GeometryMismatch { expected, actual } = error {
+                    WhirError::GeometryMismatch {
+                        expected: actual,
+                        actual: expected,
+                    }
+                } else {
+                    error
+                }
+            })?;
         let slices = slice_claims(opening)?;
         proof.validate(&schedule)?;
-        let first = schedule.levels().first().ok_or(WhirError::Shape {
-            part: WhirPart::Levels,
-            expected: 1,
-            actual: 0,
-        })?;
         for (part, expected, actual) in [
             (
                 WhirPart::LaneValues,
@@ -244,11 +209,11 @@ impl WhirBits {
                     transcript.append(&Label(ROOT_LABEL));
                     transcript.append_bytes(root);
                     let point = draw_point(transcript, level.c)?;
-                    Self::append_elements(transcript, OOD_LABEL, &[*value])?;
+                    append_elements(transcript, OOD_LABEL, &[*value])?;
                     Some((*root, *value, point))
                 }
                 WhirLevelMessage::Final { values } => {
-                    Self::append_elements(transcript, FINAL_LABEL, values)?;
+                    append_elements(transcript, FINAL_LABEL, values)?;
                     None
                 }
             };
@@ -367,14 +332,13 @@ struct ClaimBatch {
 
 impl ClaimBatch {
     fn combination(&self, lambda: F192) -> F192 {
-        let mut power = lambda;
-        let mut sum = power * self.value;
+        let mut coefficients = ClaimCoefficients::new(lambda);
+        let mut sum = coefficients.sample() * self.value;
         for value in &self.values {
-            power *= lambda;
-            sum += power * *value;
+            sum += coefficients.next_query() * *value;
         }
         if let Some(sample) = self.commit_sample {
-            sum += power * lambda * sample;
+            sum += coefficients.commit_sample() * sample;
         }
         sum
     }
@@ -386,14 +350,13 @@ impl ClaimBatch {
         commit_point: &[F192],
         domain: &DomainTable,
     ) -> Result<F192, WhirError> {
-        let mut power = lambda;
-        let mut sum = power * eq(&self.point, q).map_err(point_error)?;
+        let mut coefficients = ClaimCoefficients::new(lambda);
+        let mut sum = coefficients.sample() * eq(&self.point, q).map_err(point_error)?;
         for position in &self.positions {
-            power *= lambda;
-            sum += power * domain.query_weight(self.c, *position as u32, q);
+            sum += coefficients.next_query() * domain.query_weight(self.c, *position as u32, q);
         }
         if self.commit_sample.is_some() {
-            sum += power * lambda * eq(commit_point, q).map_err(point_error)?;
+            sum += coefficients.commit_sample() * eq(commit_point, q).map_err(point_error)?;
         }
         Ok(sum)
     }

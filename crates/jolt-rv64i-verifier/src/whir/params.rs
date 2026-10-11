@@ -110,6 +110,29 @@ impl Schedule {
         Ok(Self { mu, res: c, levels })
     }
 
+    /// Checks a supported geometry against this schedule, returning its first
+    /// level. A mismatch reports the schedule's geometry as expected.
+    pub fn validate_geometry(&self, geometry: BitsGeometry) -> Result<&Level, WhirError> {
+        if !(1..=32).contains(&geometry.log_T) {
+            return Err(WhirError::UnsupportedGeometry {
+                log_T: geometry.log_T,
+            });
+        }
+        if self.mu != geometry.log_T + 1 {
+            return Err(WhirError::GeometryMismatch {
+                expected: BitsGeometry {
+                    log_T: self.mu.saturating_sub(1),
+                },
+                actual: geometry,
+            });
+        }
+        self.levels.first().ok_or(WhirError::Shape {
+            part: WhirPart::Levels,
+            expected: 1,
+            actual: 0,
+        })
+    }
+
     /// Number of packed-table variables, `log_T + 1`.
     pub fn mu(&self) -> usize {
         self.mu

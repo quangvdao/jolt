@@ -24,4 +24,6 @@ pub mod ntt;
 #[forbid(unsafe_code)]
 pub mod open;
 #[forbid(unsafe_code)]
+mod parallel;
+#[forbid(unsafe_code)]
 mod rounds;

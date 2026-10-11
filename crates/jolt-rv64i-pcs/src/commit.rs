@@ -2,11 +2,11 @@
 
 use crate::measure::{self, Event, Phase, ReleasePoint};
 use crate::{induce::equality_table, merkle::MerkleTree, ntt::Encoder};
-use jolt_field::{Accumulator, CanonicalBytes, One, WithAccumulator, F128, F192, F64};
+use jolt_field::{Accumulator, One, WithAccumulator, F128, F192, F64};
 use jolt_rv64i_verifier::{
     commitment::BitsGeometry,
     whir::{
-        challenge::{draw_point, COMMIT_LABEL, OOD_LABEL},
+        challenge::{append_elements, draw_point, COMMIT_LABEL, OOD_LABEL},
         code::DomainTable,
         error::{checked_product, try_vec, WhirError, WhirPart},
         params::{Level, Schedule},
@@ -56,7 +56,7 @@ pub fn commit_with_schedule<T: Transcript<Challenge = F128>>(
     commit_impl(geometry, schedule, rows, transcript, &mut |_| {})
 }
 
-/// Observes joined phases and release points for the measurement example.
+/// Observes joined phases and release points for the WHIR benchmark runner.
 #[cfg(feature = "test-utils")]
 pub fn commit_observed<T: Transcript<Challenge = F128>>(
     geometry: BitsGeometry,
@@ -80,7 +80,8 @@ fn commit_impl<T: Transcript<Challenge = F128>>(
     transcript: &mut T,
     observer: &mut impl FnMut(Event),
 ) -> Result<(WhirCommitment, ProverState), WhirError> {
-    let first = validate_schedule(geometry, &schedule)?;
+    let first = schedule.validate_geometry(geometry)?;
+    let lanes = initial_lanes(first)?;
     let count = power(WhirPart::Rows, geometry.log_T)?;
     if rows.len() != count {
         return Err(WhirError::Shape {
@@ -89,7 +90,6 @@ fn commit_impl<T: Transcript<Challenge = F128>>(
             actual: rows.len(),
         });
     }
-    let lanes = first.lanes()?;
     let (_table, codeword) = measure::run(observer, Phase::LevelZeroEncode, || {
         let table = DomainTable::new(first.c, first.d)?;
         for level in schedule.levels() {
@@ -157,36 +157,16 @@ fn commit_impl<T: Transcript<Challenge = F128>>(
     ))
 }
 
-pub(crate) fn validate_schedule(
-    geometry: BitsGeometry,
-    schedule: &Schedule,
-) -> Result<&Level, WhirError> {
-    if !(1..=32).contains(&geometry.log_T) {
-        return Err(WhirError::UnsupportedGeometry {
-            log_T: geometry.log_T,
-        });
-    }
-    if schedule.mu() != geometry.log_T + 1 {
-        return Err(WhirError::GeometryMismatch {
-            expected: BitsGeometry {
-                log_T: schedule.mu().saturating_sub(1),
-            },
-            actual: geometry,
-        });
-    }
-    let first = schedule.levels().first().ok_or(WhirError::Shape {
-        part: WhirPart::Levels,
-        expected: 1,
-        actual: 0,
-    })?;
-    if first.lanes()? > 32 {
+pub(crate) fn initial_lanes(first: &Level) -> Result<usize, WhirError> {
+    let lanes = first.lanes()?;
+    if lanes > 32 {
         return Err(WhirError::Shape {
             part: WhirPart::LaneValues,
             expected: 32,
-            actual: first.lanes()?,
+            actual: lanes,
         });
     }
-    Ok(first)
+    Ok(lanes)
 }
 
 pub(crate) fn power(part: WhirPart, exponent: usize) -> Result<usize, WhirError> {
@@ -194,23 +174,4 @@ pub(crate) fn power(part: WhirPart, exponent: usize) -> Result<usize, WhirError>
     1usize
         .checked_shl(exponent)
         .ok_or(WhirError::LengthOverflow { part })
-}
-
-pub(crate) fn append_elements<T: Transcript<Challenge = F128>>(
-    transcript: &mut T,
-    label: &'static [u8],
-    values: &[F192],
-) -> Result<(), WhirError> {
-    let mut bytes = try_vec(
-        WhirPart::FinalValues,
-        checked_product(WhirPart::FinalValues, &[values.len(), F192::NUM_BYTES])?,
-    )?;
-    for value in values {
-        let mut encoded = [0; 24];
-        value.to_bytes_le(&mut encoded);
-        bytes.extend_from_slice(&encoded);
-    }
-    transcript.append(&Label(label));
-    transcript.append_bytes(&bytes);
-    Ok(())
 }

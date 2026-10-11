@@ -4,6 +4,7 @@
 // Notices: crates/jolt-rv64i-pcs/THIRD_PARTY_NOTICES.md.
 //! Contiguous Merkle trees: leaf hashes first, then successive parent layers.
 
+use crate::parallel;
 use jolt_field::CanonicalBytes;
 #[cfg(not(feature = "arch"))]
 use jolt_rv64i_verifier::whir::merkle::{hash_leaf, hash_node};
@@ -44,26 +45,41 @@ impl MerkleTree {
             });
         }
         let mut tree = Self::empty(data.len() / entries_per_leaf)?;
-        tree.nodes[..tree.num_leaves]
-            .par_chunks_mut(1024)
-            .enumerate()
-            .try_for_each(|(batch, outputs)| {
-                let bytes_len = checked_product(WhirPart::Leaves, &[outputs.len(), leaf_bytes])?;
-                let mut bytes = try_vec(WhirPart::Leaves, bytes_len)?;
-                bytes.resize(bytes_len, 0);
-                let first = batch * 1024 * entries_per_leaf;
+        let fill = |first_leaf: usize, outputs: &mut [Digest]| {
+            let bytes_len =
+                checked_product(WhirPart::Leaves, &[outputs.len().min(1024), leaf_bytes])?;
+            let mut bytes = try_vec(WhirPart::Leaves, bytes_len)?;
+            bytes.resize(bytes_len, 0);
+            for (batch, outputs) in outputs.chunks_mut(1024).enumerate() {
+                let used = outputs.len() * leaf_bytes;
+                let bytes = &mut bytes[..used];
+                let first = (first_leaf + batch * 1024) * entries_per_leaf;
                 let values = &data[first..first + outputs.len() * entries_per_leaf];
                 for (value, encoding) in values.iter().zip(bytes.chunks_exact_mut(F::NUM_BYTES)) {
                     value.to_bytes_le(encoding);
                 }
                 #[cfg(feature = "arch")]
-                crate::arch::hash_many(&bytes, leaf_bytes, outputs)?;
+                crate::arch::hash_many(bytes, leaf_bytes, outputs)?;
                 #[cfg(not(feature = "arch"))]
                 for (leaf, digest) in bytes.chunks_exact(leaf_bytes).zip(outputs) {
                     *digest = hash_leaf(leaf);
                 }
-                Ok::<_, WhirError>(())
-            })?;
+            }
+            Ok::<_, WhirError>(())
+        };
+        if parallel::enabled(tree.num_leaves) {
+            let group = if tree.num_leaves / 4096 >= 4 * rayon::current_num_threads() {
+                4096
+            } else {
+                1024
+            };
+            tree.nodes[..tree.num_leaves]
+                .par_chunks_mut(group)
+                .enumerate()
+                .try_for_each(|(group_index, outputs)| fill(group_index * group, outputs))?;
+        } else {
+            fill(0, &mut tree.nodes[..tree.num_leaves])?;
+        }
         tree.fill_parents()?;
         Ok(tree)
     }
@@ -134,18 +150,29 @@ impl MerkleTree {
         while width > 1 {
             let (read, write) = self.nodes.split_at_mut(start + width);
             #[cfg(feature = "arch")]
-            write[..width / 2]
-                .par_chunks_mut(1024)
-                .enumerate()
-                .try_for_each(|(group, outputs)| {
-                    let first = start + group * 2048;
-                    crate::arch::hash_pairs(&read[first..first + outputs.len() * 2], outputs)
-                })?;
+            if parallel::enabled(width / 2) {
+                write[..width / 2]
+                    .par_chunks_mut(1024)
+                    .enumerate()
+                    .try_for_each(|(group, outputs)| {
+                        let first = start + group * 2048;
+                        crate::arch::hash_pairs(&read[first..first + outputs.len() * 2], outputs)
+                    })?;
+            } else {
+                crate::arch::hash_pairs(&read[start..start + width], &mut write[..width / 2])?;
+            }
             #[cfg(not(feature = "arch"))]
-            read[start..]
-                .par_chunks_exact(2)
-                .zip(write[..width / 2].par_iter_mut())
-                .for_each(|(pair, slot)| *slot = hash_node(&pair[0], &pair[1]));
+            if parallel::enabled(width / 2) {
+                read[start..]
+                    .par_chunks_exact(2)
+                    .zip(write[..width / 2].par_iter_mut())
+                    .for_each(|(pair, slot)| *slot = hash_node(&pair[0], &pair[1]));
+            } else {
+                read[start..]
+                    .chunks_exact(2)
+                    .zip(write[..width / 2].iter_mut())
+                    .for_each(|(pair, slot)| *slot = hash_node(&pair[0], &pair[1]));
+            }
             start += width;
             width /= 2;
         }
@@ -233,6 +260,20 @@ mod tests {
                     .collect();
                 canonical_root(&values, width);
             }
+        }
+    }
+
+    #[test]
+    fn grouped_serialization_reuse_matches_independent_hash_definition() {
+        let values: Vec<_> = (0..32768 * 16)
+            .map(|i| F192::from_base_fn(|c| F64::from_raw(i as u64 * 0x19a7 + c as u64)))
+            .collect();
+        for threads in [1, 2] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| canonical_root(&values, 16));
         }
     }
 

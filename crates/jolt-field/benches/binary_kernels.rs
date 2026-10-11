@@ -49,7 +49,7 @@ fn bench_accumulators<F: Field + WithAccumulator>(c: &mut Criterion, name: &str)
         bencher.iter(|| {
             let mut acc = F::Accumulator::default();
             for &(a, b) in black_box(&pairs) {
-                acc.fmadd(black_box(a), black_box(b));
+                acc.fmadd(a, b);
             }
             black_box(acc.reduce())
         });
@@ -58,7 +58,7 @@ fn bench_accumulators<F: Field + WithAccumulator>(c: &mut Criterion, name: &str)
         bencher.iter(|| {
             let mut acc = NaiveAccumulator::<F>::default();
             for &(a, b) in black_box(&pairs) {
-                acc.fmadd(black_box(a), black_box(b));
+                acc.fmadd(a, b);
             }
             black_box(acc.reduce())
         });

@@ -1485,3 +1485,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "replay_tests.rs"]
+mod replay_tests;

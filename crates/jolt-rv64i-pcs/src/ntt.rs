@@ -16,10 +16,19 @@ use jolt_rv64i_verifier::whir::code::DomainTable;
 use jolt_rv64i_verifier::whir::error::{checked_product, try_vec, WhirError, WhirPart};
 use rayon::prelude::*;
 
+#[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
+#[path = "arch/aarch64.rs"]
+mod neon;
+
 trait CodeSymbol: Ring + Copy + Send + Sync {
     const FUSE_LAYERS: bool;
 
     fn scale(self, twiddle: F64) -> Self;
+
+    #[inline]
+    fn butterfly(top: &mut [Self], bot: &mut [Self], twiddle: F64) {
+        Encoder::safe_butterfly(top, bot, twiddle);
+    }
 }
 impl CodeSymbol for F64 {
     const FUSE_LAYERS: bool = true;
@@ -28,6 +37,12 @@ impl CodeSymbol for F64 {
     fn scale(self, twiddle: F64) -> Self {
         self * twiddle
     }
+
+    #[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
+    #[inline]
+    fn butterfly(top: &mut [Self], bot: &mut [Self], twiddle: F64) {
+        neon::base_butterfly(top, bot, twiddle);
+    }
 }
 impl CodeSymbol for F192 {
     const FUSE_LAYERS: bool = false;
@@ -35,6 +50,12 @@ impl CodeSymbol for F192 {
     #[inline]
     fn scale(self, twiddle: F64) -> Self {
         self.mul_base(twiddle)
+    }
+
+    #[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
+    #[inline]
+    fn butterfly(top: &mut [Self], bot: &mut [Self], twiddle: F64) {
+        neon::extension_butterfly(top, bot, twiddle);
     }
 }
 
@@ -289,8 +310,19 @@ impl<'a> Encoder<'a> {
         Self::butterfly(r6, r7, t[6]);
     }
 
-    #[inline]
+    #[inline(always)]
     fn butterfly<F: CodeSymbol>(top: &mut [F], bot: &mut [F], twiddle: F64) {
+        if twiddle.is_zero() {
+            for (top, bot) in top.iter().zip(bot) {
+                *bot += *top;
+            }
+            return;
+        }
+        F::butterfly(top, bot, twiddle);
+    }
+
+    #[inline]
+    fn safe_butterfly<F: CodeSymbol>(top: &mut [F], bot: &mut [F], twiddle: F64) {
         if F::FUSE_LAYERS && twiddle.is_zero() {
             for (top, bot) in top.iter().zip(bot) {
                 *bot += *top;

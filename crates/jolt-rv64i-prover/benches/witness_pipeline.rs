@@ -6,6 +6,13 @@
 //! groups. The production total excludes validation-only. Scatter is lazy in
 //! the session and timed separately, with preparation-plus-scatter also reported.
 //! Setup, statement admission, warmed pools, and destruction are outside timers.
+//! Public setup filters: `witness_pipeline/init_eval_sparse` and
+//! `witness_pipeline/init_eval_maximal`; these time the entire public evaluation
+//! including the split equality tables over a 2^20-word RAM domain.
+//! `initial_state_sparse` and `initial_state_maximal` include canonical checks,
+//! allocation, zero-fill and population. These public-image fixtures exercise
+//! the legal RAM domain without executing it. `bytecode_h` uses the executed
+//! adapter fixture and includes public weights and all five H tables.
 
 pub mod support;
 

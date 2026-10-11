@@ -17,6 +17,10 @@ use jolt_rv64i_arith::{
 use jolt_rv64i_verifier::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 #[cfg(feature = "test-utils")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSlice,
+    ParallelSliceMut,
+};
 use std::sync::Arc;
 
 mod replay;
@@ -350,29 +354,103 @@ impl Rv64iWitness {
         Ok(witness)
     }
 
-    fn initial_state(
+    /// Validates sparse words in slice order and allocates their dense initial RAM image.
+    /// Returns the first malformed word or a typed allocation error.
+    pub fn initial_state(
         layout: &Layout,
         initial_ram: &[(u64, u64)],
     ) -> Result<Vec<u64>, Rv64iProverError> {
+        const CHUNK_WORDS: usize = 4096;
         let count = Self::ram_words(layout)?;
-        let mut previous = None;
+        if initial_ram.len() < 2 * CHUNK_WORDS || rayon::current_num_threads() == 1 {
+            return Self::serial_initial_state(layout, initial_ram, count);
+        }
+        let invalid = initial_ram
+            .par_chunks(CHUNK_WORDS)
+            .enumerate()
+            .map(|(chunk, words)| {
+                let previous = (chunk * CHUNK_WORDS)
+                    .checked_sub(1)
+                    .and_then(|index| initial_ram.get(index))
+                    .map(|&(index, _)| index);
+                Self::initial_ram_fault(words, previous, count)
+            })
+            .find_first(Option::is_some)
+            .flatten();
+        if let Some(index) = invalid {
+            return Err(Rv64iProverError::InitialRam { index });
+        }
+        let mut ram = Self::reserve_initial_ram(layout, count)?;
+        if count >= 65536 {
+            (0..count)
+                .into_par_iter()
+                .map(|_| 0_u64)
+                .collect_into_vec(&mut ram);
+            ram.par_chunks_mut(CHUNK_WORDS)
+                .enumerate()
+                .try_for_each(|(chunk, words)| {
+                    let start = (chunk * CHUNK_WORDS) as u64;
+                    let end = start + words.len() as u64;
+                    let first = initial_ram.partition_point(|&(index, _)| index < start);
+                    let last = initial_ram.partition_point(|&(index, _)| index < end);
+                    for &(index, value) in &initial_ram[first..last] {
+                        *words
+                            .get_mut((index - start) as usize)
+                            .ok_or(Rv64iProverError::InitialRam { index })? = value;
+                    }
+                    Ok::<_, Rv64iProverError>(())
+                })?;
+        } else {
+            ram.resize(count, 0);
+            for &(index, value) in initial_ram {
+                *ram.get_mut(index as usize)
+                    .ok_or(Rv64iProverError::InitialRam { index })? = value;
+            }
+        }
+        Ok(ram)
+    }
+
+    #[inline(never)]
+    fn serial_initial_state(
+        layout: &Layout,
+        initial_ram: &[(u64, u64)],
+        count: usize,
+    ) -> Result<Vec<u64>, Rv64iProverError> {
+        if let Some(index) = Self::initial_ram_fault(initial_ram, None, count) {
+            return Err(Rv64iProverError::InitialRam { index });
+        }
+        let mut ram = Self::reserve_initial_ram(layout, count)?;
+        ram.resize(count, 0);
         for &(index, value) in initial_ram {
+            *ram.get_mut(index as usize)
+                .ok_or(Rv64iProverError::InitialRam { index })? = value;
+        }
+        Ok(ram)
+    }
+
+    #[inline]
+    fn initial_ram_fault(
+        words: &[(u64, u64)],
+        mut previous: Option<u64>,
+        count: usize,
+    ) -> Option<u64> {
+        for &(index, value) in words {
             if value == 0 || index >= count as u64 || previous.is_some_and(|p| p >= index) {
-                return Err(Rv64iProverError::InitialRam { index });
+                return Some(index);
             }
             previous = Some(index);
         }
+        None
+    }
+
+    #[inline]
+    fn reserve_initial_ram(layout: &Layout, count: usize) -> Result<Vec<u64>, Rv64iProverError> {
         let mut ram = Vec::new();
         ram.try_reserve_exact(count)
             .map_err(|source| Rv64iProverError::RamAllocation {
                 log_K_ram: layout.log_K_ram(),
                 source,
             })?;
-        ram.resize(count, 0);
-        for &(index, value) in initial_ram {
-            *ram.get_mut(index as usize)
-                .ok_or(Rv64iProverError::InitialRam { index })? = value;
-        }
         Ok(ram)
     }
 

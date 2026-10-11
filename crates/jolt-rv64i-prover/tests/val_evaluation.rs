@@ -20,7 +20,7 @@ use jolt_rv64i_arith::Layout;
 use jolt_rv64i_prover::commitment::transparent::TransparentBits;
 use jolt_rv64i_prover::{
     plane::Rv64iWitness,
-    stages::stage5::{Stage5Kernels, Stage5Sumchecks},
+    stages::stage5::{evaluate_initial_ram, Stage5Kernels, Stage5Sumchecks},
 };
 use jolt_rv64i_verifier::claims::val_evaluation::{
     RamValEvaluationInputClaims, RegistersValEvaluationInputClaims,
@@ -39,6 +39,7 @@ use jolt_sumcheck::{ClearSumcheckRecorder, SequentialRounds};
 use jolt_transcript::{Blake2bTranscript, Transcript};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use support::replay::{self, State};
 
@@ -518,5 +519,51 @@ fn initial_ram_split_tables_cover_both_address_halves() {
             ram_init::evaluate(&changed, &address, &bit).unwrap(),
             expected
         );
+    }
+}
+
+#[test]
+fn initial_ram_parallel_fold_selects_literal_words_across_chunk_boundaries() {
+    let (mut statement, original, witness) = support::counting_loop();
+    statement.device.memory_layout = with_stack(&statement.device.memory_layout, 16 << 20);
+    statement.device.inputs.clear();
+    let image = (64..=8256)
+        .map(|index| {
+            let word = if index == 4160 || index == 8256 {
+                0x8877_6655_4433_2211
+            } else {
+                2
+            };
+            (index, word)
+        })
+        .collect();
+    let preprocessing =
+        VerifierPreprocessing::<TransparentBits>::new(original.bytecode().clone(), image, ())
+            .unwrap();
+    let checked =
+        CheckedInputs::of_statement(&preprocessing, &statement, 20, witness.final_pc).unwrap();
+    let bit = [F128::zero(); 6];
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for (index, expected) in [
+            (4159, F128::zero()),
+            (4160, F128::one()),
+            (8255, F128::zero()),
+            (8256, F128::one()),
+            (16384, F128::zero()),
+        ] {
+            let address: Vec<_> = (0..20)
+                .map(|coordinate| F128::from_u64((index >> coordinate) & 1))
+                .collect();
+            assert_eq!(
+                pool.install(|| evaluate_initial_ram(&checked, &address, &bit))
+                    .unwrap(),
+                expected,
+                "address {index}, threads {threads}"
+            );
+        }
     }
 }

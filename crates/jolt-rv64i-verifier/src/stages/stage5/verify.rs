@@ -8,6 +8,7 @@ use crate::commitment::BitsCommitmentScheme;
 use crate::error::Rv64iVerifierError;
 use crate::points::PointsError;
 use crate::proof::{BatchProof, ValEvaluationValues};
+use crate::public::ram_init;
 use crate::stages::stage3a::verify::Output as Stage3aOutput;
 use crate::stages::stage4::verify::Output as Stage4Output;
 use crate::statement::CheckedInputs;
@@ -44,6 +45,21 @@ pub fn from_upstream<S: BitsCommitmentScheme>(
     stage3a: &Stage3aOutput,
     stage4: &Stage4Output,
 ) -> Result<Inputs, VerifierError> {
+    from_upstream_with_initial_ram(checked, stage3a, stage4, ram_init::evaluate)
+}
+
+/// Establishes the same checked geometry while allowing the prover to schedule the public RAM fold.
+/// The evaluator must return the canonical initial-RAM evaluation at the supplied address and bit points.
+pub fn from_upstream_with_initial_ram<S: BitsCommitmentScheme>(
+    checked: &CheckedInputs<'_, S>,
+    stage3a: &Stage3aOutput,
+    stage4: &Stage4Output,
+    evaluate_initial_ram: impl FnOnce(
+        &CheckedInputs<'_, S>,
+        &[F128],
+        &[F128],
+    ) -> Result<F128, PointsError>,
+) -> Result<Inputs, VerifierError> {
     let source = &stage4.points;
     let short_bit = stage3a.x.get(..6).ok_or_else(|| {
         term_error(PointsError::Dimension {
@@ -66,6 +82,7 @@ pub fn from_upstream<S: BitsCommitmentScheme>(
         &source.registers_read_checking.registers_val,
         &source.ram_read_checking.ram_val,
         &source.ram_output_check.ram_val_final,
+        evaluate_initial_ram,
     )?;
     let points = batch.input_points();
     let claims = Stage5InputClaims {

@@ -11,6 +11,7 @@ pub mod chunk_product;
 pub mod column_pass;
 pub mod outer_f2;
 pub mod packed;
+pub mod pair_sum;
 pub mod par;
 pub mod reduction;
 pub mod round;

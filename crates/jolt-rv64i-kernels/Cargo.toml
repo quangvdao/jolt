@@ -79,3 +79,8 @@ required-features = ["test-utils"]
 name = "tail"
 harness = false
 required-features = ["test-utils"]
+
+[[bench]]
+name = "pair_sum"
+harness = false
+required-features = ["test-utils"]

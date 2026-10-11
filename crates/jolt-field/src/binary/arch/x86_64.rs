@@ -189,29 +189,7 @@ impl Word {
 
     #[inline]
     pub(super) fn from_u128(value: u128) -> Self {
-        // A full-width load cannot forward two separate scalar stores.
-        // Keep lane loads distinct until packing, without forcing a GP move.
-        // SAFETY: SSE2 is baseline; AVX packing is selected only with AVX.
-        // Both instructions interleave the low lanes without touching memory.
-        unsafe {
-            let mut low = _mm_cvtsi64_si128(value as i64);
-            let high = _mm_cvtsi64_si128((value >> 64) as i64);
-            #[cfg(target_feature = "avx")]
-            std::arch::asm!(
-                "vpunpcklqdq {low}, {low}, {high}",
-                low = inout(xmm_reg) low,
-                high = in(xmm_reg) high,
-                options(pure, nomem, nostack, preserves_flags),
-            );
-            #[cfg(not(target_feature = "avx"))]
-            std::arch::asm!(
-                "punpcklqdq {low}, {high}",
-                low = inout(xmm_reg) low,
-                high = in(xmm_reg) high,
-                options(pure, nomem, nostack, preserves_flags),
-            );
-            Self(low)
-        }
+        Self::from_accumulator_u128(value)
     }
 
     #[inline]

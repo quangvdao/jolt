@@ -9,11 +9,17 @@ use std::hint::black_box;
 
 fn bench_field<F: Field>(c: &mut Criterion, name: &str, a: F, b: F) {
     let mut group = c.benchmark_group(name);
+    // Stable operands keep the black-box stack slot from carrying a
+    // store/load dependency between otherwise independent products.
+    let operands = (a, b);
     let _ = group.bench_function("mul", |bencher| {
-        bencher.iter(|| black_box(black_box(a) * black_box(b)));
+        bencher.iter(|| {
+            let &(a, b) = black_box(&operands);
+            a * b
+        });
     });
     let _ = group.bench_function("square", |bencher| {
-        bencher.iter(|| black_box(black_box(a).square()));
+        bencher.iter(|| black_box(&operands.0).square());
     });
     let mut rng = ChaCha20Rng::seed_from_u64(0x6d75_6c5f_736c_6963);
     let pairs: Vec<_> = (0..1024)

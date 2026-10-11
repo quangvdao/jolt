@@ -11,9 +11,37 @@ pub(super) struct Word(uint64x2_t);
 pub(super) type Unreduced64 = u128;
 pub(super) const SCALAR_ACCUMULATOR64: bool = true;
 pub(super) const KARATSUBA128: bool = false;
+pub(super) const KARATSUBA_ACCUMULATOR128: bool = false;
 pub(super) const SHIFT_SQUARE128: bool = false;
 
 impl Word {
+    #[inline]
+    pub(super) fn reduce128(product: [Self; 3]) -> u128 {
+        super::kernels::reduce128_products(product)
+    }
+
+    #[inline]
+    pub(super) fn tail128(self) -> Self {
+        self.mul_hl(Self::from_u64(
+            const { super::portable::reduce128([0, 1]) } as u64,
+        ))
+    }
+
+    #[inline]
+    pub(super) fn schoolbook128(self, rhs: Self) -> [Self; 4] {
+        [
+            self.mul_ll(rhs),
+            self.mul_lh(rhs),
+            self.mul_hl(rhs),
+            self.mul_hh(rhs),
+        ]
+    }
+
+    #[inline]
+    pub(super) fn word_products128(self, rhs: Self) -> [Self; 2] {
+        [self.mul_ll(rhs), self.mul_hl(rhs)]
+    }
+
     #[inline]
     pub(super) fn reduce64(self) -> u64 {
         let k = Self::from_u64(0x1b);

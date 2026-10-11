@@ -1,5 +1,7 @@
 pub(super) use super::arch::Unreduced64;
-use super::arch::{Word, KARATSUBA128, SCALAR_ACCUMULATOR64, SHIFT_SQUARE128};
+use super::arch::{
+    Word, KARATSUBA128, KARATSUBA_ACCUMULATOR128, SCALAR_ACCUMULATOR64, SHIFT_SQUARE128,
+};
 use std::ops::{BitXor, BitXorAssign};
 
 // Represents t0 + t1*x^64 + t2*x^128 without extracting product lanes.
@@ -54,16 +56,16 @@ pub(super) fn multiply128(a: u128, b: u128) -> u128 {
 pub(super) fn multiply128_word(a: u128, word: u64) -> u128 {
     let a = Word::from_u128(a);
     let b = Word::from_u64(word);
-    let low = a.mul_ll(b);
-    let middle = a.mul_hl(b);
-    (low ^ middle.low_to_high() ^ middle.mul_hl(Word::from_u64(0x87))).to_u128()
+    let [low, middle] = a.word_products128(b);
+    (low ^ middle.low_to_high() ^ middle.tail128()).to_u128()
 }
 
 #[inline]
 pub(super) fn accumulate128_word(acc: Unreduced128, a: u128, word: u64) -> Unreduced128 {
     let a = Word::from_accumulator_u128(a);
     let b = Word::from_accumulator_u128(u128::from(word));
-    [acc[0] ^ a.mul_ll(b), acc[1] ^ a.mul_hl(b), acc[2]]
+    let [low, middle] = a.word_products128(b);
+    [acc[0] ^ low, acc[1] ^ middle, acc[2]]
 }
 
 #[inline]
@@ -83,13 +85,14 @@ fn product128_words_with<const KARATSUBA: bool>(a: Word, b: Word) -> Unreduced12
         let t2 = a.mul_hh(b);
         [t0, (a ^ a.swap64()).mul_ll(b ^ b.swap64()) ^ t0 ^ t2, t2]
     } else {
-        [a.mul_ll(b), a.mul_lh(b) ^ a.mul_hl(b), a.mul_hh(b)]
+        let [low, cross0, cross1, high] = a.schoolbook128(b);
+        [low, cross0 ^ cross1, high]
     }
 }
 
 #[inline]
 pub(super) fn accumulate128(acc: Unreduced128, a: u128, b: u128) -> Unreduced128 {
-    let product = product128_words_with::<KARATSUBA128>(
+    let product = product128_words_with::<KARATSUBA_ACCUMULATOR128>(
         Word::from_accumulator_u128(a),
         Word::from_accumulator_u128(b),
     );
@@ -113,9 +116,14 @@ fn reduce128_with<const SHIFT: bool>([t0, t1, t2]: Unreduced128) -> u128 {
         let second = overflow ^ overflow.shl::<1>() ^ overflow.shl::<2>() ^ overflow.shl::<7>();
         return (low ^ first ^ second).to_u128();
     }
-    let k = Word::from_u64(0x87);
-    let t1 = t1 ^ t2.low_to_high() ^ t2.mul_hl(k);
-    (t0 ^ t1.low_to_high() ^ t1.mul_hl(k)).to_u128()
+    Word::reduce128([t0, t1, t2])
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "gfni")))]
+#[inline]
+pub(super) fn reduce128_products([t0, t1, t2]: Unreduced128) -> u128 {
+    let t1 = t1 ^ t2.low_to_high() ^ t2.tail128();
+    (t0 ^ t1.low_to_high() ^ t1.tail128()).to_u128()
 }
 
 #[inline]

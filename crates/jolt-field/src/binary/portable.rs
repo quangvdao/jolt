@@ -102,7 +102,7 @@ pub(super) const fn reduce64(product: Unreduced64) -> u64 {
 }
 
 #[inline]
-pub(super) fn reduce128([low, high]: Unreduced128) -> u128 {
+pub(super) const fn reduce128([low, high]: Unreduced128) -> u128 {
     let first = high ^ (high << 1) ^ (high << 2) ^ (high << 7);
     let overflow = (high >> 127) ^ (high >> 126) ^ (high >> 121);
     let second = overflow ^ (overflow << 1) ^ (overflow << 2) ^ (overflow << 7);

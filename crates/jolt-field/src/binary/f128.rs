@@ -31,10 +31,8 @@ impl F128 {
 
     /// Multiplies by the degree-below-64 polynomial whose coefficients are
     /// the bits of `word`, rather than the parity scalar of `Ring::mul_u64`.
-    /// On carry-less backends, this uses two carry-less multiplications for the
-    /// product and one to reduce the 64 overflow bits (degree below 64 times
-    /// the degree-seven modulus tail cannot overflow 128 bits again), versus
-    /// five on x86-64 or six on aarch64 for the general product.
+    /// The carry-less backends compute the two limb products together where
+    /// vector width permits, then fold the degree-below-64 overflow once.
     #[inline]
     pub fn mul_word(self, word: u64) -> Self {
         Self(arithmetic::multiply128_word(self.0, word))

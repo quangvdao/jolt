@@ -4,6 +4,13 @@ use std::arch::x86_64::{
 };
 
 #[cfg(target_feature = "gfni")]
+#[path = "x86_64_butterfly.rs"]
+mod butterfly;
+
+#[cfg(target_feature = "gfni")]
+pub(super) use butterfly::{base_butterfly, extension_butterfly};
+
+#[cfg(target_feature = "gfni")]
 use std::arch::x86_64::{
     _mm_cvtsi128_si64, _mm_gf2p8affine_epi64_epi8, _mm_set1_epi64x, _mm_set_epi64x,
     _mm_setzero_si128, _mm_unpacklo_epi64, _mm_unpacklo_epi8,
@@ -24,6 +31,37 @@ pub(super) const KARATSUBA128: bool = true;
 pub(super) const SHIFT_SQUARE128: bool = !cfg!(target_feature = "gfni");
 pub(super) const KARATSUBA_ACCUMULATOR128: bool =
     !cfg!(all(target_feature = "avx2", target_feature = "vpclmulqdq"));
+
+#[cfg(target_feature = "gfni")]
+#[inline(always)]
+// SHORT requires every 128-bit lane's product to have degree at most 123,
+// so multiplication of its high half by the degree-four modulus cannot overflow.
+pub(super) fn fold64<P: Copy, const SHORT: bool>(
+    product: P,
+    duplicate_high: impl FnOnce(P) -> P,
+    affine: impl Fn(P, i64, i64) -> P,
+    shift_carry: impl FnOnce(P) -> P,
+    shift_overflow: impl FnOnce(P) -> P,
+    xor: impl Fn(P, P) -> P,
+) -> P {
+    let high = duplicate_high(product);
+    let image = affine(
+        high,
+        const { affine_matrix::<false>(0, 0) } as i64,
+        const { affine_matrix::<false>(0, 8) } as i64,
+    );
+    let carry = shift_carry(image);
+    if SHORT {
+        xor(xor(product, image), carry)
+    } else {
+        let overflow = affine(
+            shift_overflow(high),
+            const { affine_matrix::<false>(56, 0) } as i64,
+            const { affine_matrix::<false>(56, 0) } as i64,
+        );
+        xor(xor(product, image), xor(carry, overflow))
+    }
+}
 
 impl Word {
     #[inline]
@@ -170,21 +208,19 @@ impl Word {
             // transforms act on each byte independently; the shifts place
             // byte carries and the x^64 overflow in their reduced positions.
             unsafe {
-                let high = _mm_shuffle_epi32::<0xee>(self.0);
-                let image = _mm_gf2p8affine_epi64_epi8::<0>(
-                    high,
-                    _mm_set_epi64x(
-                        const { affine_matrix::<false>(0, 8) } as i64,
-                        const { affine_matrix::<false>(0, 0) } as i64,
-                    ),
+                let folded = fold64::<_, false>(
+                    self.0,
+                    |product| _mm_shuffle_epi32::<0xee>(product),
+                    |value, low_matrix, high_matrix| {
+                        _mm_gf2p8affine_epi64_epi8::<0>(
+                            value,
+                            _mm_set_epi64x(high_matrix, low_matrix),
+                        )
+                    },
+                    |image| _mm_slli_si128::<1>(_mm_srli_si128::<8>(image)),
+                    |high| _mm_srli_epi64::<56>(high),
+                    |a, b| _mm_xor_si128(a, b),
                 );
-                let carry = _mm_slli_si128::<1>(_mm_srli_si128::<8>(image));
-                let overflow = _mm_gf2p8affine_epi64_epi8::<0>(
-                    _mm_srli_epi64::<56>(high),
-                    _mm_set1_epi64x(const { affine_matrix::<false>(56, 0) } as i64),
-                );
-                let folded =
-                    _mm_xor_si128(_mm_xor_si128(self.0, image), _mm_xor_si128(carry, overflow));
                 _mm_cvtsi128_si64(folded) as u64
             }
         }

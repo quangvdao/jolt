@@ -21,7 +21,20 @@ impl F64 {
         let (bot, _) = bot.split_at_mut(count);
         #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
         super::butterfly_aarch64::base_butterfly(top, bot, twiddle);
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "aes")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            target_feature = "gfni"
+        ))]
+        super::arch::base_butterfly(top, bot, twiddle);
+        #[cfg(not(any(
+            all(target_arch = "aarch64", target_feature = "aes"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "pclmulqdq",
+                target_feature = "gfni"
+            )
+        )))]
         base_tail(top, bot, twiddle);
     }
 }
@@ -37,7 +50,20 @@ impl F192 {
         let (bot, _) = bot.split_at_mut(count);
         #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
         super::butterfly_aarch64::extension_butterfly(top, bot, twiddle);
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "aes")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "pclmulqdq",
+            target_feature = "gfni"
+        ))]
+        super::arch::extension_butterfly(top, bot, twiddle);
+        #[cfg(not(any(
+            all(target_arch = "aarch64", target_feature = "aes"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "pclmulqdq",
+                target_feature = "gfni"
+            )
+        )))]
         extension_tail(top, bot, twiddle);
     }
 }

@@ -2,6 +2,14 @@
 //! `cargo bench -p jolt-rv64i-pcs --bench ntt -- --samples 5` reports CSV rows.
 //! The AArch64 kernel requires `--features arch` and the `aes` target feature.
 //! Compile with `RUSTFLAGS="-C target-cpu=native"`; other targets use the safe path.
+//! On AArch64 supporting AES and SHA3, run both native acceptance variants:
+//! ```sh
+//! set -e
+//! for task_sha3 in +sha3 -sha3; do
+//!   RUSTFLAGS="-C target-cpu=native -C target-feature=+aes,$task_sha3" cargo clippy -p jolt-field -p jolt-rv64i-pcs --all-targets --features jolt-field/binary,jolt-rv64i-pcs/arch -- -D warnings
+//!   RUSTFLAGS="-C target-cpu=native -C target-feature=+aes,$task_sha3" cargo nextest run -p jolt-field -p jolt-rv64i-pcs --features jolt-field/binary,jolt-rv64i-pcs/arch --cargo-quiet
+//! done
+//! ```
 //! Preserve that executable, rebuild after a change, then run the new executable
 //! with `--compare <baseline-executable> --log-t 20,22 --threads 1,12 --samples 5`.
 //! Each batch runs one sample in each executable, alternating baseline/current

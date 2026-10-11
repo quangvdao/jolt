@@ -195,7 +195,24 @@ impl FirstRound {
     /// Allocates only the folded message, updates `W0` in place and drops `D`.
     /// Item 8 retains these allocations only within level 0; its last lane fold
     /// writes smaller allocations before constructing the next codeword.
-    pub fn fold(mut self, rows: &[[u64; 4]], challenge: F192) -> Result<FoldedBridge, WhirError> {
+    pub fn fold(self, rows: &[[u64; 4]], challenge: F192) -> Result<FoldedBridge, WhirError> {
+        self.fold_impl::<false>(rows, challenge)
+    }
+
+    /// Measurement counterpart using two base products instead of the fused pair.
+    pub fn fold_composed(
+        self,
+        rows: &[[u64; 4]],
+        challenge: F192,
+    ) -> Result<FoldedBridge, WhirError> {
+        self.fold_impl::<true>(rows, challenge)
+    }
+
+    fn fold_impl<const COMPOSED: bool>(
+        mut self,
+        rows: &[[u64; 4]],
+        challenge: F192,
+    ) -> Result<FoldedBridge, WhirError> {
         if rows.len() != self.w0.len() {
             return Err(WhirError::Shape {
                 part: WhirPart::Rows,
@@ -212,11 +229,16 @@ impl FirstRound {
             .zip(rows.par_iter())
             .for_each(|(((output, weight), delta), row)| {
                 let [a0, a1, b0, b1] = row.map(F64::from_raw);
+                let folded = if COMPOSED {
+                    challenge.mul_base(a0 + b0) + challenge.mul_y().mul_base(a1 + b1)
+                } else {
+                    challenge.mul_base_pair([a0 + b0, a1 + b1])
+                };
                 *output = F192::from_base_fn(|i| match i {
                     0 => a0,
                     1 => a1,
                     _ => F64::zero(),
-                }) + challenge.mul_base_pair([a0 + b0, a1 + b1]);
+                }) + folded;
                 *weight += challenge * *delta;
             });
         Ok(FoldedBridge {
@@ -392,15 +414,19 @@ mod tests {
                     assert_eq!(d[k], a + b);
                 }
                 let challenge = rng.e();
-                let folded = first.fold(&rows, challenge).unwrap();
-                for (k, row) in rows.iter().enumerate() {
-                    let a = phi_definition(eq_index(&point, 2 * k).unwrap(), alpha);
-                    let b = phi_definition(eq_index(&point, 2 * k + 1).unwrap(), alpha);
-                    assert_eq!(
-                        folded.message[k],
-                        symbol(row, 0) + challenge * (symbol(row, 0) + symbol(row, 1))
-                    );
-                    assert_eq!(folded.weight[k], a + challenge * (a + b));
+                for folded in [
+                    first.fold(&rows, challenge).unwrap(),
+                    composed.fold_composed(&rows, challenge).unwrap(),
+                ] {
+                    for (k, row) in rows.iter().enumerate() {
+                        let a = phi_definition(eq_index(&point, 2 * k).unwrap(), alpha);
+                        let b = phi_definition(eq_index(&point, 2 * k + 1).unwrap(), alpha);
+                        assert_eq!(
+                            folded.message[k],
+                            symbol(row, 0) + challenge * (symbol(row, 0) + symbol(row, 1))
+                        );
+                        assert_eq!(folded.weight[k], a + challenge * (a + b));
+                    }
                 }
             }
         }

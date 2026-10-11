@@ -1,7 +1,7 @@
 //! `RUSTFLAGS='-C target-cpu=native' cargo bench -p jolt-rv64i-pcs
 //! --bench bridge -- --log-t 22 --threads 1,12 --samples 5`.
-//! Cases alternate five/six-product passes with the shared five-product fold
-//! on identical seeded rows and warmed pools.
+//! Cases alternate five/six-product passes and folds on identical seeded rows
+//! and warmed pools.
 //! Timings include allocation and zero initialization; requested-byte counters
 //! are shared with the kernel runner. All records are loaded-host evidence.
 
@@ -19,6 +19,7 @@ use rayon::ThreadPoolBuilder;
 use std::error::Error;
 use std::hint::black_box;
 use std::io::{self, Result as IoResult, Write};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 type ProductAccumulator = <F192 as WithAccumulator>::Accumulator;
@@ -54,7 +55,11 @@ fn sample(
     let after_pass = CountingAllocator::live_bytes().saturating_sub(baseline);
     let _ = black_box(first.coefficients());
     let start = Instant::now();
-    let folded = first.fold(black_box(rows), black_box(challenge))?;
+    let folded = if composed {
+        first.fold_composed(black_box(rows), black_box(challenge))?
+    } else {
+        first.fold(black_box(rows), black_box(challenge))?
+    };
     let fold = start.elapsed();
     let after_fold = CountingAllocator::live_bytes().saturating_sub(baseline);
     let _ = black_box(&folded);
@@ -84,6 +89,13 @@ fn summary(mut values: Vec<f64>) -> [f64; 3] {
     ]
 }
 
+fn load() -> String {
+    match Command::new("uptime").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Err(error) => format!("unavailable: {error}"),
+    }
+}
+
 fn report(
     out: &mut impl Write,
     name: &str,
@@ -98,7 +110,7 @@ fn report(
             .map(|t| t.as_secs_f64() * 1e9 / operations as f64)
             .collect(),
     );
-    writeln!(out, "bridge/{name}/{threads} ns_per_pair={median:.6} ns_per_cycle={median:.6} unit_ns={:.6} min_ns={min:.6} max_ns={max:.6} samples={} loaded_machine=true", median / divisor as f64, times.len())
+    writeln!(out, "bridge/{name}/{threads} ns_per_pair={median:.6} ns_per_cycle={median:.6} unit_ns={:.6} min_ns={min:.6} max_ns={max:.6} samples={} loaded_machine=true load={:?}", median / divisor as f64, times.len(), load())
 }
 
 fn units(rows: &[[u64; 4]], inputs: &[F128; 4096], phi: &PhiTables) -> [Duration; 5] {
@@ -210,7 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let phi = PhiTables::new(alpha, point[0])?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    writeln!(out, "bridge/inventory log_t={log_t} pairs={cycles} rows_bytes={} paired_table_bytes=196608 split_bytes={} logical_lookup_bytes={} split_read_bytes={} output_bytes={} zero_init_bytes={} model_first_round_ms=130.42188288 model_first_pass_ms=100.99884032 model_point1_c_ns=0.305 model_Lw_ns=0.6 loaded_machine=true", cycles * 32, ((1 << (log_t / 2)) + (1 << (log_t - log_t / 2))) * 16, cycles * 16 * 48, cycles * 32, cycles * 48, cycles * 48)?;
+    writeln!(out, "bridge/inventory log_t={log_t} pairs={cycles} rows_bytes={} paired_table_bytes=196608 split_bytes={} logical_lookup_bytes={} split_read_bytes={} output_bytes={} zero_init_bytes={} model_first_round_ms=130.42188288 model_first_pass_ms=100.99884032 model_point1_c_ns=0.305 model_Lw_ns=0.6 loaded_machine=true load={:?}", cycles * 32, ((1 << (log_t / 2)) + (1 << (log_t - log_t / 2))) * 16, cycles * 16 * 48, cycles * 32, cycles * 48, cycles * 48, load())?;
     for threads in threads {
         let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
         pool.install(|| {
@@ -223,8 +235,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         for sample_index in 0..samples {
             for offset in 0..2 {
                 let composed = (sample_index + offset) % 2;
-                measured[composed]
-                    .push(pool.install(|| sample(&rows, &point, alpha, challenge, composed == 1))?);
+                let before = load();
+                let value =
+                    pool.install(|| sample(&rows, &point, alpha, challenge, composed == 1))?;
+                let after = load();
+                let variant = if composed == 0 { "five" } else { "six" };
+                writeln!(out, "bridge/sample/{variant}/{threads} sample={sample_index} setup_ms={:.6} pass_ms={:.6} fold_ms={:.6} first_round_ms={:.6} load_before={before:?} load_after={after:?}", value.setup.as_secs_f64() * 1000.0, value.pass.as_secs_f64() * 1000.0, value.fold.as_secs_f64() * 1000.0, (value.setup + value.pass + value.fold).as_secs_f64() * 1000.0)?;
+                measured[composed].push(value);
             }
             for (times, duration) in unit_times
                 .iter_mut()
@@ -245,7 +262,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok::<_, WhirError>(start.elapsed())
             })?);
         }
-        for (variant, values) in ["five", "six_pass_five_fold"].into_iter().zip(&measured) {
+        for (variant, values) in ["five", "six"].into_iter().zip(&measured) {
             for (phase, select) in [
                 ("setup", (|s: &Sample| s.setup) as fn(&Sample) -> Duration),
                 ("pass", |s: &Sample| s.pass),
@@ -278,7 +295,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .max()
                 .ok_or("empty samples")?;
             let release = values[0].release;
-            writeln!(out, "bridge/{variant}/allocation/{threads} peak_bytes={peak} final_bytes={final_bytes} allocs={allocs} rayon_lazy_bytes={} rayon_lazy_allocs={} after_setup_bytes={} after_pass_bytes={} after_fold_bytes={} rows_shared_bytes={} loaded_machine=true", RAYON_WORKER_ALLOWANCE.bytes * threads, RAYON_WORKER_ALLOWANCE.allocs * threads, release[0], release[1], release[2], cycles * 32)?;
+            writeln!(out, "bridge/{variant}/allocation/{threads} peak_bytes={peak} final_bytes={final_bytes} allocs={allocs} rayon_lazy_bytes={} rayon_lazy_allocs={} after_setup_bytes={} after_pass_bytes={} after_fold_bytes={} rows_shared_bytes={} loaded_machine=true load={:?}", RAYON_WORKER_ALLOWANCE.bytes * threads, RAYON_WORKER_ALLOWANCE.allocs * threads, release[0], release[1], release[2], cycles * 32, load())?;
         }
         for ((name, divisor), times) in [
             ("Lw", 32),
@@ -298,22 +315,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|t| t.as_secs_f64() * 1e9 / 4096.0)
                 .collect(),
         );
-        writeln!(out, "bridge/dense_k0_zero/{threads} ns_per_recipe={median:.6} min_ns={min:.6} max_ns={max:.6} symbols=4 loaded_machine=true")?;
+        writeln!(out, "bridge/dense_k0_zero/{threads} ns_per_recipe={median:.6} min_ns={min:.6} max_ns={max:.6} symbols=4 loaded_machine=true load={:?}", load())?;
         let five = summary(
             measured[0]
                 .iter()
-                .map(|s| s.pass.as_secs_f64() * 1e9 / cycles as f64)
+                .map(|s| (s.setup + s.pass + s.fold).as_secs_f64() * 1e9 / cycles as f64)
                 .collect(),
         );
         let six = summary(
             measured[1]
                 .iter()
-                .map(|s| s.pass.as_secs_f64() * 1e9 / cycles as f64)
+                .map(|s| (s.setup + s.pass + s.fold).as_secs_f64() * 1e9 / cycles as f64)
                 .collect(),
         );
         let gain = six[1] - five[1];
         let spread = five[2] - five[0] + six[2] - six[0];
-        writeln!(out, "bridge/comparison/{threads} five_gain_ns={gain:.6} combined_spread_ns={spread:.6} gain_exceeds_spread={} loaded_machine=true", gain > spread)?;
+        writeln!(out, "bridge/comparison/{threads} five_gain_first_round_ns={gain:.6} combined_spread_ns={spread:.6} gain_exceeds_spread={} loaded_machine=true load={:?}", gain > spread, load())?;
     }
     Ok(())
 }

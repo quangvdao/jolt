@@ -37,7 +37,17 @@ impl Options {
     }
 
     pub fn parse_witness() -> BenchResult<Self> {
-        Self::parse_for("witness_pipeline", &["pipeline"])
+        Self::parse_for(
+            "witness_pipeline",
+            &[
+                "pipeline",
+                "init_eval_sparse",
+                "init_eval_maximal",
+                "bytecode_h",
+                "initial_state_sparse",
+                "initial_state_maximal",
+            ],
+        )
     }
 
     fn parse_for(prefix: &str, names: &[&str]) -> BenchResult<Self> {
@@ -92,6 +102,10 @@ impl Options {
     }
     fn selected(&self, name: &str, log_t: u8, threads: usize) -> bool {
         self.selected_for("adapters", name, log_t, threads)
+    }
+
+    pub(super) fn selected_public(&self, name: &str, log_t: u8, threads: usize) -> bool {
+        self.selected_for("witness_pipeline", name, log_t, threads)
     }
 
     pub fn selected_witness(&self, log_t: u8, threads: usize) -> bool {
@@ -329,23 +343,23 @@ pub fn run(options: Options) -> BenchResult<()> {
 
 const WITNESS_PHASES: [&str; 5] = ["adapt", "construct", "validate", "prepare", "scatter"];
 
-struct WitnessMeasurement {
-    elapsed: Duration,
-    allocations: AllocationStats,
+pub(super) struct WitnessMeasurement {
+    pub elapsed: Duration,
+    pub allocations: AllocationStats,
 }
 
 #[expect(
     clippy::print_stdout,
     reason = "allocation inventory is benchmark output"
 )]
-fn measure_witness<T>(
-    phase: usize,
+pub(super) fn measure_witness<T>(
+    phase: &str,
     cycles: usize,
     inventory: bool,
     f: impl FnOnce() -> BenchResult<T>,
 ) -> BenchResult<(T, WitnessMeasurement)> {
     CountingAllocator::begin(cycles);
-    CountingAllocator::phase(phase);
+    CountingAllocator::phase(0);
     let allocations = AllocationMeasurement::begin();
     let start = Instant::now();
     let result = f();
@@ -356,11 +370,8 @@ fn measure_witness<T>(
         return Err("allocation recorder overflow".into());
     }
     if inventory {
-        for (bytes, phase) in CountingAllocator::entries() {
-            println!(
-                "witness_allocation phase={} requested_bytes={bytes}",
-                WITNESS_PHASES[phase]
-            );
+        for (bytes, _) in CountingAllocator::entries() {
+            println!("witness_allocation phase={phase} requested_bytes={bytes}");
         }
     }
     Ok((
@@ -377,7 +388,16 @@ fn measure_witness<T>(
     reason = "phase distributions are benchmark output"
 )]
 pub fn run_witness(options: Options) -> BenchResult<()> {
-    println!("witness_note fixture=executed_adapter_program tracing=independent_interpreter validation=standalone_nonadditive prepare=fused_validation_and_groups scatter=lazy_session_plan peak=requested_bytes_above_phase_baseline setup_and_drop=untimed loaded_machine=true");
+    super::public_setup::run(&options)?;
+    super::bytecode_setup::run(&options)?;
+    if options.log_t.iter().any(|&log_t| {
+        options
+            .threads
+            .iter()
+            .any(|&threads| options.selected_witness(log_t, threads))
+    }) {
+        println!("witness_note fixture=executed_adapter_program tracing=independent_interpreter validation=standalone_nonadditive prepare=fused_validation_and_groups scatter=lazy_session_plan peak=requested_bytes_above_phase_baseline setup_and_drop=untimed loaded_machine=true");
+    }
     for &log_t in &options.log_t {
         if !options
             .threads
@@ -400,13 +420,15 @@ pub fn run_witness(options: Options) -> BenchResult<()> {
                     .install(|| -> Result<_, String> {
                         let run = || -> BenchResult<_> {
                             let (execution, adapt) =
-                                measure_witness(0, cycles, options.inventory, || fixture.adapt())?;
+                                measure_witness("adapt", cycles, options.inventory, || {
+                                    fixture.adapt()
+                                })?;
                             let checked = fixture.checked(&execution)?;
                             let layout = checked.layout().clone();
                             let bytecode = Arc::clone(fixture.preprocessing.shared_bytecode());
                             let initial_ram = checked.initial_ram().to_vec();
                             let (witness, construct) =
-                                measure_witness(1, cycles, options.inventory, || {
+                                measure_witness("construct", cycles, options.inventory, || {
                                     Ok(Rv64iWitness::from_facts(
                                         layout,
                                         bytecode,
@@ -420,17 +442,17 @@ pub fn run_witness(options: Options) -> BenchResult<()> {
                             let selectors = RoutersCycleCore::columns(&shapes);
                             let mut shared = SharedSource::default();
                             let (prepared, prepare) =
-                                measure_witness(3, cycles, options.inventory, || {
+                                measure_witness("prepare", cycles, options.inventory, || {
                                     Ok(shared.prepare(&witness, Some(selectors))?)
                                 })?;
                             let (plan, scatter) =
-                                measure_witness(4, cycles, options.inventory, || {
+                                measure_witness("scatter", cycles, options.inventory, || {
                                     Ok(shared.plan()?)
                                 })?;
                             let _ = black_box((&witness, &prepared, &plan));
                             let source = Arc::new(WitnessSource::new(&witness)?);
                             let (validated, validate) =
-                                measure_witness(2, cycles, options.inventory, || {
+                                measure_witness("validate", cycles, options.inventory, || {
                                     Ok(ValidatedTrace::new(source)?)
                                 })?;
                             drop(validated);

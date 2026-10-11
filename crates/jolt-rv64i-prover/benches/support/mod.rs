@@ -1,7 +1,9 @@
 #[path = "../../../jolt-rv64i-kernels/benches/support/allocator.rs"]
 pub mod allocator;
+pub mod bytecode_setup;
 pub mod inventory;
 pub mod pipelines;
+pub mod public_setup;
 pub mod runner;
 pub mod timing;
 pub mod witness;

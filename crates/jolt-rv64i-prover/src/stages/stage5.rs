@@ -5,13 +5,15 @@ use crate::error::Rv64iProverError;
 use crate::plane::{Rv64iPlane, Rv64iWitness};
 use crate::reference::val_evaluation::{RamValEvaluationPrepare, RegistersValEvaluationPrepare};
 use jolt_crypto::NoCommitment;
-use jolt_field::{JoltField, F128};
+use jolt_field::{JoltField, Zero, F128};
 use jolt_kernels::ProofSession;
 use jolt_kernels::{KernelSlots, PrepareKernel};
 use jolt_prover::driver::StageProver;
 use jolt_prover::impl_stage_prover;
 use jolt_rv64i_verifier::error::Rv64iVerifierError;
+use jolt_rv64i_verifier::points::PointsError;
 use jolt_rv64i_verifier::proof::{BatchProof, ValEvaluationValues};
+use jolt_rv64i_verifier::public::ram_init::InitialRamEvaluation;
 use jolt_rv64i_verifier::stages::stage3a::Output as Stage3aOutput;
 use jolt_rv64i_verifier::stages::stage4::verify::Output as Stage4Output;
 use jolt_rv64i_verifier::stages::stage5::val_evaluation::{
@@ -25,6 +27,7 @@ use jolt_rv64i_verifier::stages::stage5::{
 use jolt_rv64i_verifier::statement::CheckedInputs;
 use jolt_sumcheck::{ClearSumcheckRecorder, SequentialRounds};
 use jolt_transcript::Transcript;
+use rayon::prelude::{ParallelIterator, ParallelSlice};
 use std::ops::Deref;
 
 pub struct Stage5Sumchecks<F: JoltField>(pub VerifierStage5Sumchecks<F>);
@@ -49,6 +52,28 @@ impl Default for Stage5Kernels<F128> {
 }
 jolt_rv64i_verifier::stage5_sumchecks_members!(impl_stage_prover plane=Rv64iPlane,);
 
+/// Evaluates canonical initial RAM with shared weights and ordered chunk reduction.
+/// A one-thread pool and small public images use the serial verifier-owned fold.
+#[inline]
+pub fn evaluate_initial_ram<S: BitsCommitmentProver>(
+    checked: &CheckedInputs<'_, S>,
+    a_ram: &[F128],
+    r_bit: &[F128],
+) -> Result<F128, PointsError> {
+    let evaluation = InitialRamEvaluation::new(checked, a_ram, r_bit)?;
+    let words = checked.initial_ram();
+    if rayon::current_num_threads() == 1 || words.len() < 8192 {
+        return evaluation.evaluate(words);
+    }
+    let partials: Vec<_> = words
+        .par_chunks(4096)
+        .map(|chunk| evaluation.evaluate(chunk))
+        .collect();
+    partials
+        .into_iter()
+        .try_fold(F128::zero(), |sum, value| value.map(|value| sum + value))
+}
+
 /// Proves update reductions from verified batches 3a and 4 at low-variable-first points.
 /// Uses the verifier's conversion and returns the absorbed wire values with their downstream output.
 pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
@@ -61,7 +86,8 @@ pub fn prove<S: BitsCommitmentProver, T: Transcript<Challenge = F128>>(
     stage4: &Stage4Output,
 ) -> Result<(BatchProof<ValEvaluationValues>, Output), Rv64iProverError> {
     let inputs =
-        verify::from_upstream(checked, stage3a, stage4).map_err(Rv64iVerifierError::from)?;
+        verify::from_upstream_with_initial_ram(checked, stage3a, stage4, evaluate_initial_ram)
+            .map_err(Rv64iVerifierError::from)?;
     let batch = Stage5Sumchecks(inputs.batch);
     let challenges = batch
         .draw_challenges(transcript)

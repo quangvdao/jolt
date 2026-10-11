@@ -37,6 +37,7 @@ impl Stage5Sumchecks<F128> {
             &points.registers_val_evaluation.registers_val,
             &points.ram_val_evaluation.ram_val,
             &points.ram_val_evaluation.ram_val_final,
+            ram_init::evaluate,
         )
     }
 
@@ -45,6 +46,11 @@ impl Stage5Sumchecks<F128> {
         register_point: &[F128],
         cycle_point: &[F128],
         final_point: &[F128],
+        evaluate_initial_ram: impl FnOnce(
+            &CheckedInputs<'_, S>,
+            &[F128],
+            &[F128],
+        ) -> Result<F128, PointsError>,
     ) -> Result<Self, VerifierError> {
         let failed = |error: PointsError| VerifierError::StageClaimSumcheckFailed {
             stage: "Stage5".to_owned(),
@@ -92,7 +98,7 @@ impl Stage5Sumchecks<F128> {
                     .to_owned(),
             });
         }
-        let init = ram_init::evaluate(checked, a_ram, r_bit).map_err(failed)?;
+        let init = evaluate_initial_ram(checked, a_ram, r_bit).map_err(failed)?;
         let batch = Self {
             registers_val_evaluation: RegistersValEvaluation::new(
                 a_reg.to_vec(),

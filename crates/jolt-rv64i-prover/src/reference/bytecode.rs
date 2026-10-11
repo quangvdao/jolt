@@ -7,12 +7,14 @@ use jolt_kernels::{
     KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
 };
 use jolt_poly::{BindingOrder, Polynomial, UnivariatePoly};
+use jolt_rv64i_arith::Bytecode;
 use jolt_rv64i_verifier::ids::{
     BytecodeCycleDerived, CycleWeight, DerivedId, OpeningId, RelationId, VirtualPolynomial,
 };
 use jolt_rv64i_verifier::points::{self, PointsError};
 use jolt_rv64i_verifier::stages::stage6a::{
-    BytecodeReadAddress, BytecodeReadAddressInputClaims, BytecodeReadAddressOutputClaims,
+    BytecodeReadAddress, BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims,
+    BytecodeReadAddressOutputClaims,
 };
 use jolt_rv64i_verifier::stages::stage6b::BytecodeReadCycle;
 use jolt_sumcheck::{ProveRounds, SumcheckError};
@@ -23,6 +25,35 @@ use std::collections::BTreeMap;
 pub struct BytecodeReadAddressPrepare;
 #[derive(Default)]
 pub struct BytecodeReadCyclePrepare;
+
+impl BytecodeReadAddressPrepare {
+    /// Builds the five public H tables using the relation's canonical per-row weights.
+    /// Weight preparation and all output allocations are included in this operation.
+    pub fn public_tables<F: JoltField>(
+        &self,
+        bytecode: &Bytecode,
+        relation: &BytecodeReadAddress<F>,
+        challenges: &BytecodeReadAddressChallenges<F>,
+    ) -> Result<[Vec<F>; 5], KernelError<F>> {
+        let weights =
+            relation
+                .public_weights(challenges)
+                .map_err(|e| KernelError::InvalidGeometry {
+                    reason: e.to_string(),
+                })?;
+        let count = bytecode.rows().len();
+        let mut h: [Vec<F>; 5] = std::array::from_fn(|_| Vec::with_capacity(count));
+        for row in bytecode.rows() {
+            let values = weights.row(row).map_err(|e| KernelError::InvalidGeometry {
+                reason: e.to_string(),
+            })?;
+            for (table, value) in h.iter_mut().zip(values) {
+                table.push(value);
+            }
+        }
+        Ok(h)
+    }
+}
 
 #[cfg_attr(
     feature = "allocative",
@@ -126,21 +157,8 @@ impl<F: JoltField> PrepareKernel<F, BytecodeReadAddress<F>, Rv64iPlane>
         inputs: ProverInputs<'_, F, BytecodeReadAddress<F>>,
     ) -> Result<Box<dyn SumcheckKernel<F, Relation = BytecodeReadAddress<F>>>, KernelError<F>> {
         let relation = inputs.relation;
-        let weights = relation.public_weights(inputs.challenges).map_err(|e| {
-            KernelError::InvalidGeometry {
-                reason: e.to_string(),
-            }
-        })?;
         let count = witness.bytecode.rows().len();
-        let mut h: [Vec<F>; 5] = std::array::from_fn(|_| Vec::with_capacity(count));
-        for row in witness.bytecode.rows() {
-            let values = weights.row(row).map_err(|e| KernelError::InvalidGeometry {
-                reason: e.to_string(),
-            })?;
-            for (table, value) in h.iter_mut().zip(values) {
-                table.push(value);
-            }
-        }
+        let h = self.public_tables(&witness.bytecode, relation, inputs.challenges)?;
         let mut r: [Vec<F>; 5] = std::array::from_fn(|_| vec![F::zero(); count]);
         let p = relation.public_points();
         let cycle_weights = [&p.r_3, &p.r_4, &p.r_5].map(|point| {

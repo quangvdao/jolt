@@ -350,7 +350,9 @@ impl Rv64iWitness {
         Ok(witness)
     }
 
-    fn initial_state(
+    /// Validates sparse words in slice order and allocates their dense initial RAM image.
+    /// Returns the first malformed word or a typed allocation error.
+    pub fn initial_state(
         layout: &Layout,
         initial_ram: &[(u64, u64)],
     ) -> Result<Vec<u64>, Rv64iProverError> {

@@ -27,6 +27,7 @@ use jolt_rv64i_prover::{
 use jolt_rv64i_verifier::{
     points::WordLift, preprocessing::VerifierPreprocessing, statement::CheckedInputs,
 };
+use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use support::replay::State;
 
@@ -374,5 +375,77 @@ fn prove_admission_reports_the_required_length_and_both_witness_lengths() {
                 words: found_words,
             }) if found_bits == bits && found_words == words
         ));
+    }
+}
+
+#[test]
+fn initial_state_reports_the_first_tuple_fault_across_validation_chunks() {
+    let layout = Layout::new(1, 17, 0).unwrap();
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let valid: Vec<_> = (0..=8192).map(|index| (index, 1)).collect();
+        let ram = pool
+            .install(|| Rv64iWitness::initial_state(&layout, &valid))
+            .unwrap();
+        assert!(ram[..8193].iter().all(|&word| word == 1));
+        assert!(ram[8193..].iter().all(|&word| word == 0));
+        for (first, expected) in [
+            ((4095, 1), 4095),
+            ((4094, 1), 4094),
+            ((4096, 0), 4096),
+            ((131_072, 1), 131_072),
+        ] {
+            let mut words: Vec<_> = (0..=8192).map(|index| (index, 1)).collect();
+            words[4096] = first;
+            words[8192] = (3, 0);
+            let result = pool.install(|| Rv64iWitness::initial_state(&layout, &words));
+            assert!(
+                matches!(result, Err(Rv64iProverError::InitialRam { index }) if index == expected),
+                "first tuple fault {first:?}, threads {threads}"
+            );
+        }
+    }
+}
+
+#[test]
+fn initial_state_populates_literal_sparse_words_and_zero_gaps() {
+    let layout = Layout::new(1, 17, 0).unwrap();
+    let mut initial = vec![
+        (0, 0x0123_4567_89ab_cdef),
+        (1, 0xfedc_ba98_7654_3210),
+        (4095, 0x8877_6655_4433_2211),
+        (4096, 0x1020_3040_5060_7080),
+        (65535, 0x55aa_55aa_55aa_55aa),
+        (65536, 0xaa55_aa55_aa55_aa55),
+        (131_071, 0x8000_0000_0000_0001),
+    ];
+    initial.extend((8192..16384).map(|index| (index, 1)));
+    initial.sort_unstable_by_key(|&(index, _)| index);
+    for threads in [1, 12] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let ram = pool
+            .install(|| Rv64iWitness::initial_state(&layout, &initial))
+            .unwrap();
+        assert_eq!(ram.len(), 131_072);
+        for (index, &word) in ram.iter().enumerate() {
+            let expected = match index {
+                0 => 0x0123_4567_89ab_cdef,
+                1 => 0xfedc_ba98_7654_3210,
+                4095 => 0x8877_6655_4433_2211,
+                4096 => 0x1020_3040_5060_7080,
+                8192..=16383 => 1,
+                65535 => 0x55aa_55aa_55aa_55aa,
+                65536 => 0xaa55_aa55_aa55_aa55,
+                131_071 => 0x8000_0000_0000_0001,
+                _ => 0,
+            };
+            assert_eq!(word, expected, "RAM word {index}, threads {threads}");
+        }
     }
 }

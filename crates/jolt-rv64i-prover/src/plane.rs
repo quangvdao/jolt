@@ -889,26 +889,54 @@ impl ReplayCycle<'_> {
     fn inc(&self, variant: Variant) -> u64 {
         match self {
             Self::Bits { parts, .. } => parts.inc,
-            Self::Facts(fact) => {
-                if variant.is_store() {
-                    fact.ram_pre_value ^ fact.ram_post_value
-                } else {
-                    fact.rd_pre_value ^ fact.rd_post_value
-                }
-            }
+            Self::Facts(fact) => fact.increment(variant),
         }
+    }
+}
+
+enum ReplayUpdate {
+    Register { register: u8, inc: u64 },
+    Ram { index: u64, inc: u64 },
+}
+impl ReplayUpdate {
+    #[inline(always)]
+    fn new(variant: Variant, register: u8, index: u64, inc: u64) -> Self {
+        if variant.is_store() {
+            Self::Ram { index, inc }
+        } else {
+            Self::Register { register, inc }
+        }
+    }
+
+    #[inline(always)]
+    fn apply<M: ReplayMemory>(
+        self,
+        registers: &mut [u64; 32],
+        memory: &mut M,
+        state: &mut ReplayState,
+    ) -> Result<(), Rv64iProverError> {
+        let (value, inc) = match self {
+            Self::Register { register, inc } => (
+                registers
+                    .get_mut(usize::from(register))
+                    .ok_or(Rv64iProverError::Register { register })?,
+                inc,
+            ),
+            Self::Ram { index, inc } => (memory.cell(state, index)?, inc),
+        };
+        *value ^= inc;
+        Ok(())
     }
 }
 
 trait ReplayMemory {
     const CHUNKED: bool;
     fn read(&self, state: &ReplayState, index: u64) -> Result<u64, Rv64iProverError>;
-    fn update(
-        &mut self,
-        state: &mut ReplayState,
+    fn cell<'s>(
+        &'s mut self,
+        state: &'s mut ReplayState,
         index: u64,
-        inc: u64,
-    ) -> Result<(), Rv64iProverError>;
+    ) -> Result<&'s mut u64, Rv64iProverError>;
 }
 impl ReplayMemory for &mut [u64] {
     const CHUNKED: bool = false;
@@ -921,17 +949,15 @@ impl ReplayMemory for &mut [u64] {
             .ok_or(Rv64iProverError::InitialRam { index })
     }
     #[inline]
-    fn update(
-        &mut self,
-        _state: &mut ReplayState,
+    fn cell<'s>(
+        &'s mut self,
+        _state: &'s mut ReplayState,
         index: u64,
-        inc: u64,
-    ) -> Result<(), Rv64iProverError> {
-        *usize::try_from(index)
+    ) -> Result<&'s mut u64, Rv64iProverError> {
+        usize::try_from(index)
             .ok()
             .and_then(|index| self.get_mut(index))
-            .ok_or(Rv64iProverError::InitialRam { index })? ^= inc;
-        Ok(())
+            .ok_or(Rv64iProverError::InitialRam { index })
     }
 }
 struct ChunkMemory;
@@ -950,21 +976,39 @@ impl ReplayMemory for ChunkMemory {
         }
     }
     #[inline]
-    fn update(
-        &mut self,
-        state: &mut ReplayState,
+    fn cell<'s>(
+        &'s mut self,
+        state: &'s mut ReplayState,
         index: u64,
-        inc: u64,
-    ) -> Result<(), Rv64iProverError> {
+    ) -> Result<&'s mut u64, Rv64iProverError> {
         if index == 0 {
-            state.ram_zero ^= inc;
+            Ok(&mut state.ram_zero)
         } else {
-            *state
+            state
                 .ram
                 .get_mut(&index)
-                .ok_or(Rv64iProverError::InitialRam { index })? ^= inc;
+                .ok_or(Rv64iProverError::InitialRam { index })
         }
-        Ok(())
+    }
+}
+struct SummaryMemory;
+impl ReplayMemory for SummaryMemory {
+    const CHUNKED: bool = true;
+    #[inline]
+    fn read(&self, state: &ReplayState, index: u64) -> Result<u64, Rv64iProverError> {
+        ChunkMemory.read(state, index)
+    }
+    #[inline]
+    fn cell<'s>(
+        &'s mut self,
+        state: &'s mut ReplayState,
+        index: u64,
+    ) -> Result<&'s mut u64, Rv64iProverError> {
+        if index == 0 {
+            Ok(&mut state.ram_zero)
+        } else {
+            Ok(state.ram.entry(index).or_insert(0))
+        }
     }
 }
 trait ReplayInput {
@@ -1026,6 +1070,7 @@ impl<'a> ReplayContext<'a> {
         ram_words: usize,
     ) -> ReplayState {
         let mut state = ReplayState::new(final_pc, start);
+        let mut registers = state.registers;
         // Truncated or unchecked XOR summaries may corrupt later entry values;
         // those chunks cannot outrank the earlier fault returned by run.
         for cycle in start..start + len {
@@ -1042,22 +1087,18 @@ impl<'a> ReplayContext<'a> {
             if index >= ram_words as u64 {
                 break;
             }
-            if index != 0 {
+            let update = ReplayUpdate::new(variant, row.rd, index, input.inc(variant));
+            if matches!(update, ReplayUpdate::Register { .. }) && index != 0 {
                 let _ = state.ram.entry(index).or_insert(0);
             }
-            let inc = input.inc(variant);
-            if variant.is_store() {
-                if index == 0 {
-                    state.ram_zero ^= inc;
-                } else if let Some(value) = state.ram.get_mut(&index) {
-                    *value ^= inc;
-                }
-            } else if let Some(value) = state.registers.get_mut(usize::from(row.rd)) {
-                *value ^= inc;
-            } else {
+            if update
+                .apply(&mut registers, &mut SummaryMemory, &mut state)
+                .is_err()
+            {
                 break;
             }
         }
+        state.registers = registers;
         state
     }
 
@@ -1192,13 +1233,11 @@ impl<'a> ReplayContext<'a> {
             }
             decoded[offset] = fields.pack(index, variant, &parts);
             counts[variant.index()] += 1;
-            if variant.is_store() {
-                memory.update(state, ram_index, parts.inc)?;
-            } else {
-                *registers
-                    .get_mut(usize::from(row.rd))
-                    .ok_or(Rv64iProverError::Register { register: row.rd })? ^= parts.inc;
-            }
+            ReplayUpdate::new(variant, row.rd, ram_index, parts.inc).apply(
+                &mut registers,
+                &mut memory,
+                state,
+            )?;
             words[offset] = word;
         }
         state.registers = registers;

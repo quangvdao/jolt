@@ -31,6 +31,18 @@ pub struct CycleFacts {
     pub next_pc: u64,
 }
 
+impl CycleFacts {
+    /// XOR update of the RAM word for a store, or destination register otherwise.
+    #[inline(always)]
+    pub fn increment(&self, variant: Variant) -> u64 {
+        if variant.is_store() {
+            self.ram_pre_value ^ self.ram_post_value
+        } else {
+            self.rd_pre_value ^ self.rd_post_value
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "cycle_tests.rs"]
 mod tests;
@@ -124,11 +136,7 @@ impl<'a> BitsBuilder<'a> {
             .write_bytecode_index(&mut bits, u64::from(facts.bytecode_index))
             .map_err(|source| WitnessError::Layout { source })?;
         let mut parts = SourceParts {
-            inc: if variant.is_store() {
-                facts.ram_pre_value ^ facts.ram_post_value
-            } else {
-                facts.rd_pre_value ^ facts.rd_post_value
-            },
+            inc: facts.increment(variant),
             ram_index: 0,
             pos: 0,
             keys_differ: false,

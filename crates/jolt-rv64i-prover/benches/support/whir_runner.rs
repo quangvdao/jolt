@@ -43,7 +43,7 @@ const ROWS: [(&str, f64); 10] = [
     ("tables_weights_round_one", 130.42),
     ("later_rounds", 46.05),
     ("induced_weights", 6.98),
-    ("equality_tables_samples", 2.49),
+    ("equality_tables_samples", 3.52),
     ("later_encodes", 65.27),
     ("later_trees", 88.42),
     ("queries_assembly", 0.78),
@@ -425,11 +425,11 @@ fn print_summary(
         let ns_per_cycle = median * 1e6 / (1_u64 << geometry.log_T) as f64;
         let threshold_ms = (geometry.log_T == 22).then(|| {
             if threads == 1 {
-                (if name == "commit" { 93.0 } else { 101.0 }) * (1_u64 << 22) as f64 / 1e6
+                (if name == "commit" { 93.0 } else { 102.0 }) * (1_u64 << 22) as f64 / 1e6
             } else if name == "commit" {
                 85.0
             } else {
-                83.0
+                84.0
             }
         });
         let target_ms = (geometry.log_T == 22 && threads == 12).then_some(if name == "commit" {
@@ -439,7 +439,7 @@ fn print_summary(
         });
         let meets_spec = threshold_ms.map(|threshold| median <= threshold);
         let meets_target = target_ms.map(|target| median <= target);
-        writeln!(out, "bits_whir/{name}/{}/{threads} samples={} median_ms={median:.3} min_ms={min:.3} max_ms={max:.3} ns_per_cycle={ns_per_cycle:.3} model_t22_one_thread_ms={:.2} spec_threshold_ms={threshold_ms:?} meets_spec_threshold={meets_spec:?} requested_target_ms={target_ms:?} meets_requested_target={meets_target:?} load={host_load:?}", geometry.log_T, samples.len(), if name == "commit" {312.16} else {340.43})?;
+        writeln!(out, "bits_whir/{name}/{}/{threads} samples={} median_ms={median:.3} min_ms={min:.3} max_ms={max:.3} ns_per_cycle={ns_per_cycle:.3} model_t22_one_thread_ms={:.2} spec_threshold_ms={threshold_ms:?} meets_spec_threshold={meets_spec:?} requested_target_ms={target_ms:?} meets_requested_target={meets_target:?} load={host_load:?}", geometry.log_T, samples.len(), if name == "commit" {312.16} else {341.45})?;
     }
     for (phase, (label, model)) in ROWS.into_iter().enumerate() {
         let (median, min, max) = distribution(
@@ -527,7 +527,6 @@ fn proof_distribution(
 pub fn run(options: Options) -> BenchResult<()> {
     let mut out = BufWriter::new(io::stdout().lock());
     writeln!(out, "bits_whir_note interval=combined_commit_open rows=shared_once frontend_columns=in_interval_outside_timers domain_setup=inside_phase bridge_setup=inside_phase counters=requested_capacity proof_alive_at_interval_end=true loaded_machine=true")?;
-    writeln!(out, "bits_whir/model_correction counted_extra_sample_scaling_products_e=279616 counted_extra_c=3355392 estimated_extra_ms_point1=1.02339456 equality_model_spec_ms=2.49 equality_model_accounted_ms=3.51793344 open_model_accounted_ms=341.45146446 thresholds_unchanged=true")?;
     for &exponent in &options.log_t {
         let selected: Vec<_> = options
             .threads

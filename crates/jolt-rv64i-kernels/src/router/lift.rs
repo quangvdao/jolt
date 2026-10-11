@@ -39,6 +39,13 @@ impl RetainedWordLifts {
     pub fn tables(&self) -> &[Vec<F128>] {
         &self.tables
     }
+
+    /// Moves one complete lifted cycle table without copying its allocation.
+    /// All other tables are dropped; an unretained source word returns `None`.
+    pub fn into_word(self, word: usize) -> Option<Vec<F128>> {
+        let index = self.words.binary_search(&word).ok()?;
+        self.tables.into_iter().nth(index)
+    }
 }
 
 /// Source tables in shape order and retained trace-word tables for claims.

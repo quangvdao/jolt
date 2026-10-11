@@ -85,6 +85,11 @@ name = "memory_machinery"
 harness = false
 required-features = ["test-utils"]
 
+[[bench]]
+name = "pair_sum"
+harness = false
+required-features = ["test-utils"]
+
 [[test]]
 name = "memory_views"
 required-features = ["test-utils"]

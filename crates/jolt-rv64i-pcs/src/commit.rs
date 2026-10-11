@@ -107,22 +107,36 @@ fn commit_impl<T: Transcript<Challenge = F128>>(
     transcript.append_bytes(&root);
     let point = draw_point(transcript, first.c)?;
     let weights = equality_table(&point, F192::one())?;
+    let rows_per_position = (lanes / 2).max(1);
+    let weights_per_position = if lanes == 1 { 2 } else { 1 };
     let sums = rows
-        .par_iter()
-        .enumerate()
-        .with_min_len(1024)
+        .par_chunks_exact(rows_per_position)
+        .zip(weights.par_chunks_exact(weights_per_position))
+        .with_min_len((1024 / rows_per_position).max(1))
         .fold(
             || {
                 let mut accumulators = try_vec(WhirPart::LaneValues, lanes)?;
                 accumulators.resize(lanes, ProductAccumulator::default());
                 Ok::<_, WhirError>(accumulators)
             },
-            |accumulators, (index, &[a0, a1, b0, b1])| {
+            |accumulators, (rows, weights)| {
                 let mut accumulators = accumulators?;
-                for (half, pair) in [[a0, a1], [b0, b1]].into_iter().enumerate() {
-                    let symbol = index * 2 + half;
-                    accumulators[symbol % lanes]
-                        .fmadd_base_pair(weights[symbol / lanes], pair.map(F64::from_raw));
+                if lanes == 1 {
+                    for (pair, &weight) in rows[0].chunks_exact(2).zip(weights) {
+                        accumulators[0].fmadd_base_pair(
+                            weight,
+                            [F64::from_raw(pair[0]), F64::from_raw(pair[1])],
+                        );
+                    }
+                } else {
+                    for (row, sums) in rows.iter().zip(accumulators.chunks_exact_mut(2)) {
+                        for (pair, sum) in row.chunks_exact(2).zip(sums) {
+                            sum.fmadd_base_pair(
+                                weights[0],
+                                [F64::from_raw(pair[0]), F64::from_raw(pair[1])],
+                            );
+                        }
+                    }
                 }
                 Ok(accumulators)
             },

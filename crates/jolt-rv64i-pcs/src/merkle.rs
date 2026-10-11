@@ -47,13 +47,13 @@ impl MerkleTree {
         let mut tree = Self::empty(data.len() / entries_per_leaf)?;
         let fill = |first_leaf: usize, outputs: &mut [Digest]| {
             let bytes_len =
-                checked_product(WhirPart::Leaves, &[outputs.len().min(1024), leaf_bytes])?;
+                checked_product(WhirPart::Leaves, &[outputs.len().min(16), leaf_bytes])?;
             let mut bytes = try_vec(WhirPart::Leaves, bytes_len)?;
             bytes.resize(bytes_len, 0);
-            for (batch, outputs) in outputs.chunks_mut(1024).enumerate() {
+            for (batch, outputs) in outputs.chunks_mut(16).enumerate() {
                 let used = outputs.len() * leaf_bytes;
                 let bytes = &mut bytes[..used];
-                let first = (first_leaf + batch * 1024) * entries_per_leaf;
+                let first = (first_leaf + batch * 16) * entries_per_leaf;
                 let values = &data[first..first + outputs.len() * entries_per_leaf];
                 for (value, encoding) in values.iter().zip(bytes.chunks_exact_mut(F::NUM_BYTES)) {
                     value.to_bytes_le(encoding);

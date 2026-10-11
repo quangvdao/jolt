@@ -5,8 +5,23 @@ use jolt_field::{Accumulator, ExtField, One, WithAccumulator, Zero, F128, F192, 
 use jolt_rv64i_verifier::points::equality_table;
 use jolt_rv64i_verifier::whir::error::{checked_product, try_vec, WhirError, WhirPart};
 use rayon::prelude::*;
+use std::sync::Mutex;
 
 type ProductAccumulator = <F192 as WithAccumulator>::Accumulator;
+
+struct RoundSums<'a> {
+    sums: [ProductAccumulator; 2],
+    total: &'a Mutex<[ProductAccumulator; 2]>,
+}
+
+impl Drop for RoundSums<'_> {
+    fn drop(&mut self) {
+        let mut total = self.total.lock().unwrap_or_else(|error| error.into_inner());
+        for (sum, other) in total.iter_mut().zip(self.sums) {
+            sum.merge(other);
+        }
+    }
+}
 
 /// Byte tables for `(Phi(e), Phi(r0 * e))`, with both maps in each 48-byte entry.
 /// Constructed once per opening, never cached across challenges.
@@ -129,43 +144,38 @@ impl BridgeTables {
         }
         let mut w0 = try_vec(WhirPart::CyclePoint, self.pairs)?;
         let mut d = try_vec(WhirPart::CyclePoint, self.pairs)?;
-        w0.resize(self.pairs, F192::zero());
-        d.resize(self.pairs, F192::zero());
-        let sums = w0
-            .par_iter_mut()
-            .zip(d.par_iter_mut())
-            .zip(rows.par_iter())
+        let total = Mutex::new([ProductAccumulator::default(); 2]);
+        let low_mask = self.low.len() - 1;
+        let low_bits = self.low.len().trailing_zeros();
+        rows.par_iter()
             .enumerate()
             .with_min_len(1024)
-            .fold(
-                || [ProductAccumulator::default(); 2],
-                |mut sums, (k, ((w0, d), row))| {
-                    let e = self.low[k % self.low.len()] * self.high[k / self.low.len()];
+            .map_init(
+                || RoundSums {
+                    sums: [ProductAccumulator::default(); 2],
+                    total: &total,
+                },
+                |sums, (k, row)| {
+                    let e = self.low[k & low_mask] * self.high[k >> low_bits];
                     let [delta, w1] = self.phi.evaluate(e);
-                    *d = delta;
-                    *w0 = delta + w1;
+                    let w0 = delta + w1;
                     let [a0, a1, b0, b1] = row.map(F64::from_raw);
                     if COMPOSED {
-                        sums[0].fmadd_base(*w0, a0);
-                        sums[0].fmadd_base(w0.mul_y(), a1);
-                        sums[1].fmadd_base(delta, a0 + b0);
-                        sums[1].fmadd_base(delta.mul_y(), a1 + b1);
+                        sums.sums[0].fmadd_base(w0, a0);
+                        sums.sums[0].fmadd_base(w0.mul_y(), a1);
+                        sums.sums[1].fmadd_base(delta, a0 + b0);
+                        sums.sums[1].fmadd_base(delta.mul_y(), a1 + b1);
                     } else {
-                        sums[0].fmadd_base_pair(*w0, [a0, a1]);
-                        sums[1].fmadd_base_pair(delta, [a0 + b0, a1 + b1]);
+                        sums.sums[0].fmadd_base_pair(w0, [a0, a1]);
+                        sums.sums[1].fmadd_base_pair(delta, [a0 + b0, a1 + b1]);
                     }
-                    sums
+                    (w0, delta)
                 },
             )
-            .reduce(
-                || [ProductAccumulator::default(); 2],
-                |mut a, b| {
-                    for (acc, other) in a.iter_mut().zip(b) {
-                        acc.merge(other);
-                    }
-                    a
-                },
-            );
+            .unzip_into_vecs(&mut w0, &mut d);
+        let sums = total
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner());
         Ok(FirstRound {
             w0,
             d,
@@ -221,26 +231,25 @@ impl FirstRound {
             });
         }
         let mut message = try_vec(WhirPart::Rows, rows.len())?;
-        message.resize(rows.len(), F192::zero());
-        message
-            .par_iter_mut()
+        rows.par_iter()
             .zip(self.w0.par_iter_mut())
             .zip(self.d.par_iter())
-            .zip(rows.par_iter())
-            .for_each(|(((output, weight), delta), row)| {
+            .map(|((row, weight), delta)| {
                 let [a0, a1, b0, b1] = row.map(F64::from_raw);
                 let folded = if COMPOSED {
                     challenge.mul_base(a0 + b0) + challenge.mul_y().mul_base(a1 + b1)
                 } else {
                     challenge.mul_base_pair([a0 + b0, a1 + b1])
                 };
-                *output = F192::from_base_fn(|i| match i {
+                let output = F192::from_base_fn(|i| match i {
                     0 => a0,
                     1 => a1,
                     _ => F64::zero(),
                 }) + folded;
                 *weight += challenge * *delta;
-            });
+                output
+            })
+            .collect_into_vec(&mut message);
         Ok(FoldedBridge {
             message,
             weight: self.w0,

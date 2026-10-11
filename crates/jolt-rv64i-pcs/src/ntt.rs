@@ -21,7 +21,7 @@ use rayon::prelude::*;
 mod neon;
 
 trait CodeSymbol: Ring + Copy + Send + Sync {
-    const FUSE_LAYERS: bool;
+    const FUSE_THREE_LAYERS: bool;
 
     fn scale(self, twiddle: F64) -> Self;
 
@@ -31,7 +31,7 @@ trait CodeSymbol: Ring + Copy + Send + Sync {
     }
 }
 impl CodeSymbol for F64 {
-    const FUSE_LAYERS: bool = true;
+    const FUSE_THREE_LAYERS: bool = true;
 
     #[inline]
     fn scale(self, twiddle: F64) -> Self {
@@ -45,7 +45,7 @@ impl CodeSymbol for F64 {
     }
 }
 impl CodeSymbol for F192 {
-    const FUSE_LAYERS: bool = false;
+    const FUSE_THREE_LAYERS: bool = false;
 
     #[inline]
     fn scale(self, twiddle: F64) -> Self {
@@ -174,7 +174,7 @@ impl<'a> Encoder<'a> {
             .ilog2() as usize;
         let local_layers = remaining.min(cache_log).min(parallel_log);
         let mut top_layers = remaining;
-        while F::FUSE_LAYERS && top_layers >= local_layers + 3 {
+        while F::FUSE_THREE_LAYERS && top_layers >= local_layers + 3 {
             let run_positions = 1usize << top_layers;
             data.par_chunks_mut(run_positions * lanes)
                 .enumerate()
@@ -199,11 +199,12 @@ impl<'a> Encoder<'a> {
                 });
         }
         let window_positions = 1usize << local_layers;
+        let low_delta = self.table.w_hat(0, 2);
         data.par_chunks_mut(window_positions * lanes)
             .enumerate()
             .for_each(|(window, data)| {
                 let base = window * window_positions;
-                self.local_layers(data, lanes, base, local_layers);
+                self.local_layers(data, lanes, base, local_layers, low_delta);
             });
     }
 
@@ -213,24 +214,50 @@ impl<'a> Encoder<'a> {
         lanes: usize,
         base: usize,
         remaining: usize,
+        low_delta: F64,
     ) {
-        if F::FUSE_LAYERS && remaining >= 3 {
+        if F::FUSE_THREE_LAYERS && remaining >= 3 {
             let twiddles = self.radix8_twiddles(remaining - 1, base);
             Self::radix8_tiles(data, false, |_, mut rows| {
                 Self::radix8(&mut rows, &twiddles);
             });
             let child_positions = 1usize << (remaining - 3);
             for (child, block) in data.chunks_mut(child_positions * lanes).enumerate() {
-                self.local_layers(block, lanes, base + child * child_positions, remaining - 3);
+                self.local_layers(
+                    block,
+                    lanes,
+                    base + child * child_positions,
+                    remaining - 3,
+                    low_delta,
+                );
             }
             return;
         }
-        for l in (0..remaining).rev() {
+        let bottom = if !F::FUSE_THREE_LAYERS && remaining >= 2 {
+            2
+        } else {
+            0
+        };
+        for l in (bottom..remaining).rev() {
             let run_positions = 1usize << (l + 1);
             for (run, block) in data.chunks_mut(run_positions * lanes).enumerate() {
                 let twiddle = self.table.w_hat(l, (base + run * run_positions) as u32);
                 let (top, bot) = block.split_at_mut(block.len() / 2);
                 Self::butterfly(top, bot, twiddle);
+            }
+        }
+        if bottom == 2 {
+            for (run, block) in data.chunks_mut(4 * lanes).enumerate() {
+                let group_base = (base + run * 4) as u32;
+                let t1 = self.table.w_hat(1, group_base);
+                let t0 = self.table.w_hat(0, group_base);
+                let (top, bot) = block.split_at_mut(2 * lanes);
+                Self::butterfly(top, bot, t1);
+                let (a, b) = top.split_at_mut(lanes);
+                let (c, d) = bot.split_at_mut(lanes);
+                Self::butterfly(a, b, t0);
+                // Aligned groups differ by bit 1, and W0 is GF(2)-linear.
+                Self::butterfly(c, d, t0 + low_delta);
             }
         }
     }
@@ -323,13 +350,13 @@ impl<'a> Encoder<'a> {
 
     #[inline]
     fn safe_butterfly<F: CodeSymbol>(top: &mut [F], bot: &mut [F], twiddle: F64) {
-        if F::FUSE_LAYERS && twiddle.is_zero() {
+        if F::FUSE_THREE_LAYERS && twiddle.is_zero() {
             for (top, bot) in top.iter().zip(bot) {
                 *bot += *top;
             }
             return;
         }
-        if !F::FUSE_LAYERS {
+        if !F::FUSE_THREE_LAYERS {
             for (top, bot) in top.iter_mut().zip(bot) {
                 let new_top = *top + bot.scale(twiddle);
                 *bot += new_top;
@@ -824,6 +851,8 @@ mod tests {
                 .zip(&inverses)
                 .fold(F64::one(), |p, (&l, &inverse)| p * subspace(l, x) * inverse)
         });
+        let low_inverse = subspace(1, 2).inverse().unwrap();
+        let adjacent_basis = positions.map(|x| subspace(1, x) * low_inverse);
         let coefficient = F192::from_base_fn(|i| F64::from_raw([3, 5, 9][i]));
 
         for threads in [1, 12] {
@@ -835,14 +864,19 @@ mod tests {
                 let lanes = 16;
                 let mut message = vec![F192::zero(); (1 << c) * lanes];
                 message[w * lanes + 7] = coefficient;
+                message[(w | 2) * lanes + 8] = coefficient;
                 let code = Encoder::new(&table, c, d, lanes)
                     .unwrap()
                     .encode_extension(&message)
                     .unwrap();
-                for (&x, &basis) in positions.iter().zip(&basis) {
+                for ((&x, &basis), &low_bit) in positions.iter().zip(&basis).zip(&adjacent_basis) {
                     let row = &code[x * lanes..(x + 1) * lanes];
                     assert_eq!(row[7], coefficient.mul_base(basis));
-                    assert!(row.iter().enumerate().all(|(u, v)| u == 7 || v.is_zero()));
+                    assert_eq!(row[8], coefficient.mul_base(basis * low_bit));
+                    assert!(row
+                        .iter()
+                        .enumerate()
+                        .all(|(u, v)| u == 7 || u == 8 || v.is_zero()));
                 }
                 drop(code);
                 drop(message);

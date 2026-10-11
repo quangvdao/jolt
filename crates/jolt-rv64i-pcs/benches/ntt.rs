@@ -44,6 +44,29 @@
 //! with the same products and a single output allocation. It failed the
 //! requirement to improve both worker counts; indexed provisioning remains.
 
+//! Global three-layer extension fusion was also rejected: the local two-layer
+//! tail was retained in both trials, but no one-thread gain was reproduced.
+//! At t=22, median ms (minimum ms) before/after was:
+//!
+//! | Tile / phase / workers | Separate global layers | Fused global layers |
+//! |---|---:|---:|
+//! | 128 / level 0 control / 1 | 136.28 (132.02) | 136.75 (132.29) |
+//! | 128 / later total / 1 | 63.82 (61.65) | 65.50 (61.81) |
+//! | 128 / level 0 control / 12 | 20.00 (14.96) | 20.03 (17.02) |
+//! | 128 / later total / 12 | 12.22 (9.00) | 11.81 (8.30) |
+//! | 512 / level 0 control / 1 | 145.20 (133.07) | 144.35 (132.83) |
+//! | 512 / later total / 1 | 65.11 (61.31) | 64.33 (61.12) |
+//! | 512 / level 0 control / 12 | 26.09 (18.23) | 26.12 (15.95) |
+//! | 512 / later total / 12 | 15.16 (9.80) | 13.34 (7.84) |
+//!
+//! The 128-symbol trial used 17 alternating pairs at one-minute load
+//! 15.38--19.05. The 512-symbol trial used two batches of 17 pairs at load
+//! 18.25--32.69. Its confirmation batch's one-thread later total was
+//! 64.39 (61.31) versus 64.77 (63.26); the combined paired median ratio was
+//! 0.996, with a paired-median bootstrap 95% interval of 0.935--1.014.
+//! These figures do not establish a gain at both worker counts. All rejected
+//! implementations were removed; the comparison command above remains usable.
+
 use jolt_field::{Accumulator, ExtField, WithAccumulator};
 use jolt_field::{F192, F64};
 use jolt_rv64i_pcs::ntt::Encoder;

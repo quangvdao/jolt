@@ -4,4 +4,5 @@ pub mod inventory;
 pub mod pipelines;
 pub mod runner;
 pub mod timing;
+pub mod whir_runner;
 pub mod witness;

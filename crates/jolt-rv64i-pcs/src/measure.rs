@@ -1,4 +1,4 @@
-//! Phase and release events consumed by the documented measurement example.
+//! Phase and release events consumed by the documented WHIR benchmark runner.
 
 /// Timed operations from the specification's Performance table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

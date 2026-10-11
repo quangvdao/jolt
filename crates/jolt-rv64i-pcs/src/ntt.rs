@@ -828,69 +828,89 @@ mod tests {
     fn fused_global_passes_match_sampled_polynomial_values() {
         use jolt_field::Field;
 
-        let c = 17;
-        let d = 18;
-        let w = (1usize << 13) | (1 << 12) | (1 << 11) | (1 << 3) | 1;
-        let table = DomainTable::new(c, d).unwrap();
-        let positions = [
-            0usize, 1, 9, 127, 128, 1023, 1024, 2047, 2048, 16383, 16384, 65535, 65536, 131_072,
-            262_143,
-        ];
-        let subspace = |l: usize, x: usize| {
-            (0..1usize << l).fold(F64::one(), |p, root| p * F64::from_raw((x ^ root) as u64))
-        };
-        let selected_bits = [0, 3, 11, 12, 13];
-        let inverses = selected_bits.map(|l| subspace(l, 1 << l).inverse().unwrap());
-        let basis = positions.map(|x| {
-            selected_bits
+        for c in [17, 18] {
+            let d = c + 1;
+            let w = (1usize << 13)
+                | (1 << 12)
+                | (1 << 11)
+                | (1 << 3)
+                | 1
+                | if c == 18 { 7 << (c - 3) } else { 0 };
+            let table = DomainTable::new(c, d).unwrap();
+            let mut positions = vec![
+                0usize, 1, 9, 127, 128, 1023, 1024, 2047, 2048, 16383, 16384, 65535, 65536,
+                131_072, 262_143,
+            ];
+            if c == 18 {
+                positions.extend([262_144, 393_216, 524_287]);
+            }
+            let subspace = |l: usize, x: usize| {
+                (0..1usize << l).fold(F64::one(), |p, root| p * F64::from_raw((x ^ root) as u64))
+            };
+            let selected_bits: Vec<_> = (0..c).filter(|&l| w & (1 << l) != 0).collect();
+            let inverses: Vec<_> = selected_bits
                 .iter()
-                .zip(&inverses)
-                .fold(F64::one(), |p, (&l, &inverse)| p * subspace(l, x) * inverse)
-        });
-        let low_inverse = subspace(1, 2).inverse().unwrap();
-        let adjacent_basis = positions.map(|x| subspace(1, x) * low_inverse);
-        let coefficient = F192::from_base_fn(|i| F64::from_raw([3, 5, 9][i]));
-
-        for threads in [1, 12] {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            pool.install(|| {
-                let lanes = 16;
-                let mut message = vec![F192::zero(); (1 << c) * lanes];
-                message[w * lanes + 7] = coefficient;
-                message[(w | 2) * lanes + 8] = coefficient;
-                let code = Encoder::new(&table, c, d, lanes)
-                    .unwrap()
-                    .encode_extension(&message)
-                    .unwrap();
-                for ((&x, &basis), &low_bit) in positions.iter().zip(&basis).zip(&adjacent_basis) {
-                    let row = &code[x * lanes..(x + 1) * lanes];
-                    assert_eq!(row[7], coefficient.mul_base(basis));
-                    assert_eq!(row[8], coefficient.mul_base(basis * low_bit));
-                    assert!(row
+                .map(|&l| subspace(l, 1 << l).inverse().unwrap())
+                .collect();
+            let basis: Vec<_> = positions
+                .iter()
+                .map(|&x| {
+                    selected_bits
                         .iter()
-                        .enumerate()
-                        .all(|(u, v)| u == 7 || u == 8 || v.is_zero()));
-                }
-                drop(code);
-                drop(message);
+                        .zip(&inverses)
+                        .fold(F64::one(), |p, (&l, &inverse)| p * subspace(l, x) * inverse)
+                })
+                .collect();
+            let low_inverse = subspace(1, 2).inverse().unwrap();
+            let adjacent_basis: Vec<_> = positions
+                .iter()
+                .map(|&x| subspace(1, x) * low_inverse)
+                .collect();
+            let coefficient = F192::from_base_fn(|i| F64::from_raw([3, 5, 9][i]));
 
-                let lanes = 32;
-                let word_lanes = 2 * lanes;
-                let mut rows = vec![[0u64; 4]; (1 << c) * word_lanes / 4];
-                rows[(w * word_lanes + 19) / 4][19 % 4] = 3;
-                let code = Encoder::new(&table, c, d, lanes)
-                    .unwrap()
-                    .encode_rows(&rows)
+            for threads in [1, 12] {
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
                     .unwrap();
-                for (&x, &basis) in positions.iter().zip(&basis) {
-                    let row = &code[x * word_lanes..(x + 1) * word_lanes];
-                    assert_eq!(row[19], F64::from_raw(3) * basis);
-                    assert!(row.iter().enumerate().all(|(u, v)| u == 19 || v.is_zero()));
-                }
-            });
+                pool.install(|| {
+                    let lanes = 16;
+                    let mut message = vec![F192::zero(); (1 << c) * lanes];
+                    message[w * lanes + 7] = coefficient;
+                    message[(w | 2) * lanes + 8] = coefficient;
+                    let code = Encoder::new(&table, c, d, lanes)
+                        .unwrap()
+                        .encode_extension(&message)
+                        .unwrap();
+                    for ((&x, &basis), &low_bit) in
+                        positions.iter().zip(&basis).zip(&adjacent_basis)
+                    {
+                        let row = &code[x * lanes..(x + 1) * lanes];
+                        assert_eq!(row[7], coefficient.mul_base(basis));
+                        assert_eq!(row[8], coefficient.mul_base(basis * low_bit));
+                        assert!(row
+                            .iter()
+                            .enumerate()
+                            .all(|(u, v)| u == 7 || u == 8 || v.is_zero()));
+                    }
+                    drop(code);
+                    drop(message);
+
+                    let lanes = 32;
+                    let word_lanes = 2 * lanes;
+                    let mut rows = vec![[0u64; 4]; (1 << c) * word_lanes / 4];
+                    rows[(w * word_lanes + 19) / 4][19 % 4] = 3;
+                    let code = Encoder::new(&table, c, d, lanes)
+                        .unwrap()
+                        .encode_rows(&rows)
+                        .unwrap();
+                    for (&x, &basis) in positions.iter().zip(&basis) {
+                        let row = &code[x * word_lanes..(x + 1) * word_lanes];
+                        assert_eq!(row[19], F64::from_raw(3) * basis);
+                        assert!(row.iter().enumerate().all(|(u, v)| u == 19 || v.is_zero()));
+                    }
+                });
+            }
         }
     }
 }

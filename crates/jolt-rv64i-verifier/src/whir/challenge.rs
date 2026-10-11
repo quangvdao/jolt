@@ -22,7 +22,7 @@ pub const ROOT_LABEL: &[u8] = b"whir_root";
 pub const FINAL_LABEL: &[u8] = b"whir_final";
 
 /// Absorbs one label and one concatenation of canonical elements. Up to 32
-/// elements use stack storage; larger explicit schedules reserve checked bytes.
+/// elements use stack storage; larger messages reserve checked bytes.
 pub fn append_elements<T: Transcript<Challenge = F128>>(
     transcript: &mut T,
     label: &'static [u8],

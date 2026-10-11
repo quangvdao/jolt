@@ -28,7 +28,28 @@ pub(super) const KARATSUBA_ACCUMULATOR128: bool =
 impl Word {
     #[inline]
     pub(super) fn add128(a: u128, b: u128) -> u128 {
-        (Self::from_accumulator_u128(a) ^ Self::from_accumulator_u128(b)).to_u128()
+        let mut value = Self::from_accumulator_u128(a).0;
+        let rhs = Self::from_accumulator_u128(b).0;
+        // SAFETY: SSE2 is baseline and AVX is enabled by cfg. Both instructions
+        // XOR complete vector registers without touching memory. Keeping the
+        // XOR opaque prevents scalarization of loop-carried field sums.
+        unsafe {
+            #[cfg(target_feature = "avx")]
+            std::arch::asm!(
+                "vpxor {value}, {value}, {rhs}",
+                value = inout(xmm_reg) value,
+                rhs = in(xmm_reg) rhs,
+                options(pure, nomem, nostack),
+            );
+            #[cfg(not(target_feature = "avx"))]
+            std::arch::asm!(
+                "pxor {value}, {rhs}",
+                value = inout(xmm_reg) value,
+                rhs = in(xmm_reg) rhs,
+                options(pure, nomem, nostack),
+            );
+        }
+        Self(value).to_u128()
     }
 
     #[inline]

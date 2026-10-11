@@ -79,6 +79,12 @@ impl Words {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ClaimRows {
+    Committed,
+    Opening,
+}
+
 struct Fixture {
     geometry: BitsGeometry,
     schedule: Schedule,
@@ -114,11 +120,30 @@ impl Fixture {
             .map(|_| std::array::from_fn(|_| rng.next()))
             .collect::<Vec<_>>()
             .into();
+        Self::from_rows(
+            geometry,
+            schedule,
+            explicit.is_some(),
+            rows,
+            ClaimRows::Committed,
+            mutate,
+        )
+    }
+
+    fn from_rows(
+        geometry: BitsGeometry,
+        schedule: Schedule,
+        explicit: bool,
+        rows: Arc<[[u64; 4]]>,
+        claim_rows: ClaimRows,
+        mutate: impl FnOnce(&mut WhirCommitment, &mut ProverState),
+    ) -> Self {
+        let t = geometry.log_T;
         let mut initial = Recorded::new(b"whir_contract");
         initial.append(&Label(b"geometry"));
         initial.append_bytes(&(t as u64).to_le_bytes());
         let mut transcript = initial.clone();
-        let (mut commitment, mut state) = if explicit.is_some() {
+        let (mut commitment, mut state) = if explicit {
             commit_with_schedule(geometry, schedule.clone(), &rows, &mut transcript).unwrap()
         } else {
             commit(geometry, &rows, &mut transcript).unwrap()
@@ -139,7 +164,11 @@ impl Fixture {
         let cycle = (0..t).map(|_| transcript.challenge()).collect::<Vec<_>>();
         let weights = equality_table(&cycle).unwrap();
         let mut columns = vec![F128::zero(); 256];
-        for (&weight, row) in weights.iter().zip(rows.iter()) {
+        let claims = match claim_rows {
+            ClaimRows::Committed => rows.as_ref(),
+            ClaimRows::Opening => state.rows.as_ref(),
+        };
+        for (&weight, row) in weights.iter().zip(claims.iter()) {
             for (column, value) in columns.iter_mut().enumerate() {
                 if row[column / 64] >> (column % 64) & 1 != 0 {
                     *value += weight;
@@ -162,7 +191,7 @@ impl Fixture {
             cycle_point: &cycle,
             columns: &columns,
         };
-        let proof = if explicit.is_some() {
+        let proof = if explicit {
             open_with_schedule(schedule.clone(), state, &request, &mut transcript).unwrap()
         } else {
             open(state, &request, &mut transcript).unwrap()
@@ -539,18 +568,48 @@ fn rejections_wrong_claims_points_geometry_and_stale_transcript() {
 #[test]
 fn rejections_changed_row_and_far_codeword() {
     for t in [6, 11] {
-        let changed_row = Fixture::build(t, None, |_, state| {
-            let mut rows = state.rows.to_vec();
-            rows[0][0] ^= 1;
-            state.rows = rows.into();
-        });
-        assert!(changed_row
-            .verify(
-                &changed_row.commitment,
-                &changed_row.proof,
-                &changed_row.request()
-            )
-            .is_err());
+        let honest = Fixture::new(t);
+        honest.accepted();
+        for claim_rows in [ClaimRows::Committed, ClaimRows::Opening] {
+            let changed_row = Fixture::from_rows(
+                honest.geometry,
+                honest.schedule.clone(),
+                false,
+                Arc::clone(&honest.rows),
+                claim_rows,
+                |_, state| {
+                    let mut rows = state.rows.to_vec();
+                    rows[0][0] ^= 1;
+                    state.rows = rows.into();
+                },
+            );
+            // Opening claims make the bridge honest for B, isolating linkage
+            // to commitment A. Committed claims also pin the original request.
+            assert!(matches!(
+                changed_row.verify(
+                    &changed_row.commitment,
+                    &changed_row.proof,
+                    &changed_row.request()
+                ),
+                Err(WhirError::FinalCodeMismatch { .. } | WhirError::ClosingIdentityMismatch)
+            ));
+            if matches!(claim_rows, ClaimRows::Committed) {
+                assert_eq!(changed_row.columns, honest.columns);
+                assert_eq!(changed_row.cycle, honest.cycle);
+                assert_eq!(changed_row.rho, honest.rho);
+            }
+        }
+        let mut opening_rows = honest.rows.to_vec();
+        opening_rows[0][0] ^= 1;
+        Fixture::from_rows(
+            honest.geometry,
+            honest.schedule.clone(),
+            false,
+            opening_rows.into(),
+            ClaimRows::Committed,
+            |_, _| {},
+        )
+        .accepted();
         let far = Fixture::build(t, None, |commitment, state| {
             let mut rng = Words(0x310c_43a1_497e_0d9b);
             for symbol in &mut state.codeword {

@@ -212,7 +212,7 @@ One rule holds for every table, point and sum-check of the family.
 
 - **Index order.** A multilinear table is indexed by an integer whose bit `i` is variable `i`. A point is a `Vec<F>` whose coordinate `i` belongs to variable `i`. `p ++ q` is concatenation, low variables first.
 - **Binding order.** Every sum-check binds `BindingOrder::LowToHigh`: round `u` of a member binds its variable `u`. A member's sum-check point is therefore its window of the batch challenges, in order, with no reversal.
-- **Conversion.** `jolt_poly::Polynomial::evaluate` and `jolt_poly::EqPlusOnePolynomial` take the most significant variable first. `points::to_high_to_low` reverses a point; it is called inside `points::next` and in the reference tier, and nowhere else. The commitment scheme receives its points in the order of this section (§11).
+- **Conversion.** `jolt_poly::Polynomial::evaluate` and `jolt_poly::EqPlusOnePolynomial` take the most significant variable first. `points::to_high_to_low` reverses a point; `points::next` calls it, as do the tests that evaluate a table through `Polynomial::evaluate`, and nothing else in the verifier or the prover does. The optimised kernels do not depend on the verifier crate and hold the one other reversal, private to `round::eq` of `jolt-rv64i-kernels` behind `eq_table` and `split_eq`. The commitment scheme receives its points in the order of this section (§11).
 
 Tables and their indices:
 

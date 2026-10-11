@@ -29,6 +29,21 @@
 //! without butterflies. Subtraction estimates residual transform time; cache
 //! effects and overlapping traffic prevent exact attribution.
 
+//! A rejected fused-provisioning trial on M4 Max (12 performance cores,
+//! 4 efficiency cores) used 17 alternating pairs at t=22; one-minute load
+//! ranged from 21.08 to 24.66. Values are median ms (minimum ms):
+//!
+//! | Phase / workers | Indexed provisioning | Fused first layer |
+//! |---|---:|---:|
+//! | Level 0 / 1 | 139.62 (132.01) | 144.44 (131.79) |
+//! | Later total / 1 | 63.86 (60.97) | 67.61 (65.29) |
+//! | Level 0 / 12 | 23.06 (15.07) | 23.65 (16.39) |
+//! | Later total / 12 | 14.98 (8.95) | 13.61 (9.21) |
+//!
+//! The trial used exact-length paired Rayon consumers and bounded stack tiles,
+//! with the same products and a single output allocation. It failed the
+//! requirement to improve both worker counts; indexed provisioning remains.
+
 use jolt_field::{Accumulator, ExtField, WithAccumulator};
 use jolt_field::{F192, F64};
 use jolt_rv64i_pcs::ntt::Encoder;

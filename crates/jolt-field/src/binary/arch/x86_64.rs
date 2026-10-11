@@ -27,6 +27,11 @@ pub(super) const KARATSUBA_ACCUMULATOR128: bool =
 
 impl Word {
     #[inline]
+    pub(super) fn add128(a: u128, b: u128) -> u128 {
+        (Self::from_accumulator_u128(a) ^ Self::from_accumulator_u128(b)).to_u128()
+    }
+
+    #[inline]
     pub(super) fn reduce128([t0, t1, t2]: [Self; 3]) -> u128 {
         #[cfg(target_feature = "gfni")]
         {

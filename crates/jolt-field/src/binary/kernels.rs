@@ -4,6 +4,11 @@ use super::arch::{
 };
 use std::ops::{BitXor, BitXorAssign};
 
+#[inline]
+pub(super) fn add128(a: u128, b: u128) -> u128 {
+    Word::add128(a, b)
+}
+
 // Represents t0 + t1*x^64 + t2*x^128 without extracting product lanes.
 pub(super) type Unreduced128 = [Word; 3];
 pub(super) type Unreduced192 = [Word; 3];

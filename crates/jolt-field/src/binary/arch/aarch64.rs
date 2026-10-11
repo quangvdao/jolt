@@ -16,6 +16,11 @@ pub(super) const SHIFT_SQUARE128: bool = false;
 
 impl Word {
     #[inline]
+    pub(super) fn add128(a: u128, b: u128) -> u128 {
+        super::portable::add128(a, b)
+    }
+
+    #[inline]
     pub(super) fn reduce128(product: [Self; 3]) -> u128 {
         super::kernels::reduce128_products(product)
     }

@@ -1,3 +1,8 @@
+#[inline]
+pub(super) fn add128(a: u128, b: u128) -> u128 {
+    a ^ b
+}
+
 pub(super) use reduce64 as reduce_accumulator64;
 
 pub(super) type Unreduced64 = u128;

@@ -39,7 +39,7 @@ impl F128 {
     }
 
     fn add_coefficients(self, rhs: Self) -> Self {
-        Self(self.0 ^ rhs.0)
+        Self(arithmetic::add128(self.0, rhs.0))
     }
 }
 

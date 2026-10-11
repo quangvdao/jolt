@@ -9,8 +9,8 @@
 )]
 mod support;
 
-use jolt_field::{One, Zero, F128};
-use jolt_rv64i_arith::{BitsRow, BITS_COLUMNS};
+use jolt_field::{One, F128};
+use jolt_rv64i_arith::BitsRow;
 use jolt_rv64i_prover::backend::Rv64iBackend;
 use jolt_rv64i_prover::commitment::{
     transparent::{
@@ -27,39 +27,15 @@ use jolt_rv64i_verifier::preprocessing::VerifierPreprocessing;
 use jolt_rv64i_verifier::statement::CheckedInputs;
 use jolt_rv64i_verifier::transcript::{preamble, Rv64iTranscript};
 use jolt_rv64i_verifier::verifier::verify_with_transcript;
+use jolt_rv64i_verifier::whir::{
+    error::{WhirError, WhirPart},
+    WhirBits,
+};
 use jolt_transcript::{Label, Transcript};
 use std::sync::Arc;
+use support::bits_contract::{basis, columns, lifecycle};
 use thiserror::Error;
 
-fn basis(point: &[F128], index: usize) -> F128 {
-    point
-        .iter()
-        .enumerate()
-        .map(|(bit, value)| {
-            if (index >> bit) & 1 == 0 {
-                F128::one() + *value
-            } else {
-                *value
-            }
-        })
-        .product()
-}
-fn columns(bits: &[BitsRow], cycle: &[F128]) -> Vec<F128> {
-    (0..BITS_COLUMNS)
-        .map(|column| {
-            bits.iter()
-                .enumerate()
-                .map(|(j, row)| {
-                    if (row[column / 64] >> (column % 64)) & 1 == 0 {
-                        F128::zero()
-                    } else {
-                        basis(cycle, j)
-                    }
-                })
-                .sum()
-        })
-        .collect()
-}
 #[derive(Debug, Error)]
 enum LifecycleError {
     #[error(transparent)]
@@ -381,4 +357,110 @@ fn transparent_wire_lengths_and_unsupported_exponents_are_rejected_before_table_
     ));
     assert!(TransparentOpening::read(&[], unsupported).is_none());
     assert!(TransparentCommitment::read(&[0; 32], unsupported).is_none());
+}
+
+#[test]
+fn shared_commitment_contract_transparent() {
+    lifecycle::<TransparentBits>();
+}
+
+#[test]
+fn shared_commitment_contract_whir() {
+    lifecycle::<WhirBits>();
+}
+
+#[test]
+fn whir_adapter_preserves_geometry_and_request_errors_without_absorption() {
+    let empty: Arc<[BitsRow]> = Arc::from([]);
+    let mut transcript = Rv64iTranscript::new(b"whir-adapter-shapes");
+    for exponent in [0, 33] {
+        assert_eq!(
+            WhirBits::commit(
+                &(),
+                BitsGeometry { log_T: exponent },
+                &empty,
+                &mut transcript
+            )
+            .err()
+            .unwrap(),
+            WhirError::UnsupportedGeometry { log_T: exponent },
+        );
+    }
+    let geometry = BitsGeometry { log_T: 3 };
+    assert_eq!(
+        WhirBits::commit(&(), geometry, &empty, &mut transcript)
+            .err()
+            .unwrap(),
+        WhirError::Shape {
+            part: WhirPart::Rows,
+            expected: 8,
+            actual: 0
+        },
+    );
+    let bits: Arc<[BitsRow]> = Arc::from([[0; 4]; 8]);
+    let rho = [F128::one(); 8];
+    let cycle = [F128::one(); 3];
+    let values = columns(&bits, &cycle);
+    let valid = BitsOpening {
+        geometry,
+        column_point: &rho,
+        cycle_point: &cycle,
+        columns: &values,
+    };
+    let requests = [
+        (
+            BitsOpening {
+                geometry: BitsGeometry { log_T: 4 },
+                ..valid
+            },
+            WhirError::GeometryMismatch {
+                expected: geometry,
+                actual: BitsGeometry { log_T: 4 },
+            },
+        ),
+        (
+            BitsOpening {
+                column_point: &rho[..7],
+                ..valid
+            },
+            WhirError::Shape {
+                part: WhirPart::ColumnPoint,
+                expected: 8,
+                actual: 7,
+            },
+        ),
+        (
+            BitsOpening {
+                cycle_point: &cycle[..2],
+                ..valid
+            },
+            WhirError::Shape {
+                part: WhirPart::CyclePoint,
+                expected: 3,
+                actual: 2,
+            },
+        ),
+        (
+            BitsOpening {
+                columns: &values[..255],
+                ..valid
+            },
+            WhirError::Shape {
+                part: WhirPart::Columns,
+                expected: 256,
+                actual: 255,
+            },
+        ),
+    ];
+    for (request, expected) in requests {
+        let (_, state) = WhirBits::commit(&(), geometry, &bits, &mut transcript).unwrap();
+        let before = transcript.state();
+        assert_eq!(
+            WhirBits::open(&(), state, &request, &mut transcript)
+                .err()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(transcript.state(), before);
+    }
 }

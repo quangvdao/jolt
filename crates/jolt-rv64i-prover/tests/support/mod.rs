@@ -8,6 +8,8 @@
     reason = "fixture failures fail the enclosing test"
 )]
 
+pub mod bits_contract;
+
 use self::replay::State;
 use common::{
     constants::RAM_START_ADDRESS,

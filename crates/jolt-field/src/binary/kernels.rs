@@ -1,6 +1,5 @@
 pub(super) use super::arch::Unreduced64;
 use super::arch::{Word, KARATSUBA128, SCALAR_ACCUMULATOR64, SHIFT_SQUARE128};
-use super::reduction::{reduce64 as fold64, MODULUS64};
 use std::ops::{BitXor, BitXorAssign};
 
 // Represents t0 + t1*x^64 + t2*x^128 without extracting product lanes.
@@ -38,13 +37,7 @@ pub(super) fn reduce_accumulator64(product: Unreduced64) -> u64 {
 
 #[inline]
 fn reduce_word64(product: Word) -> u64 {
-    let k = Word::from_u64(MODULUS64);
-    fold64::<_, _, false>(
-        product,
-        |p| p.mul_hl(k),
-        |p, first| (p ^ first).low(),
-        |p, first, second| (p ^ first ^ second).low(),
-    )
+    product.reduce64()
 }
 
 #[inline]
@@ -148,6 +141,29 @@ pub(super) fn product192(a: [u64; 3], b: [u64; 3]) -> Unreduced192 {
     let c12 = (a1 ^ a2).mul_ll(b1 ^ b2) ^ d1 ^ d2;
     // Reduce y^3 = y + 1 and y^4 = y^2 + y before the three base-field reductions.
     [d0 ^ c12, c01 ^ c12 ^ d2, d1 ^ c02 ^ d2]
+}
+
+#[inline]
+pub(super) fn multiply192_base_pair(a: [u64; 3], b: [u64; 2]) -> [u64; 3] {
+    reduce192(product192_base_pair(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base(a: [u64; 3], b: u64) -> Unreduced192 {
+    let b = Word::from_u64(b);
+    a.map(|a| Word::from_u64(a).mul_ll(b))
+}
+
+#[inline]
+pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
+    let [a0, a1, a2] = a.map(Word::from_u64);
+    let [b0, b1] = b.map(Word::from_u64);
+    let d0 = a0.mul_ll(b0);
+    let d1 = a1.mul_ll(b1);
+    let c01 = (a0 ^ a1).mul_ll(b0 ^ b1) ^ d0 ^ d1;
+    let c02 = a2.mul_ll(b0);
+    let c12 = a2.mul_ll(b1);
+    [d0 ^ c12, c01 ^ c12, d1 ^ c02]
 }
 
 #[inline]

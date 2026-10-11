@@ -1,8 +1,28 @@
+use super::reduction::MODULUS64;
 use std::arch::aarch64::{
     uint64x2_t, vcombine_u64, vcreate_u64, vdupq_n_u64, veorq_u64, vextq_u64, vgetq_lane_u64,
     vmull_high_p64, vmull_p64, vreinterpretq_p128_u64, vreinterpretq_p64_u64,
     vreinterpretq_u64_p128, vshlq_n_u64, vshrq_n_u64,
 };
+
+// SHORT requires the first fold's high half to be zero. The butterfly wrappers
+// enforce twiddle degree <=60: product degree <=123, high-half degree <=59,
+// and folding by the degree-4 modulus then fits in 64 bits.
+#[inline(always)]
+pub(super) fn fold64<P: Copy, R, const SHORT: bool>(
+    product: P,
+    mut fold_high: impl FnMut(P) -> P,
+    finish_short: impl FnOnce(P, P) -> R,
+    finish_full: impl FnOnce(P, P, P) -> R,
+) -> R {
+    let first = fold_high(product);
+    if SHORT {
+        finish_short(product, first)
+    } else {
+        let second = fold_high(first);
+        finish_full(product, first, second)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Word(uint64x2_t);
@@ -14,6 +34,17 @@ pub(super) const KARATSUBA128: bool = false;
 pub(super) const SHIFT_SQUARE128: bool = false;
 
 impl Word {
+    #[inline]
+    pub(super) fn reduce64(self) -> u64 {
+        let k = Self::from_u64(MODULUS64);
+        fold64::<_, _, false>(
+            self,
+            |p| p.mul_hl(k),
+            |p, first| p.xor(first).low(),
+            |p, first, second| p.xor(first).xor(second).low(),
+        )
+    }
+
     #[inline]
     pub(super) fn from_unreduced64(value: Unreduced64) -> Self {
         Self::from_u128(value)

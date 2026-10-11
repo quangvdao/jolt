@@ -41,6 +41,7 @@ const _: fn(usize) = CountingAllocator::begin;
 const _: fn(usize) = CountingAllocator::phase;
 const _: fn() = CountingAllocator::stop;
 const _: fn() -> usize = CountingAllocator::overflow;
+const _: fn() -> usize = CountingAllocator::peak_bytes;
 const _: fn() = || {
     let _ = CountingAllocator::entries();
 };
@@ -104,6 +105,11 @@ impl CountingAllocator {
     /// Requested bytes currently live, including storage outside a measurement.
     pub fn live_bytes() -> usize {
         LIVE.load(Ordering::Relaxed)
+    }
+
+    /// Maximum live requested bytes since the allocation interval began.
+    pub fn peak_bytes() -> usize {
+        PEAK.load(Ordering::Relaxed)
     }
 
     fn added(bytes: usize) {

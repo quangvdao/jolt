@@ -4,7 +4,10 @@
 #[cfg(any(test, feature = "test-utils"))]
 use super::error::checked_product;
 use super::error::{try_vec, WhirError, WhirPart};
-use jolt_field::{ExtField, Field, One, Zero, F192, F64};
+use jolt_field::WithAccumulator;
+use jolt_field::{Accumulator, ExtField, Field, One, Zero, F192, F64};
+
+type ProductAccumulator = <F192 as WithAccumulator>::Accumulator;
 
 /// The triangular constants `Ŵ_l(β_i)`, excluding the implicit zeroes below
 /// the diagonal and ones on it. A call owns this table; it has no cache.
@@ -125,6 +128,37 @@ impl DomainTable {
         rest.iter().enumerate().fold(initial, |weight, (l, q_l)| {
             weight * (F192::one() + *q_l + q_l.mul_base(self.w_hat(l + 1, x)))
         })
+    }
+
+    /// Evaluates one lane's code at a position, for the verifier's final oracle
+    /// check. The message length and domain are validated before arithmetic.
+    pub fn evaluate_message(&self, c: usize, x: u32, message: &[F192]) -> Result<F192, WhirError> {
+        self.validate_dimensions(c, self.d)?;
+        let expected = 1usize
+            .checked_shl(c as u32)
+            .ok_or(WhirError::LengthOverflow {
+                part: WhirPart::FinalValues,
+            })?;
+        if message.len() != expected {
+            return Err(WhirError::Shape {
+                part: WhirPart::FinalValues,
+                expected,
+                actual: message.len(),
+            });
+        }
+        if !self.contains_position(x) {
+            return Err(WhirError::FinalCodeMismatch {
+                position: x as usize,
+            });
+        }
+        let mut sum = ProductAccumulator::default();
+        for (w, coefficient) in message.iter().enumerate() {
+            let basis = (0..c)
+                .filter(|l| (w >> l) & 1 != 0)
+                .fold(F64::one(), |product, l| product * self.w_hat(l, x));
+            sum.fmadd_base(*coefficient, basis);
+        }
+        Ok(sum.reduce())
     }
 }
 
@@ -364,5 +398,42 @@ mod tests {
         assert_eq!(table.query_weight(0, 0, &[]), F192::one());
         let value = F192::from_base_fn(|i| F64::from_raw(9 + i as u64));
         assert_eq!(encode_by_definition(&[value], 0, 3, 1).unwrap(), [value; 8]);
+    }
+
+    #[test]
+    fn final_code_evaluation_literal_and_shape() {
+        let domain = DomainTable::new(2, 3).unwrap();
+        let message = [1, 2, 4, 8].map(|word| {
+            F192::from_base_fn(|i| {
+                if i == 0 {
+                    F64::from_raw(word)
+                } else {
+                    F64::zero()
+                }
+            })
+        });
+        for (position, literal) in [(2, 17), (4, 209)] {
+            // Spec §2: coefficients at 2 are (1,x,1,x), at 4 (1,x²,x²+x,x⁴+x³).
+            assert_eq!(
+                domain.evaluate_message(2, position, &message).unwrap(),
+                F192::from_base_fn(|i| if i == 0 {
+                    F64::from_raw(literal)
+                } else {
+                    F64::zero()
+                })
+            );
+        }
+        assert_eq!(
+            domain.evaluate_message(2, 0, &message[..3]),
+            Err(WhirError::Shape {
+                part: WhirPart::FinalValues,
+                expected: 4,
+                actual: 3
+            })
+        );
+        assert_eq!(
+            domain.evaluate_message(2, 8, &message),
+            Err(WhirError::FinalCodeMismatch { position: 8 })
+        );
     }
 }

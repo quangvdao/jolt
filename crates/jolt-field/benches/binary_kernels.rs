@@ -185,6 +185,93 @@ fn bench_word_products(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_commitment_products(c: &mut Criterion) {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7061_6972_6265_6e63);
+    let pairs: Vec<_> = (0..1024)
+        .map(|_| (F192::random(&mut rng), F192::random(&mut rng)))
+        .collect();
+    let mut output = vec![F192::zero(); pairs.len()];
+    let mut group = c.benchmark_group("F192/commitment");
+    let _ = group.throughput(Throughput::Elements(1024));
+
+    macro_rules! reduced {
+        ($name:literal, |$a:ident, $b:ident| $product:expr) => {
+            let _ = group.bench_function($name, |bencher| {
+                bencher.iter(|| {
+                    for (dest, &($a, $b)) in output.iter_mut().zip(black_box(&pairs)) {
+                        *dest = $product;
+                    }
+                    let _ = black_box(&output);
+                });
+            });
+        };
+    }
+    macro_rules! accumulated {
+        ($name:literal, |$acc:ident, $a:ident, $b:ident| $product:block) => {
+            let _ = group.bench_function($name, |bencher| {
+                bencher.iter(|| {
+                    let mut $acc = <F192 as WithAccumulator>::Accumulator::default();
+                    for &($a, $b) in black_box(&pairs) {
+                        $product
+                    }
+                    black_box($acc.reduce())
+                });
+            });
+        };
+    }
+
+    reduced!("full_mul", |a, b| a * b);
+    reduced!("mul_base", |a, b| a.mul_base(b.base_coefficient(0)));
+    reduced!("mul_base_pair", |a, b| a
+        .mul_base_pair([b.base_coefficient(0), b.base_coefficient(1)]));
+    reduced!("mul_base_pair_composition", |a, b| {
+        let mut acc = <F192 as WithAccumulator>::Accumulator::default();
+        acc.fmadd_base(a, b.base_coefficient(0));
+        acc.fmadd_base(a.mul_y(), b.base_coefficient(1));
+        acc.reduce()
+    });
+    reduced!("mul_y", |a, _b| a.mul_y());
+    accumulated!("full_fmadd", |acc, a, b| {
+        acc.fmadd(a, b);
+    });
+    accumulated!("fmadd_base", |acc, a, b| {
+        acc.fmadd_base(a, b.base_coefficient(0));
+    });
+    accumulated!("fmadd_base_pair", |acc, a, b| {
+        acc.fmadd_base_pair(a, [b.base_coefficient(0), b.base_coefficient(1)]);
+    });
+    accumulated!("fmadd_base_pair_composition", |acc, a, b| {
+        acc.fmadd_base(a, b.base_coefficient(0));
+        acc.fmadd_base(a.mul_y(), b.base_coefficient(1));
+    });
+    group.finish();
+
+    let base_pairs: Vec<_> = (0..1024)
+        .map(|_| (F64::random(&mut rng), F64::random(&mut rng)))
+        .collect();
+    let mut base_output = vec![F64::zero(); base_pairs.len()];
+    let mut group = c.benchmark_group("F64/commitment");
+    let _ = group.throughput(Throughput::Elements(1024));
+    let _ = group.bench_function("carryless_chain", |bencher| {
+        bencher.iter(|| {
+            let mut acc = <F64 as WithAccumulator>::Accumulator::default();
+            for &(a, b) in black_box(&base_pairs) {
+                acc.fmadd(a, b);
+            }
+            black_box(acc.reduce())
+        });
+    });
+    let _ = group.bench_function("mul", |bencher| {
+        bencher.iter(|| {
+            for (dest, &(a, b)) in base_output.iter_mut().zip(black_box(&base_pairs)) {
+                *dest = a * b;
+            }
+            let _ = black_box(&base_output);
+        });
+    });
+    group.finish();
+}
+
 fn bench_butterflies(c: &mut Criterion) {
     let mut group = c.benchmark_group("butterfly");
     let _ = group.throughput(Throughput::Elements(1024));
@@ -231,6 +318,7 @@ criterion_group!(
     benches,
     binary_kernels,
     bench_word_products,
+    bench_commitment_products,
     bench_butterflies
 );
 criterion_main!(benches);

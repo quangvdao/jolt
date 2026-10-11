@@ -1,4 +1,4 @@
-use super::reduction::{reduce64 as fold64, MODULUS64};
+use super::reduction::MODULUS64;
 
 pub(super) use reduce64 as reduce_accumulator64;
 
@@ -94,16 +94,13 @@ pub(super) fn product192([a0, a1, a2]: [u64; 3], [b0, b1, b2]: [u64; 3]) -> Unre
 }
 
 #[inline]
-pub(super) fn reduce64(product: Unreduced64) -> u64 {
-    fold64::<_, _, false>(
-        product,
-        |p| {
-            let high = p >> 64;
-            high ^ (high << 1) ^ (high << 3) ^ (high << 4)
-        },
-        |p, first| (p ^ first) as u64,
-        |p, first, second| (p ^ first ^ second) as u64,
-    )
+pub(super) const fn reduce64(product: Unreduced64) -> u64 {
+    let low = product as u64;
+    let high = (product >> 64) as u64;
+    let first = high ^ (high << 1) ^ (high << 3) ^ (high << 4);
+    let overflow = (high >> 63) ^ (high >> 61) ^ (high >> 60);
+    let second = overflow ^ (overflow << 1) ^ (overflow << 3) ^ (overflow << 4);
+    low ^ first ^ second
 }
 
 #[inline]
@@ -112,6 +109,28 @@ pub(super) fn reduce128([low, high]: Unreduced128) -> u128 {
     let overflow = (high >> 127) ^ (high >> 126) ^ (high >> 121);
     let second = overflow ^ (overflow << 1) ^ (overflow << 2) ^ (overflow << 7);
     low ^ first ^ second
+}
+
+#[inline]
+pub(super) fn multiply192_base_pair(a: [u64; 3], b: [u64; 2]) -> [u64; 3] {
+    reduce192(product192_base_pair(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base(a: [u64; 3], b: u64) -> Unreduced192 {
+    a.map(|a| product64(a, b))
+}
+
+#[inline]
+pub(super) fn product192_base_pair(a: [u64; 3], b: [u64; 2]) -> Unreduced192 {
+    let [a0, a1, a2] = a;
+    let [b0, b1] = b;
+    let d0 = product64(a0, b0);
+    let d1 = product64(a1, b1);
+    let c01 = product64(a0 ^ a1, b0 ^ b1) ^ d0 ^ d1;
+    let c02 = product64(a2, b0);
+    let c12 = product64(a2, b1);
+    [d0 ^ c12, c01 ^ c12, d1 ^ c02]
 }
 
 #[inline]

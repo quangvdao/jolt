@@ -9,8 +9,9 @@
 
 //! Paired coefficient butterflies over initialized word arrays.
 
+use super::arch::fold64;
 use super::butterfly::{base_tail, extension_tail};
-use super::reduction::{reduce64, MODULUS64};
+use super::reduction::MODULUS64;
 use super::{F192, F64};
 use crate::ExtField;
 #[cfg(not(target_feature = "sha3"))]
@@ -119,7 +120,7 @@ unsafe fn butterfly_pairs<const PAIRS: usize, const SHORT: bool>(
             )
         });
         let reduced = products.map(|(low, high)| {
-            reduce64::<_, _, SHORT>(
+            fold64::<_, _, SHORT>(
                 [low, high],
                 |pair| {
                     pair.map(|p| {

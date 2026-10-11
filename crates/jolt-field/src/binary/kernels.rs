@@ -1,5 +1,6 @@
 pub(super) use super::arch::Unreduced64;
 use super::arch::{Word, KARATSUBA128, SCALAR_ACCUMULATOR64, SHIFT_SQUARE128};
+use super::reduction::{reduce64 as fold64, MODULUS64};
 use std::ops::{BitXor, BitXorAssign};
 
 // Represents t0 + t1*x^64 + t2*x^128 without extracting product lanes.
@@ -37,9 +38,13 @@ pub(super) fn reduce_accumulator64(product: Unreduced64) -> u64 {
 
 #[inline]
 fn reduce_word64(product: Word) -> u64 {
-    let k = Word::from_u64(0x1b);
-    let first = product.mul_hl(k);
-    (product ^ first ^ first.mul_hl(k)).low()
+    let k = Word::from_u64(MODULUS64);
+    fold64::<_, _, false>(
+        product,
+        |p| p.mul_hl(k),
+        |p, first| (p ^ first).low(),
+        |p, first, second| (p ^ first ^ second).low(),
+    )
 }
 
 #[inline]

@@ -14,6 +14,7 @@
 //! its three base-field coefficients only when the accumulator is finalized.
 
 mod accumulator;
+mod butterfly;
 mod embed;
 mod f128;
 mod f192;
@@ -39,6 +40,10 @@ mod kernels;
     )
 )]
 mod portable;
+mod reduction;
+
+#[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
+mod butterfly_aarch64;
 
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 #[path = "arch/aarch64.rs"]

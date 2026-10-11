@@ -1,3 +1,5 @@
+use super::reduction::{reduce64 as fold64, MODULUS64};
+
 pub(super) use reduce64 as reduce_accumulator64;
 
 pub(super) type Unreduced64 = u128;
@@ -11,7 +13,7 @@ pub(super) fn multiply64(mut a: u64, mut b: u64) -> u64 {
             product ^= a;
         }
         let carry = a >> 63;
-        a = (a << 1) ^ (carry * 0x1b);
+        a = (a << 1) ^ (carry * MODULUS64);
         b >>= 1;
     }
     product
@@ -93,12 +95,15 @@ pub(super) fn product192([a0, a1, a2]: [u64; 3], [b0, b1, b2]: [u64; 3]) -> Unre
 
 #[inline]
 pub(super) fn reduce64(product: Unreduced64) -> u64 {
-    let low = product as u64;
-    let high = product >> 64;
-    let first = high ^ (high << 1) ^ (high << 3) ^ (high << 4);
-    let overflow = (first >> 64) as u64;
-    let second = overflow ^ (overflow << 1) ^ (overflow << 3) ^ (overflow << 4);
-    low ^ first as u64 ^ second
+    fold64::<_, _, false>(
+        product,
+        |p| {
+            let high = p >> 64;
+            high ^ (high << 1) ^ (high << 3) ^ (high << 4)
+        },
+        |p, first| (p ^ first) as u64,
+        |p, first, second| (p ^ first ^ second) as u64,
+    )
 }
 
 #[inline]

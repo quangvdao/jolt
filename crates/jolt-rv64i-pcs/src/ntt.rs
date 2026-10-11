@@ -16,10 +16,6 @@ use jolt_rv64i_verifier::whir::code::DomainTable;
 use jolt_rv64i_verifier::whir::error::{checked_product, try_vec, WhirError, WhirPart};
 use rayon::prelude::*;
 
-#[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
-#[path = "arch/aarch64.rs"]
-mod neon;
-
 trait CodeSymbol: Ring + Copy + Send + Sync {
     const FUSE_THREE_LAYERS: bool;
 
@@ -38,10 +34,10 @@ impl CodeSymbol for F64 {
         self * twiddle
     }
 
-    #[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
+    #[cfg(feature = "arch")]
     #[inline]
     fn butterfly(top: &mut [Self], bot: &mut [Self], twiddle: F64) {
-        neon::base_butterfly(top, bot, twiddle);
+        Self::butterfly_assign(top, bot, twiddle);
     }
 }
 impl CodeSymbol for F192 {
@@ -52,10 +48,10 @@ impl CodeSymbol for F192 {
         self.mul_base(twiddle)
     }
 
-    #[cfg(all(feature = "arch", target_arch = "aarch64", target_feature = "aes"))]
+    #[cfg(feature = "arch")]
     #[inline]
     fn butterfly(top: &mut [Self], bot: &mut [Self], twiddle: F64) {
-        neon::extension_butterfly(top, bot, twiddle);
+        Self::butterfly_assign(top, bot, twiddle);
     }
 }
 

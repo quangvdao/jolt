@@ -1,5 +1,6 @@
 //! Slice butterflies: `cargo bench -p jolt-field --features binary --bench binary_kernels -- butterfly`.
 //! Native AArch64 arithmetic requires `RUSTFLAGS="-C target-cpu=native"`.
+//! Accumulator reduction: `cargo bench -p jolt-field --features binary --bench binary_kernels -- reduce`.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use jolt_field::{
@@ -63,6 +64,32 @@ fn bench_accumulators<F: Field + WithAccumulator>(c: &mut Criterion, name: &str)
     group.finish();
 }
 
+fn bench_reduction<F: Field + WithAccumulator>(c: &mut Criterion, name: &str) {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x7265_6475_6365);
+    let states: Vec<_> = (0..1024)
+        .map(|_| {
+            let mut acc = F::Accumulator::default();
+            acc.fmadd(F::random(&mut rng), F::random(&mut rng));
+            acc
+        })
+        .collect();
+    let mut output = vec![F::zero(); states.len()];
+    let mut group = c.benchmark_group(name);
+    let _ = group.bench_function("reduce", |bencher| {
+        bencher.iter(|| black_box(black_box(states[0]).reduce()));
+    });
+    let _ = group.throughput(Throughput::Elements(1024));
+    let _ = group.bench_function("reduce_slice", |bencher| {
+        bencher.iter(|| {
+            for (dest, &acc) in output.iter_mut().zip(black_box(&states)) {
+                *dest = acc.reduce();
+            }
+            let _ = black_box(&output);
+        });
+    });
+    group.finish();
+}
+
 fn binary_kernels(c: &mut Criterion) {
     let a64 = F64::from_raw(0xfedc_ba98_7654_3210);
     let b64 = F64::from_raw(0x89ab_cdef_0123_4567);
@@ -82,6 +109,8 @@ fn binary_kernels(c: &mut Criterion) {
     bench_accumulators::<F64>(c, "F64");
     bench_accumulators::<F128>(c, "F128");
     bench_accumulators::<F192>(c, "F192");
+    bench_reduction::<F64>(c, "F64");
+    bench_reduction::<F192>(c, "F192");
     bench_field(c, "F64", a64, b64);
     bench_field(c, "F128", a128, b128);
     bench_field(

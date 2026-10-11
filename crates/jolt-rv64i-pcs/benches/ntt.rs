@@ -1,5 +1,7 @@
 //! Transform measurements at `t=20,22`, with fixtures and warm pools outside timing.
 //! `cargo bench -p jolt-rv64i-pcs --bench ntt -- --samples 5` reports CSV rows.
+//! The AArch64 kernel requires `--features arch` and the `aes` target feature.
+//! Compile with `RUSTFLAGS="-C target-cpu=native"`; other targets use the safe path.
 //! Preserve that executable, rebuild after a change, then run the new executable
 //! with `--compare <baseline-executable> --log-t 20,22 --threads 1,12 --samples 5`.
 //! Each batch runs one sample in each executable, alternating baseline/current

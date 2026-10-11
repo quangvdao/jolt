@@ -12,6 +12,7 @@ use jolt_rv64i_verifier::ids::{
     BytecodeCycleDerived, CycleWeight, DerivedId, OpeningId, RelationId, VirtualPolynomial,
 };
 use jolt_rv64i_verifier::points::{self, PointsError};
+use jolt_rv64i_verifier::public::bytecode::BytecodeWeights;
 use jolt_rv64i_verifier::stages::stage6a::{
     BytecodeReadAddress, BytecodeReadAddressChallenges, BytecodeReadAddressInputClaims,
     BytecodeReadAddressOutputClaims,
@@ -19,7 +20,9 @@ use jolt_rv64i_verifier::stages::stage6a::{
 use jolt_rv64i_verifier::stages::stage6b::BytecodeReadCycle;
 use jolt_sumcheck::{ProveRounds, SumcheckError};
 use jolt_verifier::stages::relations::ConcreteSumcheck;
+use rayon::prelude::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 #[derive(Default)]
 pub struct BytecodeReadAddressPrepare;
@@ -31,6 +34,25 @@ impl BytecodeReadAddressPrepare {
     /// Weight preparation and all output allocations are included in this operation.
     pub fn public_tables<F: JoltField>(
         &self,
+        bytecode: &Bytecode,
+        relation: &BytecodeReadAddress<F>,
+        challenges: &BytecodeReadAddressChallenges<F>,
+    ) -> Result<[Vec<F>; 5], KernelError<F>> {
+        if rayon::current_num_threads() == 1 || bytecode.rows().len() < 8192 {
+            return Self::serial_tables(bytecode, relation, challenges);
+        }
+        let weights =
+            relation
+                .public_weights(challenges)
+                .map_err(|error| KernelError::InvalidGeometry {
+                    reason: error.to_string(),
+                })?;
+        Self::parallel_tables(bytecode, &weights)
+    }
+
+    // Keep the serial loop's code generation independent of the parallel collector.
+    #[inline(never)]
+    fn serial_tables<F: JoltField>(
         bytecode: &Bytecode,
         relation: &BytecodeReadAddress<F>,
         challenges: &BytecodeReadAddressChallenges<F>,
@@ -52,6 +74,42 @@ impl BytecodeReadAddressPrepare {
             }
         }
         Ok(h)
+    }
+    fn parallel_tables<F: JoltField>(
+        bytecode: &Bytecode,
+        weights: &BytecodeWeights<F>,
+    ) -> Result<[Vec<F>; 5], KernelError<F>> {
+        let first_error = Mutex::new(None::<(usize, PointsError)>);
+        let (h0, (h1, (h2, (h3, h4)))) = bytecode
+            .rows()
+            .par_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let values = match weights.row(row) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        let mut first = first_error
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if first.as_ref().is_none_or(|(previous, _)| index < *previous) {
+                            *first = Some((index, error));
+                        }
+                        [F::zero(); 5]
+                    }
+                };
+                let [h0, h1, h2, h3, h4] = values;
+                (h0, (h1, (h2, (h3, h4))))
+            })
+            .collect::<(Vec<F>, (Vec<F>, (Vec<F>, (Vec<F>, Vec<F>))))>();
+        if let Some((_, error)) = first_error
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            return Err(KernelError::InvalidGeometry {
+                reason: error.to_string(),
+            });
+        }
+        Ok([h0, h1, h2, h3, h4])
     }
 }
 
